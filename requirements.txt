@@ -1,0 +1,20 @@
+# Core dependencies
+PyQt5==5.15.7
+opencv-python==4.6.0.66
+numpy==1.23.3
+pillow==9.2.0
+
+# Video processing
+moviepy==1.0.3
+ffmpeg-python==0.2.0
+
+# Machine learning and tracking
+torch==1.12.1
+torchvision==0.13.1
+filterpy==1.4.5  # For Kalman filter
+scikit-learn==1.1.2
+
+# Utilities
+pyyaml==6.0
+tqdm==4.64.1
+matplotlib==3.6.0

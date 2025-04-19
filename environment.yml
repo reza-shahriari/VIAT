@@ -1,0 +1,23 @@
+name: vat
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pip=22.2
+  - pyqt=5.15.7
+  - opencv=4.6.0
+  - numpy=1.23.3
+  - pillow=9.2.0
+  - ffmpeg=4.4.2
+  # - pytorch=1.12.1
+  # - torchvision=0.13.1
+  - matplotlib=3.6.0
+  - pyyaml=6.0
+  - tqdm=4.64.1
+  - scikit-learn=1.1.2
+  - pip:
+    - moviepy==1.0.3
+    - ffmpeg-python==0.2.0
+    - filterpy==1.4.5
