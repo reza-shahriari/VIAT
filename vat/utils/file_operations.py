@@ -1,0 +1,279 @@
+import os
+import json
+import cv2
+import numpy as np
+from PyQt5.QtCore import QRect
+from PyQt5.QtGui import QColor
+
+def save_project(filename, annotations, class_colors):
+    """Save project to file"""
+    data = {
+        "annotations": [],
+        "classes": {}
+    }
+    
+    # Convert annotations to serializable format
+    for annotation in annotations:
+        ann_data = {
+            "id": annotation.id,
+            "class": annotation.class_name,
+            "rect": {
+                "x": annotation.rect.x(),
+                "y": annotation.rect.y(),
+                "width": annotation.rect.width(),
+                "height": annotation.rect.height()
+            },
+            "attributes": annotation.attributes
+        }
+        data["annotations"].append(ann_data)
+    
+    # Convert class colors to serializable format
+    for class_name, color in class_colors.items():
+        data["classes"][class_name] = {
+            "r": color.red(),
+            "g": color.green(),
+            "b": color.blue()
+        }
+    
+    # Save to file
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def load_project(filename, BoundingBox):
+    """Load project from file"""
+    with open(filename, 'r') as f:
+        data = json.load(f)
+    
+    annotations = []
+    class_colors = {}
+    
+    # Load class colors
+    for class_name, color_data in data.get("classes", {}).items():
+        class_colors[class_name] = QColor(
+            color_data.get("r", 255),
+            color_data.get("g", 0),
+            color_data.get("b", 0)
+        )
+    
+    # Load annotations
+    for ann_data in data.get("annotations", []):
+        rect_data = ann_data.get("rect", {})
+        rect = QRect(
+            rect_data.get("x", 0),
+            rect_data.get("y", 0),
+            rect_data.get("width", 0),
+            rect_data.get("height", 0)
+        )
+        
+        class_name = ann_data.get("class", "Unknown")
+        color = class_colors.get(class_name, QColor(255, 0, 0))
+        
+        bbox = BoundingBox(rect, class_name, ann_data.get("attributes", {}), color)
+        bbox.id = ann_data.get("id", bbox.id)  # Use saved ID if available
+        
+        annotations.append(bbox)
+    
+    return annotations, class_colors
+
+def export_annotations(filename, annotations, image_width, image_height, format_type="coco"):
+    """Export annotations to various formats"""
+    if format_type == "coco":
+        export_coco(filename, annotations, image_width, image_height)
+    elif format_type == "yolo":
+        export_yolo(filename, annotations, image_width, image_height)
+    elif format_type == "pascal_voc":
+        export_pascal_voc(filename, annotations, image_width, image_height)
+    else:
+        raise ValueError(f"Unsupported export format: {format_type}")
+
+def export_coco(filename, annotations, image_width, image_height):
+    """Export annotations in COCO format"""
+    data = {
+        "images": [
+            {
+                "id": 1,
+                "width": image_width,
+                "height": image_height,
+                "file_name": os.path.basename(filename).replace(".json", ".jpg")
+            }
+        ],
+        "annotations": [],
+        "categories": []
+    }
+    
+    # Create categories
+    categories = {}
+    category_id = 1
+    
+    for annotation in annotations:
+        if annotation.class_name not in categories:
+            categories[annotation.class_name] = category_id
+            data["categories"].append({
+                "id": category_id,
+                "name": annotation.class_name,
+                "supercategory": "none"
+            })
+            category_id += 1
+    
+    # Create annotations
+    annotation_id = 1
+    for annotation in annotations:
+        x, y, w, h = annotation.rect.x(), annotation.rect.y(), annotation.rect.width(), annotation.rect.height()
+        
+        ann_data = {
+            "id": annotation_id,
+            "image_id": 1,
+            "category_id": categories[annotation.class_name],
+            "bbox": [x, y, w, h],
+            "area": w * h,
+            "segmentation": [],
+            "iscrowd": 0
+        }
+        
+        # Add attributes
+        if hasattr(annotation, 'attributes') and annotation.attributes:
+            attributes = {}
+            for attr_name, attr_value in annotation.attributes.items():
+                if attr_value != -1:  # Only export non-default attributes
+                    attributes[attr_name] = attr_value
+            
+            if attributes:
+                ann_data["attributes"] = attributes
+        
+        data["annotations"].append(ann_data)
+        annotation_id += 1
+    
+    # Save to file
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2)
+def export_yolo(filename, annotations, image_width, image_height):
+    """Export annotations in YOLO format"""
+    # Create class mapping
+    classes = sorted(set(a.class_name for a in annotations))
+    class_to_id = {cls: i for i, cls in enumerate(classes)}
+    
+    # Save class mapping
+    classes_file = filename.replace(".txt", "_classes.txt")
+    with open(classes_file, 'w') as f:
+        for cls in classes:
+            f.write(f"{cls}\n")
+    
+    # Save annotations
+    with open(filename, 'w') as f:
+        for annotation in annotations:
+            # Convert to YOLO format: class_id, x_center, y_center, width, height
+            # All values normalized to [0, 1]
+            class_id = class_to_id[annotation.class_name]
+            x = annotation.rect.x()
+            y = annotation.rect.y()
+            w = annotation.rect.width()
+            h = annotation.rect.height()
+            
+            # Convert to center coordinates and normalize
+            x_center = (x + w / 2) / image_width
+            y_center = (y + h / 2) / image_height
+            norm_width = w / image_width
+            norm_height = h / image_height
+            
+            line = f"{class_id} {x_center:.6f} {y_center:.6f} {norm_width:.6f} {norm_height:.6f}"
+            
+            # Add attributes as comments (since YOLO format doesn't support attributes directly)
+            if hasattr(annotation, 'attributes') and annotation.attributes:
+                attr_parts = []
+                for attr_name, attr_value in annotation.attributes.items():
+                    if attr_value != -1:  # Only export non-default attributes
+                        attr_parts.append(f"{attr_name}:{attr_value}")
+                
+                if attr_parts:
+                    line += f" # {','.join(attr_parts)}"
+            
+            f.write(line + "\n")
+    
+    # Save attributes in a separate file for reference
+    attributes_file = filename.replace(".txt", "_attributes.json")
+    attributes_data = {}
+    
+    for i, annotation in enumerate(annotations):
+        if hasattr(annotation, 'attributes') and annotation.attributes:
+            attrs = {}
+            for attr_name, attr_value in annotation.attributes.items():
+                if attr_value != -1:  # Only export non-default attributes
+                    attrs[attr_name] = attr_value
+            
+            if attrs:
+                attributes_data[i] = {
+                    "class": annotation.class_name,
+                    "attributes": attrs
+                }
+    
+    if attributes_data:
+        with open(attributes_file, 'w') as f:
+            json.dump(attributes_data, f, indent=2)
+
+def export_pascal_voc(filename, annotations, image_width, image_height):
+    """Export annotations in Pascal VOC XML format"""
+    from xml.etree.ElementTree import Element, SubElement, tostring
+    from xml.dom import minidom
+    
+    root = Element('annotation')
+    
+    # Add basic image info
+    folder = SubElement(root, 'folder')
+    folder.text = 'images'
+    
+    filename_elem = SubElement(root, 'filename')
+    filename_elem.text = os.path.basename(filename).replace(".xml", ".jpg")
+    
+    size = SubElement(root, 'size')
+    width_elem = SubElement(size, 'width')
+    width_elem.text = str(image_width)
+    height_elem = SubElement(size, 'height')
+    height_elem.text = str(image_height)
+    depth = SubElement(size, 'depth')
+    depth.text = '3'
+    
+    # Add each object (annotation)
+    for annotation in annotations:
+        obj = SubElement(root, 'object')
+        
+        name = SubElement(obj, 'name')
+        name.text = annotation.class_name
+        
+        pose = SubElement(obj, 'pose')
+        pose.text = 'Unspecified'
+        
+        truncated = SubElement(obj, 'truncated')
+        truncated.text = '0'
+        
+        difficult = SubElement(obj, 'difficult')
+        difficult.text = '0'
+        
+        bndbox = SubElement(obj, 'bndbox')
+        xmin = SubElement(bndbox, 'xmin')
+        xmin.text = str(annotation.rect.x())
+        ymin = SubElement(bndbox, 'ymin')
+        ymin.text = str(annotation.rect.y())
+        xmax = SubElement(bndbox, 'xmax')
+        xmax.text = str(annotation.rect.x() + annotation.rect.width())
+        ymax = SubElement(bndbox, 'ymax')
+        ymax.text = str(annotation.rect.y() + annotation.rect.height())
+        
+        # Add attributes
+        if hasattr(annotation, 'attributes') and annotation.attributes:
+            attributes = SubElement(obj, 'attributes')
+            for attr_name, attr_value in annotation.attributes.items():
+                if attr_value != -1:  # Only export non-default attributes
+                    attr = SubElement(attributes, 'attribute')
+                    attr_name_elem = SubElement(attr, 'name')
+                    attr_name_elem.text = attr_name
+                    attr_value_elem = SubElement(attr, 'value')
+                    attr_value_elem.text = str(attr_value)
+    
+    # Convert to pretty XML
+    rough_string = tostring(root, 'utf-8')
+    reparsed = minidom.parseString(rough_string)
+    pretty_xml = reparsed.toprettyxml(indent="  ")
+    
+    # Save to file
+    with open(filename, 'w') as f:
+        f.write(pretty_xml)
