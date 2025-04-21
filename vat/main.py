@@ -138,21 +138,31 @@ class VideoAnnotationTool(QMainWindow):
         
         # Open Video action
         open_action = QAction("Open Video", self)
+        open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_video)
         file_menu.addAction(open_action)
         
         # Save Project action
         save_action = QAction("Save Project", self)
+        save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
         
         # Load Project action
         load_action = QAction("Load Project", self)
+        load_action.setShortcut("Ctrl+L")
         load_action.triggered.connect(self.load_project)
         file_menu.addAction(load_action)
         
+        # Import Annotations action
+        import_action = QAction("Import Annotations", self)
+        import_action.setShortcut("Ctrl+I")
+        import_action.triggered.connect(self.import_annotations)
+        file_menu.addAction(import_action)
+        
         # Export Annotations action
         export_action = QAction("Export Annotations", self)
+        export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self.export_annotations)
         file_menu.addAction(export_action)
         
@@ -160,8 +170,10 @@ class VideoAnnotationTool(QMainWindow):
         
         # Exit action
         exit_action = QAction("Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
     
     def create_edit_menu(self, menubar):
         """Create the Edit menu and its actions."""
@@ -363,6 +375,10 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.set_frame(frame)
             self.update_frame_info()
             self.statusBar.showMessage(f"Loaded video: {os.path.basename(filename)}")
+            
+            # Check for annotation files with the same name
+            self.check_for_annotation_files(filename)
+            
             return True
         else:
             QMessageBox.critical(self, "Error", "Could not read video frame!")
@@ -370,6 +386,88 @@ class VideoAnnotationTool(QMainWindow):
             self.cap = None
             return False
 
+    def check_for_annotation_files(self, video_filename):
+        """
+        Check if annotation files with the same base name as the video exist.
+        If found, ask the user if they want to import them.
+        
+        Args:
+            video_filename (str): Path to the video file
+        """
+        # Get the directory and base name without extension
+        directory = os.path.dirname(video_filename)
+        base_name = os.path.splitext(os.path.basename(video_filename))[0]
+        
+        # List of possible annotation file extensions to check
+        extensions = ['.txt', '.json', '.xml']
+        
+        # Find matching annotation files
+        annotation_files = []
+        for ext in extensions:
+            potential_file = os.path.join(directory, base_name + ext)
+            if os.path.exists(potential_file):
+                annotation_files.append(potential_file)
+        
+        if annotation_files:
+            # Create a message with the found files
+            message = "Found the following annotation file(s):\n\n"
+            for file in annotation_files:
+                message += f"- {os.path.basename(file)}\n"
+            message += "\nWould you like to import annotations from one of these files?"
+            
+            # Show dialog asking if user wants to import
+            reply = QMessageBox.question(
+                self, "Annotation Files Found", 
+                message,
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # If multiple files found, let user choose which one to import
+                if len(annotation_files) > 1:
+                    self.show_annotation_file_selection_dialog(annotation_files)
+                else:
+                    # Only one file found, import it directly
+                    self.import_annotations(annotation_files[0])
+
+    def show_annotation_file_selection_dialog(self, annotation_files):
+        """
+        Show a dialog for the user to select which annotation file to import.
+        
+        Args:
+            annotation_files (list): List of annotation file paths
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Annotation File")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Add explanation label
+        label = QLabel("Multiple annotation files found. Please select which one to import:")
+        layout.addWidget(label)
+        
+        # Create list widget with annotation files
+        list_widget = QListWidget()
+        for file in annotation_files:
+            item = QListWidgetItem(os.path.basename(file))
+            item.setData(Qt.UserRole, file)  # Store full path as data
+            list_widget.addItem(item)
+        
+        layout.addWidget(list_widget)
+        
+        # Add buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        # Show dialog and process result
+        if dialog.exec_() == QDialog.Accepted:
+            selected_items = list_widget.selectedItems()
+            if selected_items:
+                selected_file = selected_items[0].data(Qt.UserRole)
+                self.import_annotations(selected_file)
 
     def update_frame_info(self):
         """Update frame information in the UI."""
@@ -399,10 +497,6 @@ class VideoAnnotationTool(QMainWindow):
         
         # Update the canvas
         self.canvas.update()
-    def update_annotation_list(self):
-        """Update the annotations list widget."""
-        if hasattr(self, 'annotation_dock'):
-            self.annotation_dock.update_annotation_list()
 
     def load_current_frame_annotations(self):
         """Load annotations for the current frame into the canvas."""
@@ -423,6 +517,7 @@ class VideoAnnotationTool(QMainWindow):
         
         # Update the canvas
         self.canvas.update()
+  
     def slider_changed(self, value):
         """Handle slider value changes."""
         if self.cap and self.cap.isOpened():
@@ -484,7 +579,6 @@ class VideoAnnotationTool(QMainWindow):
                     
                     # Load annotations for the new frame
                     self.load_current_frame_annotations()
-
 
     def play_pause_video(self):
         """Toggle between playing and pausing the video."""
@@ -885,6 +979,446 @@ class VideoAnnotationTool(QMainWindow):
             # Update annotation list in UI if it exists
             if hasattr(self, 'update_annotation_list'):
                 self.update_annotation_list()
+    #
+    # Import handling methods
+    #
+    def update_class_ui_after_import(self):
+        """Update the class-related UI components after importing annotations."""
+        # Update class selector in toolbar
+        if hasattr(self, 'toolbar') and hasattr(self.toolbar, 'update_class_selector'):
+            self.toolbar.update_class_selector()
+        
+        # Update class dock if it exists
+        if hasattr(self, 'class_dock') and hasattr(self.class_dock, 'update_class_list'):
+            self.class_dock.update_class_list()
+        
+        # Set current class to first class if available
+        if self.canvas.class_colors and hasattr(self.canvas, 'set_current_class'):
+            first_class = next(iter(self.canvas.class_colors))
+            self.canvas.set_current_class(first_class)
+            
+            # Update class selector if it exists
+            if hasattr(self, 'class_selector') and self.class_selector.count() > 0:
+                self.class_selector.setCurrentText(first_class)
+    def import_annotations(self, filename=None):
+        """
+        Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya Text).
+        The format is automatically detected based on file extension and content.
+        
+        Args:
+            filename (str, optional): Path to the annotation file. If None, a file dialog will be shown.
+        """
+        if not self.cap:
+            QMessageBox.warning(self, "Import Annotations", "Please open a video first!")
+            return
+        
+        # If no filename provided, show file dialog to select one
+        if not filename:
+            filename, _ = QFileDialog.getOpenFileName(
+                self, "Import Annotations", "", 
+                "All Supported Files (*.json *.xml *.txt);;JSON Files (*.json);;XML Files (*.xml);;Text Files (*.txt);;All Files (*)"
+            )
+            
+            if not filename:
+                return
+        
+        try:
+            # Detect format based on file extension and content
+            format_type = self.detect_annotation_format(filename)
+            
+            if not format_type:
+                QMessageBox.warning(self, "Import Annotations", 
+                                "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, or Raya format.")
+                return
+            
+            # Import annotations based on detected format
+            self.statusBar.showMessage(f"Importing {format_type} annotations...")
+            
+            # Get image dimensions from canvas
+            image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
+            image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
+            
+            # Import annotations based on format
+            if format_type == "COCO":
+                self.import_coco_annotations(filename, image_width, image_height)
+            elif format_type == "YOLO":
+                self.import_yolo_annotations(filename, image_width, image_height)
+            elif format_type == "Pascal VOC":
+                self.import_pascal_voc_annotations(filename, image_width, image_height)
+            elif format_type == "Raya":
+                self.import_raya_annotations(filename, image_width, image_height)
+
+            
+            # Update UI
+            self.update_annotation_list()
+            self.update_class_ui_after_import()
+            self.canvas.update()
+            
+            self.statusBar.showMessage(f"Successfully imported {format_type} annotations from {os.path.basename(filename)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import annotations: {str(e)}")
+
+
+    def detect_annotation_format(self, filename):
+        """
+        Detect the annotation format based on file extension and content.
+        
+        Args:
+            filename (str): Path to the annotation file
+            
+        Returns:
+            str: Detected format ("COCO", "YOLO", "Pascal VOC", "Raya") or None if not detected
+        """
+        # Check file extension
+        ext = os.path.splitext(filename)[1].lower()
+        
+        # Read file content
+        try:
+            with open(filename, 'r') as f:
+                content = f.read(1000)  # Read first 1000 chars to detect format
+        except:
+            return None
+        
+        # Detect format based on extension and content
+        if ext == '.json':
+            if '"images"' in content and '"annotations"' in content and '"categories"' in content:
+                return "COCO"
+        elif ext == '.xml':
+            if '<annotation>' in content and '<object>' in content:
+                return "Pascal VOC"
+        elif ext == '.txt':
+            # Check for Raya text format first (lines with [] or [class,x,y,w,h,size,quality])
+            lines = content.strip().split('\n')
+            if lines and all(line.strip() == "[]" or 
+                            (line.strip().startswith('[') and 
+                            line.strip().endswith(';') and 
+                            ',' in line) 
+                            for line in lines if line.strip()):
+                return "Raya"
+            
+            # YOLO format typically has space-separated numbers (class x y w h)
+            if lines and all(len(line.split()) == 5 and line.split()[0].isdigit() for line in lines if line.strip()):
+                return "YOLO"
+        
+        # If no format detected, try more detailed analysis
+        if ext == '.json':
+            try:
+                import json
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    if 'annotations' in data and 'images' in data:
+                        return "COCO"
+            except:
+                pass
+        
+        return "Raya"
+
+    def import_coco_annotations(self, filename, image_width, image_height):
+        """
+        Import annotations from COCO JSON format.
+        
+        Args:
+            filename (str): Path to the COCO JSON file
+            image_width (int): Width of the image/video frame
+            image_height (int): Height of the image/video frame
+        """
+        import json
+        
+        with open(filename, 'r') as f:
+            data = json.load(f)
+        
+        # Create a mapping from category ID to category name
+        categories = {cat['id']: cat['name'] for cat in data.get('categories', [])}
+        
+        # Create a mapping from image ID to frame number
+        images = {img['id']: img.get('frame_id', 0) for img in data.get('images', [])}
+        
+        # Process annotations
+        for ann in data.get('annotations', []):
+            image_id = ann.get('image_id')
+            category_id = ann.get('category_id')
+            bbox = ann.get('bbox', [0, 0, 0, 0])  # [x, y, width, height]
+            
+            # Skip if missing essential data
+            if not all([image_id is not None, category_id is not None, bbox]):
+                continue
+            
+            # Get frame number and category name
+            frame_num = images.get(image_id, 0)
+            class_name = categories.get(category_id, f"class_{category_id}")
+            
+            # Create QRect from COCO bbox [x, y, width, height]
+            rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+            
+            # Get or create color for this class
+            if class_name not in self.canvas.class_colors:
+                self.canvas.class_colors[class_name] = QColor(
+                    random.randint(0, 255), 
+                    random.randint(0, 255), 
+                    random.randint(0, 255)
+                )
+            color = self.canvas.class_colors[class_name]
+            
+            # Create attributes dictionary
+            attributes = {
+                "Size": ann.get('size', -1),
+                "Quality": ann.get('quality', -1),
+                "id": str(ann.get('id', ''))
+            }
+            
+            # Create bounding box
+            bbox_obj = BoundingBox(rect, class_name, attributes, color)
+            
+            # Add to frame annotations
+            if frame_num not in self.frame_annotations:
+                self.frame_annotations[frame_num] = []
+            self.frame_annotations[frame_num].append(bbox_obj)
+            
+            # If this is the current frame, add to canvas annotations
+            if frame_num == self.current_frame:
+                self.canvas.annotations.append(bbox_obj)
+
+    def import_yolo_annotations(self, filename, image_width, image_height):
+        """
+        Import annotations from YOLO format.
+        
+        Args:
+            filename (str): Path to the YOLO txt file
+            image_width (int): Width of the image/video frame
+            image_height (int): Height of the image/video frame
+        """
+        # YOLO format: class_id x_center y_center width height
+        # All values are normalized [0-1]
+        
+        # First, try to find a classes.txt file in the same directory
+        classes_file = os.path.join(os.path.dirname(filename), 'classes.txt')
+        class_names = []
+        
+        if os.path.exists(classes_file):
+            with open(classes_file, 'r') as f:
+                class_names = [line.strip() for line in f.readlines()]
+        
+        # Read annotations
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+        
+        # Process each line
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue
+            
+            try:
+                class_id = int(parts[0])
+                x_center = float(parts[1]) * image_width
+                y_center = float(parts[2]) * image_height
+                width = float(parts[3]) * image_width
+                height = float(parts[4]) * image_height
+                
+                # Calculate top-left corner from center
+                x = x_center - (width / 2)
+                y = y_center - (height / 2)
+                
+                # Create QRect
+                rect = QRect(int(x), int(y), int(width), int(height))
+                
+                # Get class name
+                if class_id < len(class_names):
+                    class_name = class_names[class_id]
+                else:
+                    class_name = f"class_{class_id}"
+                
+                # Get or create color for this class
+                if class_name not in self.canvas.class_colors:
+                    self.canvas.class_colors[class_name] = QColor(
+                        random.randint(0, 255), 
+                        random.randint(0, 255), 
+                        random.randint(0, 255)
+                    )
+                color = self.canvas.class_colors[class_name]
+                
+                # Create attributes dictionary
+                attributes = {
+                    "Size": -1,
+                    "Quality": -1
+                }
+                
+                # Create bounding box
+                bbox_obj = BoundingBox(rect, class_name, attributes, color)
+                
+                # Add to current frame annotations
+                self.canvas.annotations.append(bbox_obj)
+                self.frame_annotations[self.current_frame] = self.canvas.annotations
+                
+            except (ValueError, IndexError) as e:
+                print(f"Error parsing YOLO line: {line}. Error: {e}")
+
+    def import_pascal_voc_annotations(self, filename, image_width, image_height):
+        """
+        Import annotations from Pascal VOC XML format.
+        
+        Args:
+            filename (str): Path to the Pascal VOC XML file
+            image_width (int): Width of the image/video frame
+            image_height (int): Height of the image/video frame
+        """
+        import xml.etree.ElementTree as ET
+        
+        try:
+            tree = ET.parse(filename)
+            root = tree.getroot()
+            
+            # Process each object
+            for obj in root.findall('./object'):
+                class_name = obj.find('name').text
+                
+                # Get bounding box
+                bndbox = obj.find('bndbox')
+                xmin = int(float(bndbox.find('xmin').text))
+                ymin = int(float(bndbox.find('ymin').text))
+                xmax = int(float(bndbox.find('xmax').text))
+                ymax = int(float(bndbox.find('ymax').text))
+                
+                # Create QRect
+                rect = QRect(xmin, ymin, xmax - xmin, ymax - ymin)
+                
+                # Get or create color for this class
+                if class_name not in self.canvas.class_colors:
+                    self.canvas.class_colors[class_name] = QColor(
+                        random.randint(0, 255), 
+                        random.randint(0, 255), 
+                        random.randint(0, 255)
+                    )
+                color = self.canvas.class_colors[class_name]
+                
+                # Create attributes dictionary
+                attributes = {
+                    "Size": -1,
+                    "Quality": -1
+                }
+                
+                # Check for additional attributes
+                for attr in obj.findall('./attribute'):
+                    name = attr.find('name')
+                    value = attr.find('value')
+                    if name is not None and value is not None:
+                        attributes[name.text] = value.text
+                
+                # Create bounding box
+                bbox_obj = BoundingBox(rect, class_name, attributes, color)
+                
+                # Add to current frame annotations
+                self.canvas.annotations.append(bbox_obj)
+                self.frame_annotations[self.current_frame] = self.canvas.annotations
+                
+        except Exception as e:
+            raise Exception(f"Error parsing Pascal VOC XML: {str(e)}")
+
+    def import_raya_annotations(self, filename, image_width, image_height):
+        """
+        Import annotations from Raya text format.
+        
+        Format: [class,x,y,width,height,size,quality,shadow(optional)];
+        If no detection: []
+        
+        Args:
+            filename (str): Path to the Raya text file
+            image_width (int): Width of the image/video frame
+            image_height (int): Height of the image/video frame
+        """
+        try:
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            
+            # Process each line (each line represents a frame)
+            for frame_num, line in enumerate(lines):
+                line = line.strip()
+                
+                # Skip empty frames or frames with no detections
+                if not line or line == "[]":
+                    continue
+                
+                # Check if the line contains annotations
+                if not ('[' in line and ']' in line):
+                    continue
+                    
+                # Extract content between the outermost brackets
+                start_idx = line.find('[')
+                end_idx = line.rfind(']')
+                if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
+                    continue
+                    
+                content = line[start_idx+1:end_idx]
+                
+                # Split by semicolon for multiple annotations
+                annotations = content.split(';')
+                frame_annotations = []
+                
+                for annotation in annotations:
+                    if not annotation.strip():
+                        continue
+                    
+                    # Parse the annotation values
+                    parts = annotation.split(',')
+                    
+                    # Ensure we have at least the minimum required fields
+                    if len(parts) < 6:
+                        continue
+                    
+                    try:
+                        # Remove any remaining brackets
+                        parts = [p.strip('[]') for p in parts]
+                        
+                        class_id = int(parts[0])
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+                        size = float(parts[5])
+                        quality = float(parts[6]) if len(parts) > 6 else 100.0
+                        shadow = float(parts[7]) if len(parts) > 7 else 0.0
+                        
+                        # Create class name based on class ID
+                        class_name = "Drone"
+                        
+                        # Create QRect
+                        rect = QRect(int(x), int(y), int(width), int(height))
+                        
+                        # Get or create color for this class
+                        if class_name not in self.canvas.class_colors:
+                            self.canvas.class_colors[class_name] = QColor(
+                                random.randint(0, 255), 
+                                random.randint(0, 255), 
+                                random.randint(0, 255)
+                            )
+                        color = self.canvas.class_colors[class_name]
+                        
+                        # Create attributes dictionary
+                        attributes = {
+                            "Size": int(size),
+                            "Quality": int(quality),
+                            "Shadow": shadow if len(parts) > 7 else 0
+                        }
+                        
+                        # Create bounding box
+                        bbox_obj = BoundingBox(rect, class_name, attributes, color)
+                        frame_annotations.append(bbox_obj)
+                        
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing Raya annotation: {annotation}. Error: {e}")
+                
+                # Add to frame annotations
+                if frame_annotations:
+                    self.frame_annotations[frame_num] = frame_annotations
+                    
+                    # If this is the current frame, update canvas annotations
+                    if frame_num == self.current_frame:
+                        self.canvas.annotations = frame_annotations.copy()
+                        
+        except Exception as e:
+            raise Exception(f"Error parsing Raya text file: {str(e)}")
+
+
     
     #
     # Class handling methods
