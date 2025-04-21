@@ -121,6 +121,10 @@ class VideoCanvas(QWidget):
                 # Convert annotation rectangle to display coordinates
                 display_rect = self.image_to_display_rect(annotation.rect)
                 
+                # Skip if the rectangle is invalid or too small
+                if display_rect.width() <= 0 or display_rect.height() <= 0:
+                    continue
+                    
                 # Set pen based on selection status
                 if annotation == self.selected_annotation:
                     pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
@@ -130,28 +134,93 @@ class VideoCanvas(QWidget):
                 painter.setPen(pen)
                 painter.drawRect(display_rect)
                 
-                # Draw class label
-                text_rect = QRect(display_rect.left(), display_rect.top() - 20, 
-                                display_rect.width(), 20)
-                painter.fillRect(text_rect, annotation.color)
-                painter.setPen(QPen(QColor(0, 0, 0)))
-                painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+                # Determine if the box is too small for internal labels
+                is_small_box = display_rect.width() < 60 or display_rect.height() < 40
                 
-                # Draw attributes below the bounding box
-                if annotation.attributes:
-                    # Create attribute text
-                    attr_text = ""
-                    for key, value in annotation.attributes.items():
-                        attr_text += f"{key}: {value}, "
-                    attr_text = attr_text.rstrip(", ")
-                    if attr_text:
-                        # Create attribute label rectangle
-                        attr_rect = QRect(display_rect.left(), display_rect.bottom(), 
-                                        display_rect.width(), 20)
-                        painter.fillRect(attr_rect, QColor(40, 40, 40, 180))  # Semi-transparent background
-                        painter.setPen(QPen(QColor(255, 255, 255)))
-                        painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
-                
+                # For small boxes, draw labels outside the box
+                if is_small_box:
+                    # Draw class label above the box
+                    font = painter.font()
+                    font.setPointSize(8)  # Smaller fixed font size for small boxes
+                    painter.setFont(font)
+                    
+                    # Create background for text
+                    text_width = min(max(60, display_rect.width()), 120)  # Min 60px, max 120px
+                    text_height = 16
+                    
+                    # Position the label centered above the box
+                    text_x = display_rect.left() + (display_rect.width() - text_width) / 2
+                    text_y = max(0, display_rect.top() - text_height - 2)  # 2px gap
+                    
+                    text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
+                    
+                    # Draw semi-transparent background
+                    painter.fillRect(text_rect, QColor(annotation.color.red(), 
+                                                    annotation.color.green(), 
+                                                    annotation.color.blue(), 180))
+                    
+                    painter.setPen(QPen(QColor(0, 0, 0)))
+                    painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+                    
+                    # Draw attributes to the right of the box if there's space
+                    if annotation.attributes:
+                        attr_text = ""
+                        for key, value in annotation.attributes.items():
+                            attr_text += f"{key}:{value} "
+                        attr_text = attr_text.strip()
+                        
+                        if attr_text:
+                            attr_width = min(80, max(60, len(attr_text) * 6))
+                            attr_rect = QRect(
+                                int(display_rect.right() + 5), 
+                                int(display_rect.top()),
+                                attr_width, text_height
+                            )
+                            
+                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
+                else:
+                    # For normal sized boxes, draw labels inside the box
+                    # Adjust font size based on box size
+                    font_size = min(10, max(7, int(display_rect.height() / 20)))
+                    font = painter.font()
+                    font.setPointSize(font_size)
+                    painter.setFont(font)
+                    
+                    # Draw class label at the top of the box
+                    label_height = min(20, max(14, int(display_rect.height() * 0.15)))
+                    text_rect = QRect(
+                        display_rect.left(), 
+                        display_rect.top(), 
+                        display_rect.width(), 
+                        label_height
+                    )
+                    
+                    painter.fillRect(text_rect, annotation.color)
+                    painter.setPen(QPen(QColor(0, 0, 0)))
+                    painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+                    
+                    # Draw attributes at the bottom of the box
+                    if annotation.attributes:
+                        attr_text = ""
+                        for key, value in annotation.attributes.items():
+                            if key in ["Size", "Quality"] and value != -1:
+                                attr_text += f"{key}:{value} "
+                        attr_text = attr_text.strip()
+                        
+                        if attr_text:
+                            attr_rect = QRect(
+                                display_rect.left(), 
+                                display_rect.bottom() - label_height,
+                                display_rect.width(), 
+                                label_height
+                            )
+                            
+                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
+            
             # Draw current annotation if drawing
             if self.is_drawing and self.start_point and self.current_point:
                 rect = QRect(self.start_point, self.current_point).normalized()
