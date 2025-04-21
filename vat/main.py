@@ -315,7 +315,6 @@ class VideoAnnotationTool(QMainWindow):
         
         return playback_widget
 
-
     def setup_playback_timer(self):
         """Set up the timer for video playback."""
         self.play_timer = QTimer()
@@ -347,8 +346,7 @@ class VideoAnnotationTool(QMainWindow):
         """Reset zoom to default level."""
         self.zoom_level = 1.0
         self.canvas.set_zoom(self.zoom_level)
-
-    
+ 
     def open_video(self):
         """Open a video file."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -610,21 +608,30 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Project handling methods
     #
-    
     def save_project(self):
         """Save the current project."""
-        if not self.canvas.annotations:
-            QMessageBox.warning(self, "Save Project", "No annotations to save!")
-            return
-        
         filename, _ = QFileDialog.getSaveFileName(
             self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
         )
         
         if filename:
-            save_project(filename, self.canvas.annotations, self.canvas.class_colors)
+            # Get video path if available
+            video_path = getattr(self, 'video_filename', None)
+            
+            # Save project with additional data
+            save_project(
+                filename, 
+                self.canvas.annotations, 
+                self.canvas.class_colors,
+                video_path=video_path,
+                current_frame=self.current_frame,
+                frame_annotations=self.frame_annotations
+            )
+            
+            self.project_file = filename
+            self.project_modified = False
             self.statusBar.showMessage(f"Project saved to {os.path.basename(filename)}")
-    
+
     def load_project(self):
         """Load a saved project."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -633,22 +640,55 @@ class VideoAnnotationTool(QMainWindow):
         
         if filename:
             try:
-                annotations, class_colors = load_project(filename, BoundingBox)
+                # Load project with additional data
+                annotations, class_colors, video_path, current_frame, frame_annotations = load_project(filename, BoundingBox)
                 
                 # Update canvas
                 self.canvas.annotations = annotations
                 self.canvas.class_colors = class_colors
                 
+                # Store frame annotations
+                self.frame_annotations = frame_annotations
+                
                 # Update UI
                 self.update_annotation_list()
                 self.toolbar.update_class_selector()
                 self.class_dock.update_class_list()
+                
+                # Load video if path is available, but skip auto-detection of annotation files
+                if video_path and os.path.exists(video_path):
+                    # Temporarily store the original method
+                    original_check_method = self.check_for_annotation_files
+                    
+                    # Replace with a dummy method that does nothing
+                    self.check_for_annotation_files = lambda x: None
+                    
+                    # Load the video file
+                    success = self.load_video_file(video_path)
+                    
+                    # Restore the original method
+                    self.check_for_annotation_files = original_check_method
+                    
+                    if success:
+                        # Set to the saved frame
+                        if current_frame > 0 and current_frame < self.total_frames:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+                            ret, frame = self.cap.read()
+                            if ret:
+                                self.current_frame = current_frame
+                                self.canvas.set_frame(frame)
+                                self.update_frame_info()
+                                self.load_current_frame_annotations()
+                
+                self.project_file = filename
+                self.project_modified = False
                 self.canvas.update()
                 
                 self.statusBar.showMessage(f"Project loaded from {os.path.basename(filename)}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
-    
+
+
     def export_annotations(self):
         """Export annotations to various formats."""
         # Check if we have any annotations either in the current frame or across all frames
@@ -679,7 +719,7 @@ class VideoAnnotationTool(QMainWindow):
         # Format selection
         format_label = QLabel("Export Format:")
         format_combo = QComboBox()
-        format_combo.addItems(["COCO JSON", "YOLO TXT", "Pascal VOC XML", "Raya TXT"])
+        format_combo.addItems(["Raya TXT","COCO JSON", "YOLO TXT", "Pascal VOC XML", ])
         
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)

@@ -31,6 +31,7 @@ EDGE_BOTTOM = 3
 EDGE_LEFT = 4
 
 class VideoCanvas(QWidget):
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.main_window = parent  
@@ -74,7 +75,6 @@ class VideoCanvas(QWidget):
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-
     
     def set_frame(self, frame):
         """Set the current frame to display"""
@@ -205,8 +205,7 @@ class VideoCanvas(QWidget):
                     if annotation.attributes:
                         attr_text = ""
                         for key, value in annotation.attributes.items():
-                            if key in ["Size", "Quality"] and value != -1:
-                                attr_text += f"{key}:{value} "
+                            attr_text += f"{key}:{value} "
                         attr_text = attr_text.strip()
                         
                         if attr_text:
@@ -285,7 +284,6 @@ class VideoCanvas(QWidget):
         y = (h - zoomed_height) // 2 + self.pan_offset.y()
             
         return QRect(x, y, zoomed_width, zoomed_height)
-
 
     def display_to_image_pos(self, pos):
         """Convert display coordinates to image coordinates, accounting for zoom"""
@@ -719,3 +717,5 @@ class VideoCanvas(QWidget):
         # If we have a main window, update its zoom level
         if self.main_window and hasattr(self.main_window, 'zoom_level'):
             self.main_window.zoom_level = self.zoom_level
+            
+            

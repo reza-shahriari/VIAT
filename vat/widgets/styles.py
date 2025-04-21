@@ -66,7 +66,6 @@ class StyleManager:
         
         return True
 
-    
     @staticmethod
     def set_light_style():
         """Set a light theme."""
@@ -160,3 +159,5 @@ class StyleManager:
         except Exception:
             # Fallback to default if style application fails
             return cls.set_default_style()
+
+

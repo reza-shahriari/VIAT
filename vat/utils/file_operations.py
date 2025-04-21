@@ -5,11 +5,14 @@ import numpy as np
 from PyQt5.QtCore import QRect
 from PyQt5.QtGui import QColor
 
-def save_project(filename, annotations, class_colors):
+def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, frame_annotations=None):
     """Save project to file"""
     data = {
         "annotations": [],
-        "classes": {}
+        "classes": {},
+        "video_path": video_path,
+        "current_frame": current_frame,
+        "frame_annotations": {}
     }
     
     # Convert annotations to serializable format
@@ -35,6 +38,24 @@ def save_project(filename, annotations, class_colors):
             "b": color.blue()
         }
     
+    # Save frame annotations if provided
+    if frame_annotations:
+        for frame_num, frame_anns in frame_annotations.items():
+            data["frame_annotations"][str(frame_num)] = []
+            for annotation in frame_anns:
+                ann_data = {
+                    "id": annotation.id,
+                    "class": annotation.class_name,
+                    "rect": {
+                        "x": annotation.rect.x(),
+                        "y": annotation.rect.y(),
+                        "width": annotation.rect.width(),
+                        "height": annotation.rect.height()
+                    },
+                    "attributes": annotation.attributes
+                }
+                data["frame_annotations"][str(frame_num)].append(ann_data)
+    
     # Save to file
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
@@ -46,6 +67,9 @@ def load_project(filename, BoundingBox):
     
     annotations = []
     class_colors = {}
+    video_path = data.get("video_path", "")
+    current_frame = data.get("current_frame", 0)
+    frame_annotations = {}
     
     # Load class colors
     for class_name, color_data in data.get("classes", {}).items():
@@ -73,7 +97,32 @@ def load_project(filename, BoundingBox):
         
         annotations.append(bbox)
     
-    return annotations, class_colors
+    # Load frame annotations
+    for frame_num_str, frame_anns_data in data.get("frame_annotations", {}).items():
+        frame_num = int(frame_num_str)
+        frame_anns = []
+        
+        for ann_data in frame_anns_data:
+            rect_data = ann_data.get("rect", {})
+            rect = QRect(
+                rect_data.get("x", 0),
+                rect_data.get("y", 0),
+                rect_data.get("width", 0),
+                rect_data.get("height", 0)
+            )
+            
+            class_name = ann_data.get("class", "Unknown")
+            color = class_colors.get(class_name, QColor(255, 0, 0))
+            
+            bbox = BoundingBox(rect, class_name, ann_data.get("attributes", {}), color)
+            bbox.id = ann_data.get("id", bbox.id)  # Use saved ID if available
+            
+            frame_anns.append(bbox)
+        
+        frame_annotations[frame_num] = frame_anns
+    
+    return annotations, class_colors, video_path, current_frame, frame_annotations
+
 def export_annotations(filename, annotations, image_width, image_height, format_type="coco"):
     """Export annotations to various formats"""
     if format_type == "coco":
@@ -86,7 +135,6 @@ def export_annotations(filename, annotations, image_width, image_height, format_
         export_raya_annotations(filename, annotations)
     else:
         raise ValueError(f"Unsupported export format: {format_type}")
-
 
 def export_coco(filename, annotations, image_width, image_height):
     """Export annotations in COCO format"""
@@ -148,6 +196,7 @@ def export_coco(filename, annotations, image_width, image_height):
     # Save to file
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
+
 def export_yolo(filename, annotations, image_width, image_height):
     """Export annotations in YOLO format"""
     # Create class mapping
@@ -280,7 +329,6 @@ def export_pascal_voc(filename, annotations, image_width, image_height):
     with open(filename, 'w') as f:
         f.write(pretty_xml)
  
-
 def export_raya_annotations(filename, annotations):
     """
     Export annotations to Raya text format.
