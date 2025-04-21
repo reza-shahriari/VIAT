@@ -130,23 +130,19 @@ class AnnotationDock(QDockWidget):
         self.setWidget(widget)
     
     def update_annotation_list(self):
-        """Update the list of annotations for the current frame"""
+        """Update the annotation list with current frame's annotations."""
         self.annotations_list.clear()
         
+        # Get current frame
         current_frame = self.main_window.current_frame
-        if current_frame in self.main_window.frame_annotations:
+        
+        # Check if frame_annotations exists and has entries for the current frame
+        if hasattr(self.main_window, 'frame_annotations') and current_frame in self.main_window.frame_annotations:
+            # Add annotations for the current frame to the list
             for annotation in self.main_window.frame_annotations[current_frame]:
-                # Create list item
-                item = QListWidgetItem()
-                # Store annotation in item data
+                item = QListWidgetItem(f"{annotation.class_name} - {annotation.id if hasattr(annotation, 'id') else ''}")
                 item.setData(Qt.UserRole, annotation)
-                # Create custom widget for this annotation
-                item_widget = AnnotationItemWidget(annotation, self)
-                # Set size hint for proper display
-                item.setSizeHint(item_widget.sizeHint())
-                # Add to list and set custom widget
                 self.annotations_list.addItem(item)
-                self.annotations_list.setItemWidget(item, item_widget)
     
     def on_annotation_selected(self, item):
         """Handle selection of an annotation in the list"""
