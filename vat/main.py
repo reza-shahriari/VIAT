@@ -43,7 +43,9 @@ class VideoAnnotationTool(QMainWindow):
         # Basic window setup
         self.setWindowTitle("Video Annotation Tool")
         self.setGeometry(100, 100, 1200, 800)
-        
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Icon", "Icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         # Initialize properties
         self.init_properties()
         self.video_filename =''
@@ -1117,7 +1119,7 @@ class VideoAnnotationTool(QMainWindow):
         # Read file content
         try:
             with open(filename, 'r') as f:
-                content = f.read(1000)  # Read first 1000 chars to detect format
+                content = f.read() 
         except:
             return None
         
@@ -1129,15 +1131,16 @@ class VideoAnnotationTool(QMainWindow):
             if '<annotation>' in content and '<object>' in content:
                 return "Pascal VOC"
         elif ext == '.txt':
-            # Check for Raya text format first (lines with [] or [class,x,y,w,h,size,quality])
             lines = content.strip().split('\n')
-            if lines and all(line.strip() == "[]" or 
-                            (line.strip().startswith('[') and 
-                            line.strip().endswith(';') and 
-                            ',' in line) 
-                            for line in lines if line.strip()):
+            if lines and all(
+                line.strip() == "[]" or 
+                (line.strip().startswith('[') and 
+                (';' in line) and
+                all(part.count('[') == 1 and (part.endswith('];') or part.endswith(']')) 
+                    for part in line.split(';') if part.strip()))
+                for line in lines if line.strip()
+            ):
                 return "Raya"
-            
             # YOLO format typically has space-separated numbers (class x y w h)
             if lines and all(len(line.split()) == 5 and line.split()[0].isdigit() for line in lines if line.strip()):
                 return "YOLO"
@@ -1153,7 +1156,7 @@ class VideoAnnotationTool(QMainWindow):
             except:
                 pass
         
-        return "Raya"
+        return None
 
     def import_coco_annotations(self, filename, image_width, image_height):
         """
