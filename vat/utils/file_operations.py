@@ -74,7 +74,6 @@ def load_project(filename, BoundingBox):
         annotations.append(bbox)
     
     return annotations, class_colors
-
 def export_annotations(filename, annotations, image_width, image_height, format_type="coco"):
     """Export annotations to various formats"""
     if format_type == "coco":
@@ -83,8 +82,11 @@ def export_annotations(filename, annotations, image_width, image_height, format_
         export_yolo(filename, annotations, image_width, image_height)
     elif format_type == "pascal_voc":
         export_pascal_voc(filename, annotations, image_width, image_height)
+    elif format_type == "raya":
+        export_raya_annotations(filename, annotations)
     else:
         raise ValueError(f"Unsupported export format: {format_type}")
+
 
 def export_coco(filename, annotations, image_width, image_height):
     """Export annotations in COCO format"""
@@ -277,3 +279,64 @@ def export_pascal_voc(filename, annotations, image_width, image_height):
     # Save to file
     with open(filename, 'w') as f:
         f.write(pretty_xml)
+ 
+
+def export_raya_annotations(filename, annotations):
+    """
+    Export annotations to Raya text format.
+    
+    Format: [class,x,y,width,height,size,quality,shadow(optional)];
+    If no detection: []
+    
+    Args:
+        filename (str): Path to save the Raya text file
+        annotations (list): List of annotation objects
+    """
+    try:
+        # Group annotations by frame
+        annotations_by_frame = {}
+        for annotation in annotations:
+            frame_num = getattr(annotation, 'frame', 0)
+            if frame_num not in annotations_by_frame:
+                annotations_by_frame[frame_num] = []
+            annotations_by_frame[frame_num].append(annotation)
+        
+        # Get the maximum frame number
+        max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
+        
+        # Create lines for each frame
+        lines = ["[]"] * (max_frame + 1)
+        
+        # Fill in annotations for frames that have them
+        for frame_num, frame_annotations in annotations_by_frame.items():
+            if not frame_annotations:
+                lines[frame_num] = "[]"
+                continue
+            
+            # Format annotations for this frame
+            frame_str = ""
+            for annotation in frame_annotations:
+                
+                # Get annotation properties
+                rect = annotation.rect
+                class_id = 0  # Default to 0 for Drone class
+                x = rect.x()
+                y = rect.y()
+                width = rect.width()
+                height = rect.height()
+                size = annotation.attributes.get("Size", -1)
+                quality = annotation.attributes.get("Quality", -1)
+                shadow = annotation.attributes.get("Shadow", 0)
+                
+                # Format the annotation with a semicolon after each one
+                frame_str += f"[{class_id},{x},{y},{width},{height},{size},{quality},{shadow}];"
+            
+            lines[frame_num] = frame_str
+        
+        # Write to file
+        with open(filename, 'w') as f:
+            for line in lines:
+                f.write(line + "\n")
+                
+    except Exception as e:
+        raise Exception(f"Error exporting to Raya format: {str(e)}")

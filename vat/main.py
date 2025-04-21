@@ -46,7 +46,7 @@ class VideoAnnotationTool(QMainWindow):
         
         # Initialize properties
         self.init_properties()
-        
+        self.video_filename =''
         # Set up the user interface
         self.init_ui()
         
@@ -174,7 +174,6 @@ class VideoAnnotationTool(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-    
     def create_edit_menu(self, menubar):
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
@@ -361,7 +360,7 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(self, "Error", "Could not open video file!")
             self.cap = None
             return False
-        
+        self.video_filename = filename
         # Get video properties
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame = 0
@@ -641,7 +640,10 @@ class VideoAnnotationTool(QMainWindow):
     
     def export_annotations(self):
         """Export annotations to various formats."""
-        if not self.canvas.annotations:
+        # Check if we have any annotations either in the current frame or across all frames
+        has_annotations = bool(self.canvas.annotations) or any(self.frame_annotations.values())
+        
+        if not has_annotations:
             QMessageBox.warning(self, "Export Annotations", "No annotations to export!")
             return
         
@@ -654,7 +656,7 @@ class VideoAnnotationTool(QMainWindow):
             format_type = format_combo.currentText()
             
             self.export_annotations_with_format(format_type)
-    
+
     def create_export_dialog(self):
         """Create a dialog for export options."""
         dialog = QDialog(self)
@@ -666,7 +668,7 @@ class VideoAnnotationTool(QMainWindow):
         # Format selection
         format_label = QLabel("Export Format:")
         format_combo = QComboBox()
-        format_combo.addItems(["COCO JSON", "YOLO TXT", "Pascal VOC XML"])
+        format_combo.addItems(["COCO JSON", "YOLO TXT", "Pascal VOC XML", "Raya TXT"])
         
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -682,22 +684,49 @@ class VideoAnnotationTool(QMainWindow):
     
     def export_annotations_with_format(self, format_type):
         """Export annotations with the specified format."""
+        # Determine default directory and filename
+        default_dir = ""
+        default_filename = ""
+        
+        # If we have a video file loaded, use its directory and name
+        if hasattr(self, 'cap') and self.cap is not None:
+            # Try to get the video filename from the cap object
+            # This is a workaround as OpenCV doesn't provide direct access to the filename
+            # In a real application, you would store the video filename when opening it
+            video_filename = getattr(self, 'video_filename', None)
+            if video_filename and os.path.exists(video_filename):
+                default_dir = os.path.dirname(video_filename)
+                default_filename = os.path.splitext(os.path.basename(video_filename))[0]
+        
         # Get export filename based on format
         if format_type == "COCO JSON":
+            default_path = os.path.join(default_dir, default_filename + ".json") if default_filename else ""
             filename, _ = QFileDialog.getSaveFileName(
-                self, "Export Annotations", "", "JSON Files (*.json);;All Files (*)"
+                self, "Export Annotations", default_path,
+                "JSON Files (*.json);;All Files (*)"
             )
             export_format = "coco"
         elif format_type == "YOLO TXT":
+            default_path = os.path.join(default_dir, default_filename + ".txt") if default_filename else ""
             filename, _ = QFileDialog.getSaveFileName(
-                self, "Export Annotations", "", "Text Files (*.txt);;All Files (*)"
+                self, "Export Annotations", default_path,
+                "Text Files (*.txt);;All Files (*)"
             )
             export_format = "yolo"
         elif format_type == "Pascal VOC XML":
+            default_path = os.path.join(default_dir, default_filename + ".xml") if default_filename else ""
             filename, _ = QFileDialog.getSaveFileName(
-                self, "Export Annotations", "", "XML Files (*.xml);;All Files (*)"
+                self, "Export Annotations", default_path,
+                "XML Files (*.xml);;All Files (*)"
             )
             export_format = "pascal_voc"
+        elif format_type == "Raya TXT":
+            default_path = os.path.join(default_dir, default_filename + ".txt") if default_filename else ""
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Export Annotations", default_path,
+                "Text Files (*.txt);;All Files (*)"
+            )
+            export_format = "raya"
         else:
             return
         
@@ -707,11 +736,24 @@ class VideoAnnotationTool(QMainWindow):
                 image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
                 image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
                 
-                export_annotations(filename, self.canvas.annotations, image_width, image_height, export_format)
+                # Collect all annotations from all frames
+                all_annotations = []
+                for frame_num, annotations in self.frame_annotations.items():
+                    for annotation in annotations:
+                        # Create a copy of the annotation with frame information
+                        annotation_copy = annotation
+                        annotation_copy.frame = frame_num
+                        all_annotations.append(annotation_copy)
+                
+                # If no annotations in frame_annotations, use canvas annotations
+                if not all_annotations and self.canvas.annotations:
+                    all_annotations = self.canvas.annotations
+                
+                export_annotations(filename, all_annotations, image_width, image_height, export_format)
                 self.statusBar.showMessage(f"Annotations exported to {os.path.basename(filename)}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export annotations: {str(e)}")
-    
+
     #
     # Annotation handling methods
     #
