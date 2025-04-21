@@ -31,6 +31,8 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QColorDialog,
     QActionGroup,
+    QGroupBox,
+    QDoubleSpinBox,
 )
 from PyQt5.QtCore import Qt, QTimer, QRect
 from PyQt5.QtGui import  QColor, QIcon
@@ -100,6 +102,14 @@ class VideoAnnotationTool(QMainWindow):
 
         # Annotation data
         self.frame_annotations = {}  # Dictionary to store annotations by frame number
+        
+        # Class attribute configurations
+        self.canvas_class_attributes = {
+            "Drone": {
+                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100}
+            }
+        }
 
         # Project state
         self.project_file = None
@@ -661,6 +671,9 @@ class VideoAnnotationTool(QMainWindow):
             # Get video path if available
             video_path = getattr(self, "video_filename", None)
 
+            # Get class attributes if available
+            class_attributes = getattr(self.canvas, "class_attributes", {})
+
             # Save project with additional data
             save_project(
                 filename,
@@ -669,11 +682,13 @@ class VideoAnnotationTool(QMainWindow):
                 video_path=video_path,
                 current_frame=self.current_frame,
                 frame_annotations=self.frame_annotations,
+                class_attributes=class_attributes
             )
 
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(f"Project saved to {os.path.basename(filename)}")
+
 
     def load_project(self):
         """Load a saved project."""
@@ -690,11 +705,16 @@ class VideoAnnotationTool(QMainWindow):
                     video_path,
                     current_frame,
                     frame_annotations,
+                    class_attributes,
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
                 self.canvas.annotations = annotations
                 self.canvas.class_colors = class_colors
+                
+                # Update class attributes if available
+                if class_attributes:
+                    self.canvas.class_attributes = class_attributes
 
                 # Store frame annotations
                 self.frame_annotations = frame_annotations
@@ -738,6 +758,7 @@ class VideoAnnotationTool(QMainWindow):
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+
 
     def export_annotations(self):
         """Export annotations to various formats."""
@@ -1079,15 +1100,14 @@ class VideoAnnotationTool(QMainWindow):
         else:
             super().keyPressEvent(event)
 
-
     def edit_annotation(self, annotation):
         """Edit the properties of an annotation."""
-
         if not annotation:
             return
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit Annotation")
+        dialog.setMinimumWidth(350)
 
         layout = QVBoxLayout()
         form_layout = QFormLayout()
@@ -1098,17 +1118,66 @@ class VideoAnnotationTool(QMainWindow):
         class_combo.setCurrentText(annotation.class_name)
         form_layout.addRow("Class:", class_combo)
 
-        # Size attribute (numeric 0-100)
-        size_spinner = QSpinBox()
-        size_spinner.setRange(0, 100)
-        size_spinner.setValue(int(annotation.attributes.get("Size", -1)))
-        form_layout.addRow("Size (0-100):", size_spinner)
+        # Get class attribute configuration if available
+        class_attributes = {}
+        if hasattr(self.canvas, "class_attributes"):
+            class_attributes = self.canvas.class_attributes.get(annotation.class_name, {})
 
-        # Quality attribute (numeric 0-100)
-        quality_spinner = QSpinBox()
-        quality_spinner.setRange(0, 100)
-        quality_spinner.setValue(int(annotation.attributes.get("Quality", -1)))
-        form_layout.addRow("Quality (0-100):", quality_spinner)
+        # Create input widgets for all attributes
+        attribute_widgets = {}
+        
+        for attr_name, attr_value in sorted(annotation.attributes.items()):
+            # Get attribute type from class configuration or infer from value
+            attr_type = "string"
+            attr_min = None
+            attr_max = None
+            
+            if attr_name in class_attributes:
+                attr_config = class_attributes[attr_name]
+                attr_type = attr_config.get("type", "string")
+                attr_min = attr_config.get("min", None)
+                attr_max = attr_config.get("max", None)
+            elif isinstance(attr_value, int):
+                attr_type = "int"
+            elif isinstance(attr_value, float):
+                attr_type = "float"
+            elif isinstance(attr_value, bool):
+                attr_type = "boolean"
+            
+            # Create appropriate input widget based on type
+            if attr_type == "boolean":
+                input_widget = QComboBox()
+                input_widget.addItems(["False", "True"])
+                input_widget.setCurrentText(str(bool(attr_value)))
+            elif attr_type == "int":
+                input_widget = QSpinBox()
+                if attr_min is not None:
+                    input_widget.setMinimum(attr_min)
+                else:
+                    input_widget.setMinimum(-999999)
+                if attr_max is not None:
+                    input_widget.setMaximum(attr_max)
+                else:
+                    input_widget.setMaximum(999999)
+                input_widget.setValue(int(attr_value))
+            elif attr_type == "float":
+                input_widget = QDoubleSpinBox()
+                if attr_min is not None:
+                    input_widget.setMinimum(attr_min)
+                else:
+                    input_widget.setMinimum(-999999.0)
+                if attr_max is not None:
+                    input_widget.setMaximum(attr_max)
+                else:
+                    input_widget.setMaximum(999999.0)
+                input_widget.setValue(float(attr_value))
+                input_widget.setDecimals(2)
+            else:  # string or default
+                input_widget = QLineEdit()
+                input_widget.setText(str(attr_value))
+            
+            form_layout.addRow(f"{attr_name}:", input_widget)
+            attribute_widgets[attr_name] = input_widget
 
         layout.addLayout(form_layout)
 
@@ -1122,11 +1191,29 @@ class VideoAnnotationTool(QMainWindow):
 
         # If dialog is accepted, update the annotation
         if dialog.exec_() == QDialog.Accepted:
-            annotation.class_name = class_combo.currentText()
-            annotation.color = self.canvas.class_colors[annotation.class_name]
-
-            annotation.attributes["Size"] = size_spinner.value()
-            annotation.attributes["Quality"] = quality_spinner.value()
+            old_class = annotation.class_name
+            new_class = class_combo.currentText()
+            
+            # Update class and color
+            annotation.class_name = new_class
+            annotation.color = self.canvas.class_colors[new_class]
+            
+            # If class changed, update attributes based on new class configuration
+            if old_class != new_class and hasattr(self.canvas, "class_attributes"):
+                new_class_attributes = self.canvas.class_attributes.get(new_class, {})
+                self.update_annotation_attributes(annotation, new_class_attributes)
+            
+            # Update attribute values from the dialog
+            for attr_name, widget in attribute_widgets.items():
+                if attr_name in annotation.attributes:
+                    if isinstance(widget, QComboBox):  # Boolean
+                        annotation.attributes[attr_name] = widget.currentText() == "True"
+                    elif isinstance(widget, QSpinBox):  # Int
+                        annotation.attributes[attr_name] = widget.value()
+                    elif isinstance(widget, QDoubleSpinBox):  # Float
+                        annotation.attributes[attr_name] = widget.value()
+                    else:  # String or other
+                        annotation.attributes[attr_name] = widget.text()
 
             # Update canvas and mark project as modified
             self.canvas.update()
@@ -1137,6 +1224,7 @@ class VideoAnnotationTool(QMainWindow):
 
             # Save to frame annotations
             self.frame_annotations[self.current_frame] = self.canvas.annotations
+
 
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
@@ -1650,17 +1738,13 @@ class VideoAnnotationTool(QMainWindow):
     #
 
     def add_class(self):
-        """Add a new class."""
+        """Add a new class with custom attributes."""
         # Create dialog
         dialog = self.create_class_dialog()
 
         # Show dialog
         if dialog.exec_() == QDialog.Accepted:
-            # Get form widgets
-            name_edit = dialog.findChild(QLineEdit)
-            color_button = dialog.findChild(QPushButton)
-
-            class_name = name_edit.text().strip()
+            class_name = dialog.name_edit.text().strip()
 
             if not class_name:
                 QMessageBox.warning(self, "Add Class", "Class name cannot be empty!")
@@ -1672,12 +1756,57 @@ class VideoAnnotationTool(QMainWindow):
                 )
                 return
 
-            # Get color from button's stylesheet
-            color_str = color_button.styleSheet().split(":")[-1].strip()
-            color = QColor(color_str)
+            # Get color from dialog
+            color = dialog.color
+
+            # Process attributes
+            attributes_config = {}
+            for _, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
+                attr_name = name_edit.text().strip()
+                if attr_name:
+                    attr_type = type_combo.currentText()
+                    
+                    # Parse default value based on type
+                    default_value = default_edit.text()
+                    if attr_type == "int":
+                        try:
+                            default_value = int(default_value)
+                        except ValueError:
+                            default_value = 0
+                    elif attr_type == "float":
+                        try:
+                            default_value = float(default_value)
+                        except ValueError:
+                            default_value = 0.0
+                    elif attr_type == "boolean":
+                        default_value = default_value.lower() in ["true", "1", "yes"]
+                    
+                    # Parse min/max for numeric types
+                    attr_config = {
+                        "type": attr_type,
+                        "default": default_value
+                    }
+                    
+                    if attr_type in ["int", "float"]:
+                        try:
+                            attr_config["min"] = int(min_edit.text()) if attr_type == "int" else float(min_edit.text())
+                        except ValueError:
+                            attr_config["min"] = 0
+                            
+                        try:
+                            attr_config["max"] = int(max_edit.text()) if attr_type == "int" else float(max_edit.text())
+                        except ValueError:
+                            attr_config["max"] = 100
+                    
+                    attributes_config[attr_name] = attr_config
 
             # Add class to canvas
             self.canvas.class_colors[class_name] = color
+            
+            # Store attributes configuration
+            if not hasattr(self.canvas, "class_attributes"):
+                self.canvas.class_attributes = {}
+            self.canvas.class_attributes[class_name] = attributes_config
 
             # Update UI
             self.toolbar.update_class_selector()
@@ -1686,11 +1815,198 @@ class VideoAnnotationTool(QMainWindow):
             # Set as current class
             self.canvas.set_current_class(class_name)
             self.class_selector.setCurrentText(class_name)
+    def update_annotation_attributes(self, annotation, attributes_config):
+        """Update annotation attributes based on class attribute configuration."""
+        # Create a new attributes dictionary with defaults from the configuration
+        new_attributes = {}
+        
+        # First, set defaults from configuration
+        for attr_name, attr_config in attributes_config.items():
+            new_attributes[attr_name] = attr_config["default"]
+        
+        # Then, preserve existing values where possible
+        for attr_name, attr_value in annotation.attributes.items():
+            if attr_name in new_attributes:
+                # Keep existing value if it's within constraints
+                if attr_name in attributes_config:
+                    attr_type = attributes_config[attr_name]["type"]
+                    
+                    if attr_type == "int":
+                        try:
+                            value = int(attr_value)
+                            min_val = attributes_config[attr_name].get("min", float("-inf"))
+                            max_val = attributes_config[attr_name].get("max", float("inf"))
+                            if min_val <= value <= max_val:
+                                new_attributes[attr_name] = value
+                        except (ValueError, TypeError):
+                            pass
+                    elif attr_type == "float":
+                        try:
+                            value = float(attr_value)
+                            min_val = attributes_config[attr_name].get("min", float("-inf"))
+                            max_val = attributes_config[attr_name].get("max", float("inf"))
+                            if min_val <= value <= max_val:
+                                new_attributes[attr_name] = value
+                        except (ValueError, TypeError):
+                            pass
+                    elif attr_type == "string":
+                        new_attributes[attr_name] = str(attr_value)
+                    elif attr_type == "boolean":
+                        if isinstance(attr_value, bool):
+                            new_attributes[attr_name] = attr_value
+                        else:
+                            try:
+                                new_attributes[attr_name] = str(attr_value).lower() in ["true", "1", "yes"]
+                            except (ValueError, TypeError):
+                                pass
+        
+        # Update the annotation's attributes
+        annotation.attributes = new_attributes
 
-    def create_class_dialog(self, class_name=None, color=None):
-        """Create a dialog for adding or editing classes."""
+    def edit_selected_class(self):
+        """Edit the selected class with custom attributes."""
+        item = self.class_dock.classes_list.currentItem()
+        if not item:
+            return
+
+        class_name = item.text()
+        old_name = class_name  # Store the original class name
+        current_color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
+        
+        # Get current attributes configuration
+        attributes = getattr(self.canvas, "class_attributes", {}).get(class_name, {})
+
+        # Create dialog
+        dialog = self.create_class_dialog(class_name, current_color, attributes)
+
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            new_class_name = dialog.name_edit.text().strip()
+
+            if not new_class_name:
+                QMessageBox.warning(self, "Edit Class", "Class name cannot be empty!")
+                return
+
+            if new_class_name != old_name and new_class_name in self.canvas.class_colors:
+                # Ask if user wants to merge classes
+                reply = QMessageBox.question(
+                    self,
+                    "Merge Classes",
+                    f"Class '{new_class_name}' already exists. Do you want to convert all '{old_name}' annotations to '{new_class_name}'?",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                    QMessageBox.No,
+                )
+
+                if reply == QMessageBox.Cancel:
+                    return
+                elif reply == QMessageBox.Yes:
+                    # Get color from existing class
+                    color = self.canvas.class_colors[new_class_name]
+                    # Convert all annotations of old class to new class
+                    self.convert_class(old_name, new_class_name)
+                    # Remove old class
+                    del self.canvas.class_colors[old_name]
+                    if hasattr(self.canvas, "class_attributes") and old_name in self.canvas.class_attributes:
+                        del self.canvas.class_attributes[old_name]
+                    # Update UI
+                    self.toolbar.update_class_selector()
+                    self.class_dock.update_class_list()
+                    self.update_annotation_list()
+                    self.canvas.update()
+                    return
+                else:
+                    # User chose No, so don't proceed with the rename
+                    return
+
+            # Get color from dialog
+            color = dialog.color
+
+            # Process attributes
+            attributes_config = {}
+            for _, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
+                attr_name = name_edit.text().strip()
+                if attr_name:
+                    attr_type = type_combo.currentText()
+                    
+                    # Parse default value based on type
+                    default_value = default_edit.text()
+                    if attr_type == "int":
+                        try:
+                            default_value = int(default_value)
+                        except ValueError:
+                            default_value = 0
+                    elif attr_type == "float":
+                        try:
+                            default_value = float(default_value)
+                        except ValueError:
+                            default_value = 0.0
+                    elif attr_type == "boolean":
+                        default_value = default_value.lower() in ["true", "1", "yes"]
+                    
+                    # Parse min/max for numeric types
+                    attr_config = {
+                        "type": attr_type,
+                        "default": default_value
+                    }
+                    
+                    if attr_type in ["int", "float"]:
+                        try:
+                            attr_config["min"] = int(min_edit.text()) if attr_type == "int" else float(min_edit.text())
+                        except ValueError:
+                            attr_config["min"] = 0
+                            
+                        try:
+                            attr_config["max"] = int(max_edit.text()) if attr_type == "int" else float(max_edit.text())
+                        except ValueError:
+                            attr_config["max"] = 100
+                    
+                    attributes_config[attr_name] = attr_config
+
+            # Update class
+            if not hasattr(self.canvas, "class_attributes"):
+                self.canvas.class_attributes = {}
+                
+            # Update class name in annotations and class attributes
+            if old_name != new_class_name:
+                # Update class colors dictionary
+                self.canvas.class_colors[new_class_name] = color
+                del self.canvas.class_colors[old_name]
+                
+                # Update class attributes dictionary
+                self.canvas.class_attributes[new_class_name] = attributes_config
+                if old_name in self.canvas.class_attributes:
+                    del self.canvas.class_attributes[old_name]
+                    
+                # Update annotations
+                for annotation in self.canvas.annotations:
+                    if annotation.class_name == old_name:
+                        annotation.class_name = new_class_name
+                        annotation.color = color
+                        
+                        # Update attributes based on new configuration
+                        self.update_annotation_attributes(annotation, attributes_config)
+            else:
+                # Just update the color and attributes
+                self.canvas.class_colors[class_name] = color
+                self.canvas.class_attributes[class_name] = attributes_config
+                
+                # Update annotations with new color and attributes
+                for annotation in self.canvas.annotations:
+                    if annotation.class_name == class_name:
+                        annotation.color = color
+                        self.update_annotation_attributes(annotation, attributes_config)
+
+            # Update UI
+            self.toolbar.update_class_selector()
+            self.class_dock.update_class_list()
+            self.update_annotation_list()
+            self.canvas.update()
+
+    def create_class_dialog(self, class_name=None, color=None, attributes=None):
+        """Create a dialog for adding or editing classes with custom attributes."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Class" if class_name is None else "Edit Class")
+        dialog.setMinimumWidth(400)
 
         layout = QVBoxLayout(dialog)
 
@@ -1725,6 +2041,88 @@ class VideoAnnotationTool(QMainWindow):
         color_layout.addWidget(color_label)
         color_layout.addWidget(color_button)
 
+        # Attributes section
+        attributes_group = QGroupBox("Attributes")
+        attributes_layout = QVBoxLayout(attributes_group)
+        
+        # List to store attribute widgets
+        attribute_widgets = []
+        
+        # Function to add a new attribute row
+        def add_attribute_row(name="", attr_type="int", default_value="0", min_value="0", max_value="100"):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            
+            name_edit = QLineEdit(name)
+            name_edit.setPlaceholderText("Attribute Name")
+            
+            type_combo = QComboBox()
+            type_combo.addItems(["int", "float", "string", "boolean"])
+            type_combo.setCurrentText(attr_type)
+            
+            default_edit = QLineEdit(default_value)
+            default_edit.setPlaceholderText("Default")
+            
+            min_edit = QLineEdit(min_value)
+            min_edit.setPlaceholderText("Min")
+            
+            max_edit = QLineEdit(max_value)
+            max_edit.setPlaceholderText("Max")
+            
+            delete_btn = QPushButton("X")
+            delete_btn.setMaximumWidth(30)
+            delete_btn.clicked.connect(lambda: remove_attribute_row(row_widget))
+            
+            row_layout.addWidget(name_edit)
+            row_layout.addWidget(type_combo)
+            row_layout.addWidget(default_edit)
+            row_layout.addWidget(min_edit)
+            row_layout.addWidget(max_edit)
+            row_layout.addWidget(delete_btn)
+            
+            attributes_layout.addWidget(row_widget)
+            attribute_widgets.append((row_widget, name_edit, type_combo, default_edit, min_edit, max_edit))
+            
+            # Update type-dependent visibility
+            def update_type_visibility():
+                is_numeric = type_combo.currentText() in ["int", "float"]
+                min_edit.setVisible(is_numeric)
+                max_edit.setVisible(is_numeric)
+            
+            type_combo.currentTextChanged.connect(update_type_visibility)
+            update_type_visibility()
+            
+            return row_widget
+        
+        def remove_attribute_row(row_widget):
+            for widget, *_ in attribute_widgets[:]:
+                if widget == row_widget:
+                    attributes_layout.removeWidget(widget)
+                    widget.deleteLater()
+                    attribute_widgets.remove((widget, *_))
+                    break
+        
+        # Add button for attributes
+        add_attr_btn = QPushButton("Add Attribute")
+        add_attr_btn.clicked.connect(lambda: add_attribute_row())
+        attributes_layout.addWidget(add_attr_btn)
+        
+        # Add default attributes if editing an existing class
+        if attributes:
+            for attr_name, attr_info in attributes.items():
+                add_attribute_row(
+                    name=attr_name,
+                    attr_type=attr_info.get("type", "int"),
+                    default_value=str(attr_info.get("default", "0")),
+                    min_value=str(attr_info.get("min", "0")),
+                    max_value=str(attr_info.get("max", "100"))
+                )
+        else:
+            # Add default Size and Quality attributes for new classes
+            add_attribute_row("Size", "int", "-1", "0", "100")
+            add_attribute_row("Quality", "int", "-1", "0", "100")
+        
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -1733,72 +2131,15 @@ class VideoAnnotationTool(QMainWindow):
         # Add widgets to layout
         layout.addLayout(name_layout)
         layout.addLayout(color_layout)
+        layout.addWidget(attributes_group)
         layout.addWidget(buttons)
-
+        
+        # Store attribute widgets for access when dialog is accepted
+        dialog.attribute_widgets = attribute_widgets
+        dialog.name_edit = name_edit
+        dialog.color = color
+        
         return dialog
-
-    def edit_selected_class(self):
-        """Edit the selected class."""
-        item = self.class_dock.classes_list.currentItem()
-        if not item:
-            return
-
-        class_name = item.text()
-        current_color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-
-        # Create dialog
-        dialog = self.create_class_dialog(class_name, current_color)
-
-        # Show dialog
-        if dialog.exec_() == QDialog.Accepted:
-            # Get form widgets
-            name_edit = dialog.findChild(QLineEdit)
-            color_button = dialog.findChild(QPushButton)
-
-            new_class_name = name_edit.text().strip()
-
-            if not new_class_name:
-                QMessageBox.warning(self, "Edit Class", "Class name cannot be empty!")
-                return
-
-            if (
-                new_class_name != class_name
-                and new_class_name in self.canvas.class_colors
-            ):
-                # Ask if user wants to merge classes
-                reply = QMessageBox.question(
-                    self,
-                    "Merge Classes",
-                    f"Class '{new_class_name}' already exists. Do you want to convert all '{class_name}' annotations to '{new_class_name}'?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                    QMessageBox.No,
-                )
-
-                if reply == QMessageBox.Cancel:
-                    return
-                elif reply == QMessageBox.Yes:
-                    # Get color from existing class
-                    color = self.canvas.class_colors[new_class_name]
-                    # Convert all annotations of old class to new class
-                    self.convert_class(class_name, new_class_name)
-                    # Remove old class
-                    del self.canvas.class_colors[class_name]
-                    # Update UI
-                    self.toolbar.update_class_selector()
-                    self.class_dock.update_class_list()
-                    self.update_annotation_list()
-                    self.canvas.update()
-                    return
-                else:
-                    # User chose No, so don't proceed with the rename
-                    return
-
-            # Get color from button's stylesheet
-            color_str = color_button.styleSheet().split(":")[-1].strip()
-            color = QColor(color_str)
-
-            # Update class
-            self.update_class(class_name, new_class_name, color)
 
     def convert_class(self, old_class, new_class):
         """Convert all annotations from one class to another."""

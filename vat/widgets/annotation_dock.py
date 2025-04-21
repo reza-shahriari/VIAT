@@ -18,33 +18,18 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QLineEdit,
     QFrame,
-)
-from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QColor
-
-from PyQt5.QtWidgets import (
-    QDockWidget,
-    QWidget,
     QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QComboBox,
-    QListWidget,
-    QPushButton,
-    QMenu,
-    QDialog,
     QFormLayout,
     QSpinBox,
-    QTextEdit,
-    QDialogButtonBox,
-    QListWidgetItem,
-    QGroupBox,
-    QGridLayout,
-    QLineEdit,
-    QFrame,
+    QDoubleSpinBox,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor,QIntValidator,QDoubleValidator
+
+
+from PyQt5.QtCore import Qt, QRect
+
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -54,12 +39,12 @@ class SelectAllLineEdit(QLineEdit):
         super().mousePressEvent(event)
         self.selectAll()
 
-
 class AnnotationItemWidget(QWidget):
     def __init__(self, annotation, parent=None):
         super().__init__(parent)
         self.annotation = annotation
         self.parent_dock = parent
+        self.attribute_inputs = {}  # Store references to attribute input widgets
         self.init_ui()
 
     def init_ui(self):
@@ -78,25 +63,92 @@ class AnnotationItemWidget(QWidget):
         attributes_layout = QGridLayout()
         attributes_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Add size attribute
-        size_label = QLabel("Size:")
-        self.size_input = SelectAllLineEdit()
-        self.size_input.setText(str(self.annotation.attributes.get("Size", -1)))
-        self.size_input.setPlaceholderText("-1")
-        self.size_input.textChanged.connect(self.update_size_attribute)
+        # Get class attribute configuration if available
+        class_attributes = {}
+        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window.canvas, "class_attributes"):
+            class_attributes = self.parent_dock.main_window.canvas.class_attributes.get(self.annotation.class_name, {})
 
-        attributes_layout.addWidget(size_label, 0, 0)
-        attributes_layout.addWidget(self.size_input, 0, 1)
-
-        # Add quality attribute
-        quality_label = QLabel("Quality:")
-        self.quality_input = SelectAllLineEdit()
-        self.quality_input.setText(str(self.annotation.attributes.get("Quality", -1)))
-        self.quality_input.setPlaceholderText("-1")
-        self.quality_input.textChanged.connect(self.update_quality_attribute)
-
-        attributes_layout.addWidget(quality_label, 1, 0)
-        attributes_layout.addWidget(self.quality_input, 1, 1)
+        # First, collect all attribute names from both class definition and annotation
+        all_attributes = set(self.annotation.attributes.keys())
+        
+        # Add all attributes defined for this class
+        if class_attributes:
+            all_attributes.update(class_attributes.keys())
+        
+        # Add all attributes from the annotation and class definition
+        row = 0
+        for attr_name in sorted(all_attributes):
+            # Get current attribute value (default to None if not present)
+            attr_value = self.annotation.attributes.get(attr_name, None)
+            
+            # If attribute doesn't exist in annotation but exists in class definition,
+            # initialize it with the default value from class definition
+            if attr_value is None and attr_name in class_attributes:
+                attr_config = class_attributes[attr_name]
+                attr_value = attr_config.get("default", None)
+                # Add the attribute to the annotation
+                self.annotation.attributes[attr_name] = attr_value
+            
+            # Skip if we still don't have a value
+            if attr_value is None:
+                continue
+                
+            attr_label = QLabel(f"{attr_name}:")
+            
+            # Get attribute type from class configuration or infer from value
+            attr_type = "string"
+            attr_min = None
+            attr_max = None
+            
+            if attr_name in class_attributes:
+                attr_config = class_attributes[attr_name]
+                attr_type = attr_config.get("type", "string")
+                attr_min = attr_config.get("min", None)
+                attr_max = attr_config.get("max", None)
+            elif isinstance(attr_value, int):
+                attr_type = "int"
+            elif isinstance(attr_value, float):
+                attr_type = "float"
+            elif isinstance(attr_value, bool):
+                attr_type = "boolean"
+            
+            # Create appropriate input widget based on type
+            if attr_type == "boolean":
+                input_widget = QComboBox()
+                input_widget.addItems(["False", "True"])
+                input_widget.setCurrentText(str(bool(attr_value)))
+                input_widget.currentTextChanged.connect(
+                    lambda value, name=attr_name: self.update_boolean_attribute(name, value)
+                )
+            elif attr_type in ["int", "float"]:
+                input_widget = SelectAllLineEdit()
+                input_widget.setText(str(attr_value))
+                input_widget.setPlaceholderText("0")
+                
+                # Set validator based on min/max if available
+                if attr_min is not None and attr_max is not None:
+                    if attr_type == "int":
+                        input_widget.setValidator(QIntValidator(attr_min, attr_max))
+                    else:
+                        input_widget.setValidator(QDoubleValidator(attr_min, attr_max, 2))
+                
+                input_widget.textChanged.connect(
+                    lambda text, name=attr_name, type=attr_type: self.update_numeric_attribute(name, text, type)
+                )
+            else:  # string or default
+                input_widget = SelectAllLineEdit()
+                input_widget.setText(str(attr_value))
+                input_widget.textChanged.connect(
+                    lambda text, name=attr_name: self.update_string_attribute(name, text)
+                )
+            
+            attributes_layout.addWidget(attr_label, row, 0)
+            attributes_layout.addWidget(input_widget, row, 1)
+            
+            # Store reference to input widget
+            self.attribute_inputs[attr_name] = input_widget
+            
+            row += 1
 
         layout.addLayout(attributes_layout)
 
@@ -105,31 +157,6 @@ class AnnotationItemWidget(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
-
-    def update_size_attribute(self, text):
-        try:
-            value = int(text) if text else -1
-            self.annotation.attributes["Size"] = value
-            # Update canvas to reflect changes
-            if hasattr(self.parent_dock, "main_window"):
-                self.parent_dock.main_window.canvas.update()
-        except ValueError:
-            # Reset to previous value if not a valid integer
-            self.size_input.setText(str(self.annotation.attributes.get("Size", -1)))
-
-    def update_quality_attribute(self, text):
-        try:
-            value = int(text) if text else -1
-            self.annotation.attributes["Quality"] = value
-            # Update canvas to reflect changes
-            if hasattr(self.parent_dock, "main_window"):
-                self.parent_dock.main_window.canvas.update()
-        except ValueError:
-            # Reset to previous value if not a valid integer
-            self.quality_input.setText(
-                str(self.annotation.attributes.get("Quality", -1))
-            )
-
 
 class AnnotationDock(QDockWidget):
     def __init__(self, parent=None):
@@ -166,7 +193,7 @@ class AnnotationDock(QDockWidget):
         add_btn.clicked.connect(self.add_annotation)
         delete_btn = QPushButton("Delete")
         delete_btn.clicked.connect(self.delete_selected_annotation)
-        
+
         # Add batch edit button
         batch_edit_btn = QPushButton("Batch Edit")
         batch_edit_btn.clicked.connect(self.batch_edit_annotations)
@@ -258,16 +285,21 @@ class AnnotationDock(QDockWidget):
 
             if action == delete_action:
                 self.delete_selected_annotation()
- 
+
     def batch_edit_annotations(self):
         """Open a dialog to edit all annotation attributes at once"""
         # Check if there are any annotations in any frame, not just the current frame
-        if (not hasattr(self.main_window, "frame_annotations") or
-                not self.main_window.frame_annotations):
+        if (
+            not hasattr(self.main_window, "frame_annotations")
+            or not self.main_window.frame_annotations
+        ):
             from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Batch Edit", "No annotations found in any frame.")
+
+            QMessageBox.information(
+                self, "Batch Edit", "No annotations found in any frame."
+            )
             return
-        
+
         # Create and show the batch edit dialog
         dialog = self.create_batch_edit_dialog()
         if dialog.exec_() == QDialog.Accepted:
@@ -275,89 +307,130 @@ class AnnotationDock(QDockWidget):
             size_value = dialog.size_spin.value()
             quality_value = dialog.quality_spin.value()
             apply_to_all_frames = dialog.apply_all_frames_checkbox.isChecked()
-            
+
             # Apply changes based on user selection
             if apply_to_all_frames:
                 self.apply_attributes_to_all_frames(size_value, quality_value)
             else:
                 self.apply_attributes_to_current_frame(size_value, quality_value)
-                
+
             # Update the UI
             self.update_annotation_list()
             self.main_window.canvas.update()
 
     def create_batch_edit_dialog(self):
         """Create a dialog for batch editing annotation attributes"""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QFormLayout, QSpinBox, QCheckBox, QDialogButtonBox
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Batch Edit Annotations")
-        dialog.setMinimumWidth(300)
-        
+        dialog.setMinimumWidth(350)
+
         layout = QVBoxLayout(dialog)
         form_layout = QFormLayout()
-        
-        # Size attribute (numeric 0-100)
-        dialog.size_spin = QSpinBox()
-        dialog.size_spin.setRange(-1, 100)
-        dialog.size_spin.setValue(-1)
-        dialog.size_spin.setSpecialValueText("No Change")  # -1 means no change
-        form_layout.addRow("Size (0-100):", dialog.size_spin)
-        
-        # Quality attribute (numeric 0-100)
-        dialog.quality_spin = QSpinBox()
-        dialog.quality_spin.setRange(-1, 100)
-        dialog.quality_spin.setValue(-1)
-        dialog.quality_spin.setSpecialValueText("No Change")  # -1 means no change
-        form_layout.addRow("Quality (0-100):", dialog.quality_spin)
-        
-        # Option to apply to all frames - checked by default
-        dialog.apply_all_frames_checkbox = QCheckBox("Apply to all frames")
-        dialog.apply_all_frames_checkbox.setChecked(True)  # Set to checked by default
-        
+
+        # Collect all unique attributes across all annotations in all frames
+        all_attributes = set()
+        attribute_types = {}  # Store attribute types
+
+        for frame_annotations in self.main_window.frame_annotations.values():
+            for annotation in frame_annotations:
+                for attr_name in annotation.attributes.keys():
+                    all_attributes.add(attr_name)
+
+                    # Try to determine attribute type if not already known
+                    if attr_name not in attribute_types:
+                        attr_value = annotation.attributes[attr_name]
+                        if isinstance(attr_value, bool):
+                            attribute_types[attr_name] = "boolean"
+                        elif isinstance(attr_value, int):
+                            attribute_types[attr_name] = "int"
+                        elif isinstance(attr_value, float):
+                            attribute_types[attr_name] = "float"
+                        else:
+                            attribute_types[attr_name] = "string"
+
+        # Also check class attribute configurations
+        if hasattr(self.main_window.canvas, "class_attributes"):
+            for class_config in self.main_window.canvas.class_attributes.values():
+                for attr_name, attr_config in class_config.items():
+                    all_attributes.add(attr_name)
+                    attribute_types[attr_name] = attr_config.get("type", "string")
+
+        # Create input widgets for all attributes
+        dialog.attribute_widgets = {}
+
+        for attr_name in sorted(all_attributes):
+            attr_type = attribute_types.get(attr_name, "string")
+
+            if attr_type == "boolean":
+                input_widget = QComboBox()
+                input_widget.addItems(["No Change", "False", "True"])
+                input_widget.setCurrentText("No Change")
+            elif attr_type == "int":
+                input_widget = QSpinBox()
+                input_widget.setRange(-999999, 999999)
+                input_widget.setValue(0)
+                input_widget.setSpecialValueText("No Change")  # 0 means no change
+                input_widget.setProperty("no_change_value", 0)
+            elif attr_type == "float":
+                input_widget = QDoubleSpinBox()
+                input_widget.setRange(-999999.0, 999999.0)
+                input_widget.setValue(0.0)
+                input_widget.setSpecialValueText("No Change")  # 0.0 means no change
+                input_widget.setProperty("no_change_value", 0.0)
+                input_widget.setDecimals(2)
+            else:  # string
+                input_widget = QLineEdit()
+                input_widget.setPlaceholderText("No Change (leave empty)")
+
+            form_layout.addRow(f"{attr_name}:", input_widget)
+            dialog.attribute_widgets[attr_name] = (input_widget, attr_type)
+
         # Add form layout to main layout
         layout.addLayout(form_layout)
+
+        # Option to apply to all frames - checked by default
+        dialog.apply_all_frames_checkbox = QCheckBox("Apply to all frames")
+        dialog.apply_all_frames_checkbox.setChecked(True)
         layout.addWidget(dialog.apply_all_frames_checkbox)
-        
+
         # Add buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
-        
+
         return dialog
 
-    def apply_attributes_to_current_frame(self, size_value, quality_value):
+    def apply_batch_attributes_to_current_frame(self, attribute_values):
         """Apply attribute changes to all annotations in the current frame"""
         current_frame = self.main_window.current_frame
-        
+
         # If there are no annotations for the current frame, create an empty list
         if current_frame not in self.main_window.frame_annotations:
             self.main_window.frame_annotations[current_frame] = []
-        
+
         annotations = self.main_window.frame_annotations[current_frame]
-        
+
         for annotation in annotations:
-            # Only update if the value is not -1 (no change)
-            if size_value != -1:
-                annotation.attributes["Size"] = size_value
-            if quality_value != -1:
-                annotation.attributes["Quality"] = quality_value
-        
+            # Update each attribute if it should be changed
+            for attr_name, attr_value in attribute_values.items():
+                annotation.attributes[attr_name] = attr_value
+
         # Update the canvas annotations if they're from the current frame
         self.main_window.canvas.annotations = annotations.copy()
 
-    def apply_attributes_to_all_frames(self, size_value, quality_value):
+    def apply_batch_attributes_to_all_frames(self, attribute_values):
         """Apply attribute changes to all annotations in all frames"""
         for frame_num, annotations in self.main_window.frame_annotations.items():
             for annotation in annotations:
-                # Only update if the value is not -1 (no change)
-                if size_value != -1:
-                    annotation.attributes["Size"] = size_value
-                if quality_value != -1:
-                    annotation.attributes["Quality"] = quality_value
-        
+                # Update each attribute if it should be changed
+                for attr_name, attr_value in attribute_values.items():
+                    annotation.attributes[attr_name] = attr_value
+
         # Update the current frame's annotations on the canvas
         current_frame = self.main_window.current_frame
         if current_frame in self.main_window.frame_annotations:
-            self.main_window.canvas.annotations = self.main_window.frame_annotations[current_frame].copy()
+            self.main_window.canvas.annotations = self.main_window.frame_annotations[
+                current_frame
+            ].copy()

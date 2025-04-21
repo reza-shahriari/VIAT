@@ -6,129 +6,104 @@ from PyQt5.QtCore import QRect
 from PyQt5.QtGui import QColor
 
 
-def save_project(
-    filename,
-    annotations,
-    class_colors,
-    video_path=None,
-    current_frame=0,
-    frame_annotations=None,
-):
-    """Save project to file"""
-    data = {
-        "annotations": [],
-        "classes": {},
-        "video_path": video_path,
-        "current_frame": current_frame,
-        "frame_annotations": {},
-    }
-
+def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, frame_annotations=None, class_attributes=None):
+    """
+    Save project data to a JSON file.
+    
+    Args:
+        filename (str): Path to save the project file
+        annotations (list): List of annotation objects
+        class_colors (dict): Dictionary mapping class names to colors
+        video_path (str, optional): Path to the video file
+        current_frame (int, optional): Current frame number
+        frame_annotations (dict, optional): Dictionary mapping frame numbers to annotations
+        class_attributes (dict, optional): Dictionary mapping class names to attribute configurations
+    """
+    import json
+    
     # Convert annotations to serializable format
+    serialized_annotations = []
     for annotation in annotations:
-        ann_data = {
-            "id": annotation.id,
-            "class": annotation.class_name,
-            "rect": {
-                "x": annotation.rect.x(),
-                "y": annotation.rect.y(),
-                "width": annotation.rect.width(),
-                "height": annotation.rect.height(),
-            },
-            "attributes": annotation.attributes,
-        }
-        data["annotations"].append(ann_data)
-
+        serialized_annotations.append(annotation.to_dict())
+    
     # Convert class colors to serializable format
+    serialized_colors = {}
     for class_name, color in class_colors.items():
-        data["classes"][class_name] = {
+        serialized_colors[class_name] = {
             "r": color.red(),
             "g": color.green(),
             "b": color.blue(),
+            "a": color.alpha()
         }
-
-    # Save frame annotations if provided
+    
+    # Convert frame annotations to serializable format
+    serialized_frame_annotations = {}
     if frame_annotations:
         for frame_num, frame_anns in frame_annotations.items():
-            data["frame_annotations"][str(frame_num)] = []
-            for annotation in frame_anns:
-                ann_data = {
-                    "id": annotation.id,
-                    "class": annotation.class_name,
-                    "rect": {
-                        "x": annotation.rect.x(),
-                        "y": annotation.rect.y(),
-                        "width": annotation.rect.width(),
-                        "height": annotation.rect.height(),
-                    },
-                    "attributes": annotation.attributes,
-                }
-                data["frame_annotations"][str(frame_num)].append(ann_data)
-
+            serialized_frame_annotations[str(frame_num)] = [ann.to_dict() for ann in frame_anns]
+    
+    # Create project data dictionary
+    project_data = {
+        "annotations": serialized_annotations,
+        "class_colors": serialized_colors,
+        "video_path": video_path,
+        "current_frame": current_frame,
+        "frame_annotations": serialized_frame_annotations,
+        "class_attributes": class_attributes
+    }
+    
     # Save to file
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(filename, 'w') as f:
+        json.dump(project_data, f, indent=2)
 
-
-def load_project(filename, BoundingBox):
-    """Load project from file"""
-    with open(filename, "r") as f:
-        data = json.load(f)
-
+def load_project(filename, annotation_class):
+    """
+    Load project data from a JSON file.
+    
+    Args:
+        filename (str): Path to the project file
+        annotation_class (class): Class to use for creating annotation objects
+        
+    Returns:
+        tuple: (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes)
+    """
+    import json
+    from PyQt5.QtGui import QColor
+    
+    with open(filename, 'r') as f:
+        project_data = json.load(f)
+    
+    # Extract data
+    serialized_annotations = project_data.get("annotations", [])
+    serialized_colors = project_data.get("class_colors", {})
+    video_path = project_data.get("video_path", None)
+    current_frame = project_data.get("current_frame", 0)
+    serialized_frame_annotations = project_data.get("frame_annotations", {})
+    class_attributes = project_data.get("class_attributes", {})
+    
+    # Convert annotations back to objects
     annotations = []
+    for ann_dict in serialized_annotations:
+        annotations.append(annotation_class.from_dict(ann_dict))
+    
+    # Convert class colors back to QColor objects
     class_colors = {}
-    video_path = data.get("video_path", "")
-    current_frame = data.get("current_frame", 0)
-    frame_annotations = {}
-
-    # Load class colors
-    for class_name, color_data in data.get("classes", {}).items():
+    for class_name, color_dict in serialized_colors.items():
         class_colors[class_name] = QColor(
-            color_data.get("r", 255), color_data.get("g", 0), color_data.get("b", 0)
+            color_dict.get("r", 0),
+            color_dict.get("g", 0),
+            color_dict.get("b", 0),
+            color_dict.get("a", 255)
         )
-
-    # Load annotations
-    for ann_data in data.get("annotations", []):
-        rect_data = ann_data.get("rect", {})
-        rect = QRect(
-            rect_data.get("x", 0),
-            rect_data.get("y", 0),
-            rect_data.get("width", 0),
-            rect_data.get("height", 0),
-        )
-
-        class_name = ann_data.get("class", "Unknown")
-        color = class_colors.get(class_name, QColor(255, 0, 0))
-
-        bbox = BoundingBox(rect, class_name, ann_data.get("attributes", {}), color)
-        bbox.id = ann_data.get("id", bbox.id)  # Use saved ID if available
-
-        annotations.append(bbox)
-
-    # Load frame annotations
-    for frame_num_str, frame_anns_data in data.get("frame_annotations", {}).items():
+    
+    # Convert frame annotations back to objects
+    frame_annotations = {}
+    for frame_num_str, frame_anns in serialized_frame_annotations.items():
         frame_num = int(frame_num_str)
-        frame_anns = []
+        frame_annotations[frame_num] = [annotation_class.from_dict(ann_dict) for ann_dict in frame_anns]
+    
+    return (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes)
 
-        for ann_data in frame_anns_data:
-            rect_data = ann_data.get("rect", {})
-            rect = QRect(
-                rect_data.get("x", 0),
-                rect_data.get("y", 0),
-                rect_data.get("width", 0),
-                rect_data.get("height", 0),
-            )
-
-            class_name = ann_data.get("class", "Unknown")
-            color = class_colors.get(class_name, QColor(255, 0, 0))
-
-            bbox = BoundingBox(rect, class_name, ann_data.get("attributes", {}), color)
-            bbox.id = ann_data.get("id", bbox.id)  # Use saved ID if available
-
-            frame_anns.append(bbox)
-
-        frame_annotations[frame_num] = frame_anns
-
-    return annotations, class_colors, video_path, current_frame, frame_annotations
 
 
 def export_annotations(

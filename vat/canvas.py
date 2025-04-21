@@ -54,6 +54,12 @@ class VideoCanvas(QWidget):
         self.class_colors = {
             "Drone": QColor(0, 255, 255),
         }
+        self.class_attributes = {
+            "Drone": {
+                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100}
+            }
+        }
         self.annotation_method = "Drag"  # Default method
         self.is_drawing = False
         self.start_point = None
