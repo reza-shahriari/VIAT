@@ -95,7 +95,7 @@ class VideoCanvas(QWidget):
         """Set the current annotation class"""
         if class_name in self.class_colors:
             self.current_class = class_name
-    
+  
     def paintEvent(self, event):
         """Paint the canvas with the current frame and annotations"""
         painter = QPainter(self)
@@ -127,11 +127,26 @@ class VideoCanvas(QWidget):
                 
                 # Draw class label
                 text_rect = QRect(display_rect.left(), display_rect.top() - 20, 
-                                 display_rect.width(), 20)
+                                display_rect.width(), 20)
                 painter.fillRect(text_rect, annotation.color)
                 painter.setPen(QPen(QColor(0, 0, 0)))
                 painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
-            
+                
+                # Draw attributes below the bounding box
+                if annotation.attributes:
+                    # Create attribute text
+                    attr_text = ""
+                    for key, value in annotation.attributes.items():
+                        attr_text += f"{key}: {value}, "
+                    attr_text = attr_text.rstrip(", ")
+                    if attr_text:
+                        # Create attribute label rectangle
+                        attr_rect = QRect(display_rect.left(), display_rect.bottom(), 
+                                        display_rect.width(), 20)
+                        painter.fillRect(attr_rect, QColor(40, 40, 40, 180))  # Semi-transparent background
+                        painter.setPen(QPen(QColor(255, 255, 255)))
+                        painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
+                
             # Draw current annotation if drawing
             if self.is_drawing and self.start_point and self.current_point:
                 rect = QRect(self.start_point, self.current_point).normalized()
@@ -150,24 +165,24 @@ class VideoCanvas(QWidget):
                 
                 # Top edge
                 painter.drawRect(QRect(display_rect.center().x() - handle_size//2, 
-                                      display_rect.top() - handle_size//2,
-                                      handle_size, handle_size))
+                                    display_rect.top() - handle_size//2,
+                                    handle_size, handle_size))
                 
                 # Right edge
                 painter.drawRect(QRect(display_rect.right() - handle_size//2, 
-                                      display_rect.center().y() - handle_size//2,
-                                      handle_size, handle_size))
+                                    display_rect.center().y() - handle_size//2,
+                                    handle_size, handle_size))
                 
                 # Bottom edge
                 painter.drawRect(QRect(display_rect.center().x() - handle_size//2, 
-                                      display_rect.bottom() - handle_size//2,
-                                      handle_size, handle_size))
+                                    display_rect.bottom() - handle_size//2,
+                                    handle_size, handle_size))
                 
                 # Left edge
                 painter.drawRect(QRect(display_rect.left() - handle_size//2, 
-                                      display_rect.center().y() - handle_size//2,
-                                      handle_size, handle_size))
-    
+                                    display_rect.center().y() - handle_size//2,
+                                    handle_size, handle_size))
+
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio"""
         if not self.pixmap:
