@@ -471,6 +471,8 @@ class VideoCanvas(QWidget):
     def move_edge(self, rect, edge, pos, start_pos):
         """
         Move a specific edge of the rectangle based on cursor movement.
+        When an edge is moved past its opposite, the rectangle flips orientation
+        while keeping the opposite edge in its original position.
 
         Args:
             rect: QRect to modify
@@ -479,7 +481,7 @@ class VideoCanvas(QWidget):
             start_pos: Starting cursor position
 
         Returns:
-            Modified QRect
+            Modified QRect with updated edge and possibly flipped orientation
         """
         delta_x = pos.x() - start_pos.x()
         delta_y = pos.y() - start_pos.y()
@@ -488,22 +490,35 @@ class VideoCanvas(QWidget):
 
         if edge == EDGE_TOP:
             new_top = rect.top() + delta_y
-            if new_top < rect.bottom():
-                new_rect.setTop(new_top)
+            # Allow top to move past bottom, which will create a flipped rectangle
+            new_rect.setTop(new_top)
+            # Normalize the rectangle to ensure it has positive width and height
+            new_rect = new_rect.normalized()
+            
         elif edge == EDGE_RIGHT:
             new_right = rect.right() + delta_x
-            if new_right > rect.left():
-                new_rect.setRight(new_right)
+            # Allow right to move past left, which will create a flipped rectangle
+            new_rect.setRight(new_right)
+            # Normalize the rectangle to ensure it has positive width and height
+            new_rect = new_rect.normalized()
+            
         elif edge == EDGE_BOTTOM:
             new_bottom = rect.bottom() + delta_y
-            if new_bottom > rect.top():
-                new_rect.setBottom(new_bottom)
+            # Allow bottom to move past top, which will create a flipped rectangle
+            new_rect.setBottom(new_bottom)
+            # Normalize the rectangle to ensure it has positive width and height
+            new_rect = new_rect.normalized()
+            
         elif edge == EDGE_LEFT:
             new_left = rect.left() + delta_x
-            if new_left < rect.right():
-                new_rect.setLeft(new_left)
+            # Allow left to move past right, which will create a flipped rectangle
+            new_rect.setLeft(new_left)
+            # Normalize the rectangle to ensure it has positive width and height
+            new_rect = new_rect.normalized()
 
         return new_rect
+
+
 
     def find_annotation_at_pos(self, pos):
         """Find annotation at the given position"""
