@@ -208,6 +208,12 @@ class VideoAnnotationTool(QMainWindow):
         add_action = QAction("Add Annotation", self)
         add_action.triggered.connect(self.add_annotation)
         edit_menu.addAction(add_action)
+        
+        # Batch Edit Annotations action
+        batch_edit_action = QAction("Batch Edit Annotations", self)
+        batch_edit_action.setShortcut("Ctrl+B")
+        batch_edit_action.triggered.connect(lambda: self.annotation_dock.batch_edit_annotations())
+        edit_menu.addAction(batch_edit_action)
 
         # Add Class action
         add_class_action = QAction("Add Class", self)
@@ -1066,8 +1072,13 @@ class VideoAnnotationTool(QMainWindow):
             current_index = self.method_selector.currentIndex()
             new_index = (current_index + 1) % self.method_selector.count()
             self.method_selector.setCurrentIndex(new_index)
+        # Batch edit annotations with 'B' key
+        elif event.key() == Qt.Key_B:
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.batch_edit_annotations()
         else:
             super().keyPressEvent(event)
+
 
     def edit_annotation(self, annotation):
         """Edit the properties of an annotation."""

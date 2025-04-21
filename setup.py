@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="vat",
-    version="0.1.0",
+    version="2.0.0",
     packages=find_packages(),
     install_requires=[
         "PyQt5>=5.15.0",
@@ -22,8 +22,8 @@ setup(
             "vat=vat.run:main",
         ],
     },
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Reza",
+    author_email="rezshahriari@gamil.com",
     description="Video Annotation Tool with object detection and tracking capabilities",
     keywords="video, annotation, object detection, tracking",
     python_requires=">=3.8",
