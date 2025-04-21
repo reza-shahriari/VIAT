@@ -41,7 +41,7 @@ class StyleManager:
         dark_palette = QPalette()
         dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
         dark_palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
-        dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
+        dark_palette.setColor(QPalette.Base, QColor(35, 35, 35))  # Darker for better contrast
         dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
         dark_palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
         dark_palette.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
@@ -51,10 +51,21 @@ class StyleManager:
         dark_palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
         dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
         dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        dark_palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))
+        dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+        
+        # Additional palette colors for better contrast in dock widgets
+        dark_palette.setColor(QPalette.Light, QColor(80, 80, 80))
+        dark_palette.setColor(QPalette.Midlight, QColor(70, 70, 70))
+        dark_palette.setColor(QPalette.Mid, QColor(60, 60, 60))
+        dark_palette.setColor(QPalette.Dark, QColor(30, 30, 30))
+        dark_palette.setColor(QPalette.Shadow, QColor(20, 20, 20))
         
         QApplication.setPalette(dark_palette)
+        
+ 
+        
         return True
+
     
     @staticmethod
     def set_light_style():

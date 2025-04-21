@@ -118,7 +118,6 @@ class VideoAnnotationTool(QMainWindow):
         # Initialize annotation list
         self.update_annotation_list()
 
-        
     def create_menu_bar(self):
         """Create the application menu bar and its actions."""
         menubar = self.menuBar()
@@ -1742,8 +1741,47 @@ class VideoAnnotationTool(QMainWindow):
         if style_name in self.styles:
             self.styles[style_name]()
             self.current_style = style_name
+            
+            # Update canvas background based on style
+            if style_name == "Dark":
+                self.canvas.setStyleSheet("background-color: #151515;")  # Darker background
+            elif style_name == "Light":
+                self.canvas.setStyleSheet("background-color: #FFFFFF;")  # White background
+            elif style_name == "Blue":
+                self.canvas.setStyleSheet("background-color: #E5F0FF;")  # Light blue background
+            elif style_name == "Green":
+                self.canvas.setStyleSheet("background-color: #E5FFE5;")  # Light green background
+            else:
+                self.canvas.setStyleSheet("")  # Default background
+            
+            # Clear any existing stylesheet for annotation dock
+            if hasattr(self, 'annotation_dock'):
+                if style_name == "Dark":
+                    self.annotation_dock.setStyleSheet("""
+                        QListWidget {
+                            background-color: #252525;
+                            color: #FFFFFF;
+                            border: 1px solid #555555;
+                        }
+                    """)
+                else:
+                    self.annotation_dock.setStyleSheet("")
+            
+            # Update class dock if it exists
+            if hasattr(self, 'class_dock'):
+                if style_name == "Dark":
+                    self.class_dock.setStyleSheet("""
+                        QListWidget {
+                            background-color: #252525;
+                            color: #FFFFFF;
+                            border: 1px solid #555555;
+                        }
+                    """)
+                else:
+                    self.class_dock.setStyleSheet("")
+            
             self.statusBar.showMessage(f"Style changed to {style_name}")
-    
+
     def show_about(self):
         """Show about dialog."""
         QMessageBox.about(
