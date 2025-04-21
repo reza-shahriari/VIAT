@@ -71,6 +71,8 @@ class VideoCanvas(QWidget):
         self.edge_moving = False
         self.active_edge = EDGE_NONE
         self.edge_start_pos = None
+        # Smart edge movement
+        self.smart_edge_enabled = False
 
         # Add zoom properties
         self.zoom_level = 1.0
@@ -82,7 +84,6 @@ class VideoCanvas(QWidget):
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-
     def set_frame(self, frame):
         """Set the current frame to display"""
         if frame is None:
@@ -108,6 +109,7 @@ class VideoCanvas(QWidget):
         if class_name in self.class_colors:
             self.current_class = class_name
 
+
     def paintEvent(self, event):
         """Paint the canvas with the current frame and annotations"""
         painter = QPainter(self)
@@ -123,6 +125,22 @@ class VideoCanvas(QWidget):
             # Draw the image
             painter.drawPixmap(display_rect, self.pixmap)
 
+            # Draw smart edge indicator if enabled
+            if hasattr(self, 'smart_edge_enabled') and self.smart_edge_enabled:
+                painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
+                painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
+                
+                # Draw "Smart Edge" text in the top-right corner
+                font = painter.font()
+                font.setPointSize(10)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.setPen(QPen(QColor(0, 255, 0)))
+                painter.drawText(
+                    display_rect.right() - 120, 
+                    display_rect.top() + 20, 
+                    "Smart Edge ON"
+                )
             # Draw annotations
             for annotation in self.annotations:
                 # Convert annotation rectangle to display coordinates
@@ -612,9 +630,53 @@ class VideoCanvas(QWidget):
             # Update the annotation with the new rectangle
             if new_img_rect:
                 self.selected_annotation.rect = new_img_rect
+                
+                # Apply smart edge refinement if enabled
+                if hasattr(self, 'smart_edge_enabled') and self.smart_edge_enabled:
+                    # Get current frame from main window
+                    if self.main_window and hasattr(self.main_window, 'cap'):
+                        # Get current frame
+                        ret, frame = self.main_window.cap.read()
+                        if ret:
+                            # Move back one frame to get the current frame again
+                            self.main_window.cap.set(cv2.CAP_PROP_POS_FRAMES, 
+                                                   self.main_window.current_frame)
+                            
+                            # Map edge type to smart_edge format
+                            edge_type_map = {
+                                EDGE_TOP: 'top',
+                                EDGE_RIGHT: 'right',
+                                EDGE_BOTTOM: 'bottom',
+                                EDGE_LEFT: 'left'
+                            }
+                            
+                            if self.active_edge in edge_type_map:
+                                edge_type = edge_type_map[self.active_edge]
+                                
+                                # Import the smart edge function
+                                from smart_edge import refine_edge_position
+                                
+                                # Get refined position
+                                refined_pos = refine_edge_position(frame, self.selected_annotation.rect, edge_type)
+                                
+                                if refined_pos is not None:
+                                    # Update the rectangle with the refined edge position
+                                    updated_rect = QRect(self.selected_annotation.rect)
+                                    
+                                    if self.active_edge == EDGE_TOP:
+                                        updated_rect.setTop(refined_pos)
+                                    elif self.active_edge == EDGE_RIGHT:
+                                        updated_rect.setRight(refined_pos)
+                                    elif self.active_edge == EDGE_BOTTOM:
+                                        updated_rect.setBottom(refined_pos)
+                                    elif self.active_edge == EDGE_LEFT:
+                                        updated_rect.setLeft(refined_pos)
+                                    
+                                    # Apply the updated rectangle
+                                    self.selected_annotation.rect = updated_rect
+                
                 self.update()
             return
-
         # If we're dragging an annotation
         if self.drag_start_pos and self.selected_annotation and not self.is_drawing:
             img_pos = self.display_to_image_pos(event.pos())

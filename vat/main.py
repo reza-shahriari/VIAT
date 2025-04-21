@@ -42,6 +42,7 @@ from annotation import BoundingBox
 from widgets.styles import StyleManager
 from widgets import AnnotationDock, ClassDock, AnnotationToolbar
 from utils import save_project, load_project, export_annotations
+from smart_edge import refine_edge_position
 
 
 class VideoAnnotationTool(QMainWindow):
@@ -69,6 +70,7 @@ class VideoAnnotationTool(QMainWindow):
         self.video_filename = ""
         # Set up the user interface
         self.init_ui()
+        self.canvas.smart_edge_enabled = False
 
     def init_properties(self):
         """Initialize the application properties and state variables."""
@@ -80,7 +82,6 @@ class VideoAnnotationTool(QMainWindow):
                 self.styles[style_name] = StyleManager.set_default_style
             else:
                 self.styles[style_name] = getattr(StyleManager, method_name)
-
         # Annotation methods
         self.annotation_methods = {
             "Rectangle": "Draw rectangular bounding boxes",
@@ -241,6 +242,15 @@ class VideoAnnotationTool(QMainWindow):
         track_action = QAction("Track Objects", self)
         track_action.triggered.connect(self.track_objects)
         tools_menu.addAction(track_action)
+        
+        # Smart Edge Movement action
+        smart_edge_action = QAction("Smart Edge Movement", self, checkable=True)
+        smart_edge_action.setShortcut("Ctrl+E")
+        smart_edge_action.triggered.connect(self.toggle_smart_edge)
+        tools_menu.addAction(smart_edge_action)
+        
+        # Store reference to keep menu and toolbar in sync
+        self.smart_edge_action = smart_edge_action
 
     def create_style_menu(self, menubar):
         """Create the Style menu and its actions."""
@@ -285,6 +295,16 @@ class VideoAnnotationTool(QMainWindow):
         self.method_selector.setToolTip("Drag: Click and drag to create box\nTwoClick: Click two corners to create box")
         self.method_selector.currentTextChanged.connect(self.change_annotation_method)
         self.toolbar.addWidget(self.method_selector)
+
+    def toggle_smart_edge(self):
+        """Toggle smart edge movement functionality."""
+        is_active = self.smart_edge_action.isChecked()
+        self.canvas.smart_edge_enabled = is_active
+        
+        if is_active:
+            self.statusBar.showMessage("Smart Edge Movement enabled - edges will snap to image features")
+        else:
+            self.statusBar.showMessage("Smart Edge Movement disabled")
 
     def change_annotation_method(self, method_name):
         """Change the current annotation method."""
@@ -1095,8 +1115,14 @@ class VideoAnnotationTool(QMainWindow):
         elif event.key() == Qt.Key_B:
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.batch_edit_annotations()
+        # Toggle smart edge with 'E' key
+        elif event.key() == Qt.Key_E:
+            if hasattr(self, "smart_edge_action"):
+                self.smart_edge_action.setChecked(not self.smart_edge_action.isChecked())
+                self.toggle_smart_edge()
         else:
             super().keyPressEvent(event)
+
 
     def edit_annotation(self, annotation):
         """Edit the properties of an annotation."""
