@@ -481,6 +481,9 @@ class VideoCanvas(QWidget):
                 # Update the annotation list in the main window
                 if self.main_window:
                     self.main_window.update_annotation_list()
+                    # Save annotations to current frame
+                    if hasattr(self.main_window, 'frame_annotations'):
+                        self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations.copy()
                 return
             
             # If we were dragging an annotation
@@ -491,6 +494,9 @@ class VideoCanvas(QWidget):
                 # Update the annotation list in the main window
                 if self.main_window:
                     self.main_window.update_annotation_list()
+                    # Save annotations to current frame
+                    if hasattr(self.main_window, 'frame_annotations'):
+                        self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations.copy()
                 return
             
             # If we were drawing a new annotation
@@ -511,14 +517,15 @@ class VideoCanvas(QWidget):
                     # Update the annotation list in the main window
                     if self.main_window:
                         self.main_window.update_annotation_list()
-                    if hasattr(self.main_window, 'frame_annotations'):
-                        self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations
+                        # Save annotations to current frame
+                        if hasattr(self.main_window, 'frame_annotations'):
+                            self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations.copy()
                 # Reset drawing state
                 self.is_drawing = False
                 self.start_point = None
                 self.current_point = None
                 self.update()
-    
+
     def show_context_menu(self, position):
         """Show context menu for right-click actions"""
         if not self.pixmap:
