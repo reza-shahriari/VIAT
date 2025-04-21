@@ -961,10 +961,7 @@ class VideoAnnotationTool(QMainWindow):
         quality_spinner.setValue(int(annotation.attributes.get("Quality", -1)))
         form_layout.addRow("Quality (0-100):", quality_spinner)
         
-        # Add custom attributes if needed
-        # For example, an ID field
-        id_field = QLineEdit(getattr(annotation, 'id', ''))
-        form_layout.addRow("ID:", id_field)
+
         
         layout.addLayout(form_layout)
         
@@ -980,7 +977,7 @@ class VideoAnnotationTool(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             annotation.class_name = class_combo.currentText()
             annotation.color = self.canvas.class_colors[annotation.class_name]
-            annotation.id = id_field.text()
+
             annotation.attributes["Size"] = size_spinner.value()
             annotation.attributes["Quality"] = quality_spinner.value()
             
@@ -1588,8 +1585,31 @@ class VideoAnnotationTool(QMainWindow):
                 return
             
             if new_class_name != class_name and new_class_name in self.canvas.class_colors:
-                QMessageBox.warning(self, "Edit Class", f"Class '{new_class_name}' already exists!")
-                return
+                # Ask if user wants to merge classes
+                reply = QMessageBox.question(
+                    self, "Merge Classes", 
+                    f"Class '{new_class_name}' already exists. Do you want to convert all '{class_name}' annotations to '{new_class_name}'?",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Cancel:
+                    return
+                elif reply == QMessageBox.Yes:
+                    # Get color from existing class
+                    color = self.canvas.class_colors[new_class_name]
+                    # Convert all annotations of old class to new class
+                    self.convert_class(class_name, new_class_name)
+                    # Remove old class
+                    del self.canvas.class_colors[class_name]
+                    # Update UI
+                    self.toolbar.update_class_selector()
+                    self.class_dock.update_class_list()
+                    self.update_annotation_list()
+                    self.canvas.update()
+                    return
+                else:
+                    # User chose No, so don't proceed with the rename
+                    return
             
             # Get color from button's stylesheet
             color_str = color_button.styleSheet().split(":")[-1].strip()
@@ -1597,7 +1617,23 @@ class VideoAnnotationTool(QMainWindow):
             
             # Update class
             self.update_class(class_name, new_class_name, color)
-    
+
+    def convert_class(self, old_class, new_class):
+        """Convert all annotations from one class to another."""
+        # Update annotations in current frame
+        for annotation in self.canvas.annotations:
+            if annotation.class_name == old_class:
+                annotation.class_name = new_class
+                annotation.color = self.canvas.class_colors[new_class]
+        
+        # Update annotations in all frames
+        for frame_num, annotations in self.frame_annotations.items():
+            for annotation in annotations:
+                if annotation.class_name == old_class:
+                    annotation.class_name = new_class
+                    annotation.color = self.canvas.class_colors[new_class]
+        
+        self.statusBar.showMessage(f"Converted all '{old_class}' annotations to '{new_class}'")
     def update_class(self, old_name, new_name, color):
         """Update a class with new name and color."""
         # Update class name in annotations
