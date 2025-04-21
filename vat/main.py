@@ -96,11 +96,15 @@ class VideoAnnotationTool(QMainWindow):
         # Create central widget with video canvas
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+        main_layout.setSpacing(2)  # Reduce spacing between widgets
+        
         self.canvas = VideoCanvas(self)
-        main_layout.addWidget(self.canvas)
+        main_layout.addWidget(self.canvas, 1)  # Give canvas a stretch factor of 1
+        
         playback_controls = self.create_playback_controls()
-        main_layout.addWidget(playback_controls)
-    
+        main_layout.addWidget(playback_controls, 0)  # No stretch for controls
+        
         self.setCentralWidget(central_widget)
         # Create UI components
         self.create_menu_bar()
@@ -113,6 +117,7 @@ class VideoAnnotationTool(QMainWindow):
         
         # Initialize annotation list
         self.update_annotation_list()
+
         
     def create_menu_bar(self):
         """Create the application menu bar and its actions."""
@@ -256,38 +261,48 @@ class VideoAnnotationTool(QMainWindow):
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
         self.statusBar.showMessage("Ready")
+    
     def create_playback_controls(self):
         """Create video playback controls."""
         # Create a widget to hold the controls
         playback_widget = QWidget()
         playback_layout = QHBoxLayout(playback_widget)
+        playback_layout.setContentsMargins(5, 2, 5, 2)  # Reduce margins
         
         # Play/Pause button
         self.play_button = QPushButton()
         self.play_button.setIcon(QIcon.fromTheme("media-playback-start"))
         self.play_button.setToolTip("Play/Pause")
         self.play_button.clicked.connect(self.play_pause_video)
+        self.play_button.setMaximumWidth(30)  # Make button smaller
+        self.play_button.setMaximumHeight(24)  # Make button smaller
         
         # Previous frame button
         prev_button = QPushButton()
         prev_button.setIcon(QIcon.fromTheme("media-skip-backward"))
         prev_button.setToolTip("Previous Frame")
         prev_button.clicked.connect(self.prev_frame)
+        prev_button.setMaximumWidth(30)  # Make button smaller
+        prev_button.setMaximumHeight(24)  # Make button smaller
         
         # Next frame button
         next_button = QPushButton()
         next_button.setIcon(QIcon.fromTheme("media-skip-forward"))
         next_button.setToolTip("Next Frame")
         next_button.clicked.connect(self.next_frame)
+        next_button.setMaximumWidth(30)  # Make button smaller
+        next_button.setMaximumHeight(24)  # Make button smaller
         
         # Frame slider
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(100)  # Will be updated when video is loaded
         self.frame_slider.valueChanged.connect(self.slider_changed)
+        self.frame_slider.setMaximumHeight(20)  # Make slider smaller
         
         # Frame counter label
         self.frame_label = QLabel("0/0")
+        self.frame_label.setMaximumWidth(80)  # Limit width
         
         # Add widgets to layout
         playback_layout.addWidget(prev_button)
@@ -296,7 +311,11 @@ class VideoAnnotationTool(QMainWindow):
         playback_layout.addWidget(self.frame_slider)
         playback_layout.addWidget(self.frame_label)
         
+        # Set fixed height for the entire widget
+        playback_widget.setMaximumHeight(30)
+        
         return playback_widget
+
 
     def setup_playback_timer(self):
         """Set up the timer for video playback."""
