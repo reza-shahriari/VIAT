@@ -255,13 +255,33 @@ class VideoAnnotationTool(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
-
+    
     def create_toolbar(self):
         """Create the annotation toolbar."""
         self.toolbar = AnnotationToolbar(self)
         self.addToolBar(self.toolbar)
         self.class_selector = self.toolbar.class_selector
+        
+        # Add annotation method selector
+        method_label = QLabel("Method:")
+        self.toolbar.addWidget(method_label)
+        
+        self.method_selector = QComboBox()
+        self.method_selector.addItems(["Drag", "TwoClick"])
+        self.method_selector.setToolTip("Drag: Click and drag to create box\nTwoClick: Click two corners to create box")
+        self.method_selector.currentTextChanged.connect(self.change_annotation_method)
+        self.toolbar.addWidget(self.method_selector)
 
+    def change_annotation_method(self, method_name):
+        """Change the current annotation method."""
+        if method_name in ["Drag", "TwoClick"]:
+            # Update canvas annotation method
+            self.canvas.set_annotation_method(method_name)
+            
+            if method_name == "TwoClick":
+                self.statusBar.showMessage("Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel.")
+            else:
+                self.statusBar.showMessage(f"Annotation method changed to {method_name}")
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
         # Annotation dock
@@ -340,14 +360,7 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Video handling methods
     #
-    def change_annotation_method(self, method_name):
-        """Change the current annotation method."""
-        if method_name in self.annotation_methods:
-            self.current_annotation_method = method_name
 
-            # Update canvas annotation mode if needed
-            if hasattr(self.canvas, "set_annotation_mode"):
-                self.canvas.set_annotation_mode(method_name)
 
     def zoom_in(self):
         """Zoom in on the canvas."""
@@ -1045,6 +1058,16 @@ class VideoAnnotationTool(QMainWindow):
                 key, value = line.split("=", 1)
                 attributes[key.strip()] = value.strip()
         return attributes
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard events."""
+        # Toggle annotation method with 'M' key
+        if event.key() == Qt.Key_M:
+            current_index = self.method_selector.currentIndex()
+            new_index = (current_index + 1) % self.method_selector.count()
+            self.method_selector.setCurrentIndex(new_index)
+        else:
+            super().keyPressEvent(event)
 
     def edit_annotation(self, annotation):
         """Edit the properties of an annotation."""

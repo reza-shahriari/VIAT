@@ -60,7 +60,7 @@ class VideoCanvas(QWidget):
         self.end_point = None
         self.resize_handle = None
         self.resize_start = None
-
+        self.two_click_first_point = None
         # Edge movement properties
         self.edge_moving = False
         self.active_edge = EDGE_NONE
@@ -244,6 +244,26 @@ class VideoCanvas(QWidget):
                     )
                 )
                 painter.drawRect(display_rect)
+                
+            # Draw the first point marker in two-click mode
+            if self.annotation_method == "TwoClick" and self.two_click_first_point:
+                display_point = self.image_to_display_pos(self.two_click_first_point)
+                if display_point:
+                    # Draw a cross at the first click point
+                    marker_size = 10
+                    painter.setPen(QPen(QColor(255, 255, 0), 2))  # Yellow pen
+                    painter.drawLine(
+                        display_point.x() - marker_size, 
+                        display_point.y(),
+                        display_point.x() + marker_size, 
+                        display_point.y()
+                    )
+                    painter.drawLine(
+                        display_point.x(), 
+                        display_point.y() - marker_size,
+                        display_point.x(), 
+                        display_point.y() + marker_size
+                    )
 
             # Draw edge indicators for selected annotation
             if self.selected_annotation and not self.is_drawing:
@@ -489,6 +509,44 @@ class VideoCanvas(QWidget):
             if not img_pos:
                 return
 
+            # Check if we're in two-click mode and already have the first point
+            if self.annotation_method == "TwoClick" and self.two_click_first_point is not None:
+                # Second click - create the bounding box regardless of what's under the cursor
+                self.current_point = img_pos
+                
+                # Create a rectangle from the two points
+                rect = QRect(self.two_click_first_point, img_pos).normalized()
+                
+                # Only create annotation if it has a minimum size
+                if rect.width() > 5 and rect.height() > 5:
+                    # Create a new bounding box annotation
+                    color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
+                    bbox = BoundingBox(
+                        rect, self.current_class, {"Size": -1, "Quality": -1}, color
+                    )
+
+                    # Add to annotations list
+                    self.annotations.append(bbox)
+                    self.selected_annotation = bbox
+
+                    # Update the annotation list in the main window
+                    if self.main_window:
+                        self.main_window.update_annotation_list()
+                        # Save annotations to current frame
+                        if hasattr(self.main_window, "frame_annotations"):
+                            self.main_window.frame_annotations[
+                                self.main_window.current_frame
+                            ] = self.annotations.copy()
+                            self.main_window.update_annotation_list()
+                
+                # Reset drawing state
+                self.is_drawing = False
+                self.two_click_first_point = None
+                self.start_point = None
+                self.current_point = None
+                self.update()
+                return
+
             # Check if we're on an edge of the selected annotation
             if self.selected_annotation:
                 display_rect = self.image_to_display_rect(self.selected_annotation.rect)
@@ -510,12 +568,22 @@ class VideoCanvas(QWidget):
                 self.update()
                 return
 
-            # Start drawing a new annotation
-            self.is_drawing = True
-            self.start_point = img_pos
-            self.current_point = img_pos
-            self.selected_annotation = None
-            self.update()
+            # Start drawing a new annotation based on the current method
+            if self.annotation_method == "Drag":
+                # Traditional drag method
+                self.is_drawing = True
+                self.start_point = img_pos
+                self.current_point = img_pos
+                self.selected_annotation = None
+                self.update()
+            elif self.annotation_method == "TwoClick":
+                # First click of two-click method
+                self.two_click_first_point = img_pos
+                self.is_drawing = True
+                self.start_point = img_pos
+                self.current_point = img_pos
+                self.selected_annotation = None
+                self.update()
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
@@ -524,7 +592,6 @@ class VideoCanvas(QWidget):
 
         # If we're moving an edge
         if self.edge_moving and self.selected_annotation:
-            # Get the current display rect
             # Get the current display rect
             display_rect = self.image_to_display_rect(self.original_rect)
 
@@ -593,7 +660,11 @@ class VideoCanvas(QWidget):
             if annotation:
                 self.setCursor(Qt.PointingHandCursor)
             else:
-                self.setCursor(Qt.ArrowCursor)
+                # Show crosshair cursor when in two-click mode and first point is set
+                if self.annotation_method == "TwoClick" and self.two_click_first_point is not None:
+                    self.setCursor(Qt.CrossCursor)
+                else:
+                    self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release events"""
@@ -632,8 +703,8 @@ class VideoCanvas(QWidget):
                         ] = self.annotations.copy()
                 return
 
-            # If we were drawing a new annotation
-            if self.is_drawing and self.start_point and self.current_point:
+            # If we were drawing a new annotation with drag method
+            if self.is_drawing and self.start_point and self.current_point and self.annotation_method == "Drag":
                 # Create a rectangle from the start and current points
                 rect = QRect(self.start_point, self.current_point).normalized()
 
@@ -664,7 +735,7 @@ class VideoCanvas(QWidget):
                 self.start_point = None
                 self.current_point = None
                 self.update()
-
+ 
     def select_annotation(self, annotation):
         """Select the specified annotation."""
         self.selected_annotation = annotation
@@ -733,6 +804,7 @@ class VideoCanvas(QWidget):
                 self.is_drawing = False
                 self.start_point = None
                 self.current_point = None
+                self.two_click_first_point = None  # Also reset two-click first point
             else:
                 self.selected_annotation = None
             self.update()
@@ -764,3 +836,14 @@ class VideoCanvas(QWidget):
         # If we have a main window, update its zoom level
         if self.main_window and hasattr(self.main_window, "zoom_level"):
             self.main_window.zoom_level = self.zoom_level
+
+    def set_annotation_method(self, method):
+        """Set the annotation method (Drag or TwoClick)"""
+        if method in ["Drag", "TwoClick"]:
+            self.annotation_method = method
+            # Reset any in-progress drawing
+            self.is_drawing = False
+            self.start_point = None
+            self.current_point = None
+            self.two_click_first_point = None
+            self.update()
