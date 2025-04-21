@@ -11,8 +11,6 @@ setup(
         "pillow>=9.0.0",
         "moviepy>=1.0.0",
         "ffmpeg-python>=0.2.0",
-        "torch>=1.10.0",
-        "torchvision>=0.11.0",
         "filterpy>=1.4.5",
         "scikit-learn>=1.0.0",
         "pyyaml>=6.0",

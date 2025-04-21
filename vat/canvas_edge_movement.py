@@ -7,21 +7,22 @@ EDGE_RIGHT = 2
 EDGE_BOTTOM = 3
 EDGE_LEFT = 4
 
+
 def detect_edge(rect, pos, threshold=8):
     """
     Detect if the cursor is near an edge of the rectangle.
-    
+
     Args:
         rect: QRect object
         pos: QPoint cursor position
         threshold: Distance threshold to consider cursor near an edge
-        
+
     Returns:
         Edge constant (EDGE_NONE, EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_LEFT)
     """
     if not rect.adjusted(-threshold, -threshold, threshold, threshold).contains(pos):
         return EDGE_NONE
-        
+
     # Check if cursor is near any edge
     if abs(pos.y() - rect.top()) <= threshold:
         return EDGE_TOP
@@ -31,8 +32,9 @@ def detect_edge(rect, pos, threshold=8):
         return EDGE_BOTTOM
     elif abs(pos.x() - rect.left()) <= threshold:
         return EDGE_LEFT
-    
+
     return EDGE_NONE
+
 
 def get_edge_cursor(edge):
     """Return the appropriate cursor for the given edge"""
@@ -42,24 +44,25 @@ def get_edge_cursor(edge):
         return Qt.SizeHorCursor
     return Qt.ArrowCursor
 
+
 def move_edge(rect, edge, pos, start_pos):
     """
     Move a specific edge of the rectangle based on cursor movement.
-    
+
     Args:
         rect: QRect to modify
         edge: Which edge to move (EDGE_TOP, EDGE_RIGHT, etc.)
         pos: Current cursor position
         start_pos: Starting cursor position
-        
+
     Returns:
         Modified QRect
     """
     delta_x = pos.x() - start_pos.x()
     delta_y = pos.y() - start_pos.y()
-    
+
     new_rect = QRect(rect)
-    
+
     if edge == EDGE_TOP:
         new_top = rect.top() + delta_y
         if new_top < rect.bottom():
@@ -76,5 +79,5 @@ def move_edge(rect, edge, pos, start_pos):
         new_left = rect.left() + delta_x
         if new_left < rect.right():
             new_rect.setLeft(new_left)
-    
+
     return new_rect
