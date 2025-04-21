@@ -608,10 +608,14 @@ class VideoAnnotationTool(QMainWindow):
             y_spin = dialog.findChildren(QSpinBox)[1]
             width_spin = dialog.findChildren(QSpinBox)[2]
             height_spin = dialog.findChildren(QSpinBox)[3]
-            attributes_text = dialog.findChild(QTextEdit)
+            size_spin = dialog.findChildren(QSpinBox)[4]
+            quality_spin = dialog.findChildren(QSpinBox)[5]
             
-            # Parse attributes
-            attributes = self.parse_attributes(attributes_text.toPlainText())
+            # Create attributes dictionary
+            attributes = {
+                "Size": size_spin.value(),
+                "Quality": quality_spin.value()
+            }
         
             # Create rectangle
             rect = QRect(x_spin.value(), y_spin.value(), width_spin.value(), height_spin.value())
@@ -625,8 +629,13 @@ class VideoAnnotationTool(QMainWindow):
         
             # Add to annotations
             self.canvas.annotations.append(bbox)
+            
+            # Save to frame annotations
+            self.frame_annotations[self.current_frame] = self.canvas.annotations
+            
             self.update_annotation_list()
             self.canvas.update()
+
     
     def create_annotation_dialog(self):
         """Create a dialog for adding or editing annotations."""
@@ -658,9 +667,17 @@ class VideoAnnotationTool(QMainWindow):
         coords_layout.addRow("Height:", height_spin)
         
         # Attributes
-        attributes_label = QLabel("Attributes (key=value, one per line):")
-        attributes_text = QTextEdit()
-        attributes_text.setMaximumHeight(100)
+        attributes_layout = QFormLayout()
+        size_spin = QSpinBox()
+        size_spin.setRange(0, 100)
+        size_spin.setValue(1)  # Default value
+        
+        quality_spin = QSpinBox()
+        quality_spin.setRange(0, 100)
+        quality_spin.setValue(1)  # Default value
+        
+        attributes_layout.addRow("Size (0-100):", size_spin)
+        attributes_layout.addRow("Quality (0-100):", quality_spin)
         
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -671,11 +688,11 @@ class VideoAnnotationTool(QMainWindow):
         layout.addWidget(class_label)
         layout.addWidget(class_combo)
         layout.addLayout(coords_layout)
-        layout.addWidget(attributes_label)
-        layout.addWidget(attributes_text)
+        layout.addLayout(attributes_layout)
         layout.addWidget(buttons)
         
         return dialog
+
     
     def parse_attributes(self, text):
         """Parse attributes from text input."""
@@ -704,6 +721,18 @@ class VideoAnnotationTool(QMainWindow):
         class_combo.setCurrentText(annotation.class_name)
         form_layout.addRow("Class:", class_combo)
         
+        # Size attribute (numeric 0-100)
+        size_spinner = QSpinBox()
+        size_spinner.setRange(0, 100)
+        size_spinner.setValue(int(annotation.attributes.get("Size", -1)))
+        form_layout.addRow("Size (0-100):", size_spinner)
+        
+        # Quality attribute (numeric 0-100)
+        quality_spinner = QSpinBox()
+        quality_spinner.setRange(0, 100)
+        quality_spinner.setValue(int(annotation.attributes.get("Quality", -1)))
+        form_layout.addRow("Quality (0-100):", quality_spinner)
+        
         # Add custom attributes if needed
         # For example, an ID field
         id_field = QLineEdit(getattr(annotation, 'id', ''))
@@ -724,10 +753,19 @@ class VideoAnnotationTool(QMainWindow):
             annotation.class_name = class_combo.currentText()
             annotation.color = self.canvas.class_colors[annotation.class_name]
             annotation.id = id_field.text()
+            annotation.attributes["Size"] = size_spinner.value()
+            annotation.attributes["Quality"] = quality_spinner.value()
             
             # Update canvas and mark project as modified
             self.canvas.update()
             self.project_modified = True
+            
+            # Update annotation list
+            self.update_annotation_list()
+            
+            # Save to frame annotations
+            self.frame_annotations[self.current_frame] = self.canvas.annotations
+
     
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""

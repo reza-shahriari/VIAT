@@ -9,7 +9,7 @@ class BoundingBox:
     def __init__(self, rect, class_name="default", attributes=None, color=None):
         self.rect = rect
         self.class_name = class_name
-        self.attributes = attributes or {}
+        self.attributes = attributes or {"Size":-1,"Quality":-1}
         self.color = color or QColor(255, 0, 0)
         self.id = id(self)  # Unique identifier
         self.frame_id = None  # Frame this annotation belongs to

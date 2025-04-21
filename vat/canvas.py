@@ -502,7 +502,7 @@ class VideoCanvas(QWidget):
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
                     color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
-                    bbox = BoundingBox(rect, self.current_class, {}, color)
+                    bbox = BoundingBox(rect, self.current_class, {"Size": -1, "Quality": -1}, color)
                     
                     # Add to annotations list
                     self.annotations.append(bbox)
@@ -511,7 +511,8 @@ class VideoCanvas(QWidget):
                     # Update the annotation list in the main window
                     if self.main_window:
                         self.main_window.update_annotation_list()
-                
+                    if hasattr(self.main_window, 'frame_annotations'):
+                        self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations
                 # Reset drawing state
                 self.is_drawing = False
                 self.start_point = None

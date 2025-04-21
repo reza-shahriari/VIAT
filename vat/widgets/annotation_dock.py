@@ -33,7 +33,7 @@ class AnnotationItemWidget(QWidget):
         # Add size attribute
         size_label = QLabel("Size:")
         self.size_input = QLineEdit()
-        self.size_input.setText(str(self.annotation.attributes.get('size', -1)))
+        self.size_input.setText(str(self.annotation.attributes.get('Size', -1)))
         self.size_input.setPlaceholderText("-1")
         self.size_input.textChanged.connect(self.update_size_attribute)
         
@@ -43,7 +43,7 @@ class AnnotationItemWidget(QWidget):
         # Add quality attribute
         quality_label = QLabel("Quality:")
         self.quality_input = QLineEdit()
-        self.quality_input.setText(str(self.annotation.attributes.get('quality', -1)))
+        self.quality_input.setText(str(self.annotation.attributes.get('Quality', -1)))
         self.quality_input.setPlaceholderText("-1")
         self.quality_input.textChanged.connect(self.update_quality_attribute)
         
@@ -61,24 +61,24 @@ class AnnotationItemWidget(QWidget):
     def update_size_attribute(self, text):
         try:
             value = int(text) if text else -1
-            self.annotation.attributes['size'] = value
+            self.annotation.attributes['Size'] = value
             # Update canvas to reflect changes
             if hasattr(self.parent_dock, 'main_window'):
                 self.parent_dock.main_window.canvas.update()
         except ValueError:
             # Reset to previous value if not a valid integer
-            self.size_input.setText(str(self.annotation.attributes.get('size', -1)))
+            self.size_input.setText(str(self.annotation.attributes.get('Size', -1)))
     
     def update_quality_attribute(self, text):
         try:
             value = int(text) if text else -1
-            self.annotation.attributes['quality'] = value
+            self.annotation.attributes['Quality'] = value
             # Update canvas to reflect changes
             if hasattr(self.parent_dock, 'main_window'):
                 self.parent_dock.main_window.canvas.update()
         except ValueError:
             # Reset to previous value if not a valid integer
-            self.quality_input.setText(str(self.annotation.attributes.get('quality', -1)))
+            self.quality_input.setText(str(self.annotation.attributes.get('Quality', -1)))
 
 class AnnotationDock(QDockWidget):
     def __init__(self, parent=None):
@@ -140,14 +140,17 @@ class AnnotationDock(QDockWidget):
         if hasattr(self.main_window, 'frame_annotations') and current_frame in self.main_window.frame_annotations:
             # Add annotations for the current frame to the list
             for annotation in self.main_window.frame_annotations[current_frame]:
-                item = QListWidgetItem(f"{annotation.class_name} - {annotation.id if hasattr(annotation, 'id') else ''}")
-                item.setData(Qt.UserRole, annotation)
+                item = QListWidgetItem()
+                annotation_widget = AnnotationItemWidget(annotation, self)
+                item.setSizeHint(annotation_widget.sizeHint())
                 self.annotations_list.addItem(item)
+                self.annotations_list.setItemWidget(item, annotation_widget)
     
     def on_annotation_selected(self, item):
         """Handle selection of an annotation in the list"""
-        annotation = item.data(Qt.UserRole)
-        if annotation:
+        widget = self.annotations_list.itemWidget(item)
+        if widget and hasattr(widget, 'annotation'):
+            annotation = widget.annotation
             # Select this annotation on the canvas
             self.main_window.canvas.select_annotation(annotation)
     
@@ -172,9 +175,11 @@ class AnnotationDock(QDockWidget):
         selected_items = self.annotations_list.selectedItems()
         if selected_items:
             item = selected_items[0]
-            annotation = item.data(Qt.UserRole)
-            if annotation and hasattr(self.main_window, 'delete_annotation'):
-                self.main_window.delete_annotation(annotation)
+            widget = self.annotations_list.itemWidget(item)
+            if widget and hasattr(widget, 'annotation'):
+                annotation = widget.annotation
+                if hasattr(self.main_window, 'delete_annotation'):
+                    self.main_window.delete_annotation(annotation)
     
     def show_context_menu(self, position):
         """Show context menu for the selected annotation"""
@@ -183,12 +188,14 @@ class AnnotationDock(QDockWidget):
             return
         
         item = selected_items[0]
-        annotation = item.data(Qt.UserRole)
-        
-        menu = QMenu()
-        delete_action = menu.addAction("Delete")
-        
-        action = menu.exec_(self.annotations_list.mapToGlobal(position))
-        
-        if action == delete_action:
-            self.delete_selected_annotation()
+        widget = self.annotations_list.itemWidget(item)
+        if widget and hasattr(widget, 'annotation'):
+            annotation = widget.annotation
+            
+            menu = QMenu()
+            delete_action = menu.addAction("Delete")
+            
+            action = menu.exec_(self.annotations_list.mapToGlobal(position))
+            
+            if action == delete_action:
+                self.delete_selected_annotation()
