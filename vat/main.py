@@ -337,26 +337,17 @@ class VideoAnnotationTool(QMainWindow):
     def zoom_in(self):
         """Zoom in on the canvas."""
         self.zoom_level *= 1.2
-        if hasattr(self.canvas, 'set_zoom'):
-            self.canvas.set_zoom(self.zoom_level)
-        else:
-            self.canvas.update()
+        self.canvas.set_zoom(self.zoom_level)
 
     def zoom_out(self):
         """Zoom out on the canvas."""
         self.zoom_level /= 1.2
-        if hasattr(self.canvas, 'set_zoom'):
-            self.canvas.set_zoom(self.zoom_level)
-        else:
-            self.canvas.update()
+        self.canvas.set_zoom(self.zoom_level)
 
     def reset_zoom(self):
         """Reset zoom to default level."""
         self.zoom_level = 1.0
-        if hasattr(self.canvas, 'set_zoom'):
-            self.canvas.set_zoom(self.zoom_level)
-        else:
-            self.canvas.update()
+        self.canvas.set_zoom(self.zoom_level)
 
     
     def open_video(self):

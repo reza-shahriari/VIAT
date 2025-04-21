@@ -64,12 +64,17 @@ class VideoCanvas(QWidget):
         self.active_edge = EDGE_NONE
         self.edge_start_pos = None
         
+        # Add zoom properties
+        self.zoom_level = 1.0
+        self.pan_offset = QPoint(0, 0)
+        
         # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.StrongFocus)
         
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+
     
     def set_frame(self, frame):
         """Set the current frame to display"""
@@ -184,7 +189,7 @@ class VideoCanvas(QWidget):
                                     handle_size, handle_size))
 
     def get_display_rect(self):
-        """Calculate the display rectangle maintaining aspect ratio"""
+        """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
         if not self.pixmap:
             return QRect()
             
@@ -192,24 +197,29 @@ class VideoCanvas(QWidget):
         w = self.width()
         h = self.height()
         
-        # Calculate display dimensions maintaining aspect ratio
+        # Calculate base display dimensions maintaining aspect ratio
         if w / h > self.aspect_ratio:
             # Widget is wider than the image aspect ratio
             display_height = h
             display_width = int(h * self.aspect_ratio)
-            x = (w - display_width) // 2
-            y = 0
         else:
             # Widget is taller than the image aspect ratio
             display_width = w
             display_height = int(w / self.aspect_ratio)
-            x = 0
-            y = (h - display_height) // 2
+        
+        # Apply zoom
+        zoomed_width = int(display_width * self.zoom_level)
+        zoomed_height = int(display_height * self.zoom_level)
+        
+        # Calculate center position
+        x = (w - zoomed_width) // 2 + self.pan_offset.x()
+        y = (h - zoomed_height) // 2 + self.pan_offset.y()
             
-        return QRect(x, y, display_width, display_height)
-    
+        return QRect(x, y, zoomed_width, zoomed_height)
+
+
     def display_to_image_pos(self, pos):
-        """Convert display coordinates to image coordinates"""
+        """Convert display coordinates to image coordinates, accounting for zoom"""
         if not self.pixmap:
             return pos
             
@@ -230,7 +240,7 @@ class VideoCanvas(QWidget):
         return QPoint(img_x, img_y)
     
     def image_to_display_pos(self, pos):
-        """Convert image coordinates to display coordinates"""
+        """Convert image coordinates to display coordinates, accounting for zoom"""
         if not self.pixmap or not pos:
             return pos
             
@@ -617,3 +627,26 @@ class VideoCanvas(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def set_zoom(self, zoom_level):
+        """Set the zoom level and update the display"""
+        self.zoom_level = max(0.1, min(5.0, zoom_level))  # Limit zoom between 0.1x and 5x
+        self.update()
+    
+    def wheelEvent(self, event):
+        """Handle mouse wheel events for zooming"""
+        if not self.pixmap:
+            return
+            
+        # Get the amount of scroll
+        delta = event.angleDelta().y()
+        
+        # Calculate zoom factor based on scroll direction
+        zoom_factor = 1.1 if delta > 0 else 0.9
+        
+        # Apply zoom
+        new_zoom = self.zoom_level * zoom_factor
+        self.set_zoom(new_zoom)
+        
+        # If we have a main window, update its zoom level
+        if self.main_window and hasattr(self.main_window, 'zoom_level'):
+            self.main_window.zoom_level = self.zoom_level
