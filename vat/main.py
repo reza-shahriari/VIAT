@@ -73,15 +73,13 @@ class VideoAnnotationTool(QMainWindow):
     def init_properties(self):
         """Initialize the application properties and state variables."""
         # Available styles
-        self.styles = {
-            "Default": StyleManager.set_default_style,
-            "Fusion": StyleManager.set_fusion_style,
-            "Windows": StyleManager.set_windows_style,
-            "Dark": StyleManager.set_dark_style,
-            "Light": StyleManager.set_light_style,
-            "Blue": StyleManager.set_blue_style,
-            "Green": StyleManager.set_green_style,
-        }
+        self.styles = {}
+        for style_name in StyleManager.get_available_styles():
+            method_name = f"set_{style_name.lower()}_style"
+            if style_name.lower() == "default":
+                self.styles[style_name] = StyleManager.set_default_style
+            else:
+                self.styles[style_name] = getattr(StyleManager, method_name)
 
         # Annotation methods
         self.annotation_methods = {
