@@ -520,11 +520,18 @@ class VideoCanvas(QWidget):
                         # Save annotations to current frame
                         if hasattr(self.main_window, 'frame_annotations'):
                             self.main_window.frame_annotations[self.main_window.current_frame] = self.annotations.copy()
+                            self.main_window.update_annotation_list()
+
                 # Reset drawing state
                 self.is_drawing = False
                 self.start_point = None
                 self.current_point = None
                 self.update()
+
+    def select_annotation(self, annotation):
+        """Select the specified annotation."""
+        self.selected_annotation = annotation
+        self.update()
 
     def show_context_menu(self, position):
         """Show context menu for right-click actions"""

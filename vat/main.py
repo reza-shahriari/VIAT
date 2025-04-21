@@ -399,6 +399,11 @@ class VideoAnnotationTool(QMainWindow):
         
         # Update the canvas
         self.canvas.update()
+    def update_annotation_list(self):
+        """Update the annotations list widget."""
+        if hasattr(self, 'annotation_dock'):
+            self.annotation_dock.update_annotation_list()
+
     def load_current_frame_annotations(self):
         """Load annotations for the current frame into the canvas."""
         # Clear canvas selection
