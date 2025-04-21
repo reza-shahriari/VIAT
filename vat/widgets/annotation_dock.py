@@ -7,6 +7,21 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QColor
 
+from PyQt5.QtWidgets import (
+    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QComboBox, QListWidget, QPushButton, QMenu, QDialog,
+    QFormLayout, QSpinBox, QTextEdit, QDialogButtonBox, QListWidgetItem,
+    QGroupBox, QGridLayout, QLineEdit, QFrame
+)
+from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtGui import QColor
+
+class SelectAllLineEdit(QLineEdit):
+    """A QLineEdit that automatically selects all text when clicked"""
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.selectAll()
+
 class AnnotationItemWidget(QWidget):
     def __init__(self, annotation, parent=None):
         super().__init__(parent)
@@ -32,7 +47,7 @@ class AnnotationItemWidget(QWidget):
         
         # Add size attribute
         size_label = QLabel("Size:")
-        self.size_input = QLineEdit()
+        self.size_input = SelectAllLineEdit()
         self.size_input.setText(str(self.annotation.attributes.get('Size', -1)))
         self.size_input.setPlaceholderText("-1")
         self.size_input.textChanged.connect(self.update_size_attribute)
@@ -42,7 +57,7 @@ class AnnotationItemWidget(QWidget):
         
         # Add quality attribute
         quality_label = QLabel("Quality:")
-        self.quality_input = QLineEdit()
+        self.quality_input = SelectAllLineEdit()
         self.quality_input.setText(str(self.annotation.attributes.get('Quality', -1)))
         self.quality_input.setPlaceholderText("-1")
         self.quality_input.textChanged.connect(self.update_quality_attribute)
