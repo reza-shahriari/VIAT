@@ -57,7 +57,7 @@ class VideoCanvas(QWidget):
         self.class_attributes = {
             "Drone": {
                 "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
-                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100}
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
             }
         }
         self.annotation_method = "Drag"  # Default method
@@ -84,6 +84,7 @@ class VideoCanvas(QWidget):
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+
     def set_frame(self, frame):
         """Set the current frame to display"""
         if frame is None:
@@ -109,7 +110,6 @@ class VideoCanvas(QWidget):
         if class_name in self.class_colors:
             self.current_class = class_name
 
-
     def paintEvent(self, event):
         """Paint the canvas with the current frame and annotations"""
         painter = QPainter(self)
@@ -126,10 +126,10 @@ class VideoCanvas(QWidget):
             painter.drawPixmap(display_rect, self.pixmap)
 
             # Draw smart edge indicator if enabled
-            if hasattr(self, 'smart_edge_enabled') and self.smart_edge_enabled:
+            if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
                 painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
                 painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
-                
+
                 # Draw "Smart Edge" text in the top-right corner
                 font = painter.font()
                 font.setPointSize(10)
@@ -137,9 +137,7 @@ class VideoCanvas(QWidget):
                 painter.setFont(font)
                 painter.setPen(QPen(QColor(0, 255, 0)))
                 painter.drawText(
-                    display_rect.right() - 120, 
-                    display_rect.top() + 20, 
-                    "Smart Edge ON"
+                    display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
                 )
             # Draw annotations
             for annotation in self.annotations:
@@ -159,102 +157,82 @@ class VideoCanvas(QWidget):
                 painter.setPen(pen)
                 painter.drawRect(display_rect)
 
-                # Determine if the box is too small for internal labels
-                is_small_box = display_rect.width() < 60 or display_rect.height() < 40
-
-                # For small boxes, draw labels outside the box
-                if is_small_box:
-                    # Draw class label above the box
-                    font = painter.font()
-                    font.setPointSize(8)  # Smaller fixed font size for small boxes
-                    painter.setFont(font)
-
-                    # Create background for text
-                    text_width = min(
-                        max(60, display_rect.width()), 120
-                    )  # Min 60px, max 120px
-                    text_height = 16
-
-                    # Position the label centered above the box
-                    text_x = (
-                        display_rect.left() + (display_rect.width() - text_width) / 2
-                    )
-                    text_y = max(0, display_rect.top() - text_height - 2)  # 2px gap
-
-                    text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
-
-                    # Draw semi-transparent background
-                    painter.fillRect(
-                        text_rect,
-                        QColor(
-                            annotation.color.red(),
-                            annotation.color.green(),
-                            annotation.color.blue(),
-                            180,
-                        ),
-                    )
-
-                    painter.setPen(QPen(QColor(0, 0, 0)))
-                    painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
-
-                    # Draw attributes to the right of the box if there's space
-                    if annotation.attributes:
-                        attr_text = ""
-                        for key, value in annotation.attributes.items():
-                            attr_text += f"{key}:{value} "
-                        attr_text = attr_text.strip()
-
-                        if attr_text:
-                            attr_width = min(80, max(60, len(attr_text) * 6))
-                            attr_rect = QRect(
-                                int(display_rect.right() + 5),
-                                int(display_rect.top()),
-                                attr_width,
-                                text_height,
-                            )
-
-                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
-                            painter.setPen(QPen(QColor(255, 255, 255)))
-                            painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
+                # Set up font for labels
+                font = painter.font()
+                font.setPointSize(8)
+                painter.setFont(font)
+                
+                # Standard text height for all labels
+                text_height = 16
+                
+                # Determine if we should draw the class label above or below the box
+                # Check if there's more space above than below
+                space_above = display_rect.top()
+                space_below = self.height() - display_rect.bottom()
+                draw_above = space_above >= space_below
+                
+                # Calculate class label width and position
+                text_width = min(max(60, display_rect.width()), 120)  # Min 60px, max 120px
+                
+                # Position the class label centered horizontally with the box
+                text_x = display_rect.left() + (display_rect.width() - text_width) / 2
+                
+                if draw_above:
+                    # Draw above the box with a small gap
+                    text_y = max(0, display_rect.top() - text_height - 2)
                 else:
-                    # For normal sized boxes, draw labels inside the box
-                    # Adjust font size based on box size
-                    font_size = min(10, max(7, int(display_rect.height() / 20)))
-                    font = painter.font()
-                    font.setPointSize(font_size)
-                    painter.setFont(font)
-
-                    # Draw class label at the top of the box
-                    label_height = min(20, max(14, int(display_rect.height() * 0.15)))
-                    text_rect = QRect(
-                        display_rect.left(),
-                        display_rect.top(),
-                        display_rect.width(),
-                        label_height,
-                    )
-
-                    painter.fillRect(text_rect, annotation.color)
-                    painter.setPen(QPen(QColor(0, 0, 0)))
-                    painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
-
-                    # Draw attributes at the bottom of the box
-                    if annotation.attributes:
-                        attr_text = ""
-                        for key, value in annotation.attributes.items():
-                            attr_text += f"{key}:{value} "
-                        attr_text = attr_text.strip()
-
-                        if attr_text:
-                            attr_rect = QRect(
-                                display_rect.left(),
-                                display_rect.bottom() - label_height,
-                                display_rect.width(),
-                                label_height,
-                            )
-
-                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
-                            painter.setPen(QPen(QColor(255, 255, 255)))
-                            painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
+                    # Draw below the box with a small gap
+                    text_y = min(self.height() - text_height, display_rect.bottom() + 2)
+                    
+                text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
+                
+                # Draw class label with semi-transparent background
+                painter.fillRect(
+                    text_rect,
+                    QColor(
+                        annotation.color.red(),
+                        annotation.color.green(),
+                        annotation.color.blue(),
+                        180,
+                    ),
+                )
+                
+                painter.setPen(QPen(QColor(0, 0, 0)))
+                painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+                
+                # Draw attributes to the right of the box if there's space, otherwise to the left
+                if annotation.attributes:
+                    attr_text = ""
+                    for key, value in annotation.attributes.items():
+                        attr_text += f"{key}:{value} "
+                    attr_text = attr_text.strip()
+                    
+                    if attr_text:
+                        attr_width = min(80, max(60, len(attr_text) * 6))
+                        
+                        # Check if there's enough space to the right
+                        space_right = self.width() - display_rect.right()
+                        
+                        if space_right >= attr_width + 5:
+                            # Draw to the right
+                            attr_x = display_rect.right() + 5
+                        else:
+                            # Draw to the left
+                            attr_x = max(0, display_rect.left() - attr_width - 5)
+                        
+                        # Vertically center with the box
+                        attr_y = display_rect.center().y() - text_height // 2
+                        
+                        attr_rect = QRect(
+                            int(attr_x),
+                            int(attr_y),
+                            attr_width,
+                            text_height,
+                        )
+                        
+                        painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                        painter.setPen(QPen(QColor(255, 255, 255)))
+                        painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
 
             # Draw current annotation if drawing
             if self.is_drawing and self.start_point and self.current_point:
@@ -268,7 +246,7 @@ class VideoCanvas(QWidget):
                     )
                 )
                 painter.drawRect(display_rect)
-                
+
             # Draw the first point marker in two-click mode
             if self.annotation_method == "TwoClick" and self.two_click_first_point:
                 display_point = self.image_to_display_pos(self.two_click_first_point)
@@ -277,16 +255,16 @@ class VideoCanvas(QWidget):
                     marker_size = 10
                     painter.setPen(QPen(QColor(255, 255, 0), 2))  # Yellow pen
                     painter.drawLine(
-                        display_point.x() - marker_size, 
+                        display_point.x() - marker_size,
                         display_point.y(),
-                        display_point.x() + marker_size, 
-                        display_point.y()
+                        display_point.x() + marker_size,
+                        display_point.y(),
                     )
                     painter.drawLine(
-                        display_point.x(), 
+                        display_point.x(),
                         display_point.y() - marker_size,
-                        display_point.x(), 
-                        display_point.y() + marker_size
+                        display_point.x(),
+                        display_point.y() + marker_size,
                     )
 
             # Draw edge indicators for selected annotation
@@ -337,6 +315,7 @@ class VideoCanvas(QWidget):
                         handle_size,
                     )
                 )
+
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
@@ -494,21 +473,21 @@ class VideoCanvas(QWidget):
             new_rect.setTop(new_top)
             # Normalize the rectangle to ensure it has positive width and height
             new_rect = new_rect.normalized()
-            
+
         elif edge == EDGE_RIGHT:
             new_right = rect.right() + delta_x
             # Allow right to move past left, which will create a flipped rectangle
             new_rect.setRight(new_right)
             # Normalize the rectangle to ensure it has positive width and height
             new_rect = new_rect.normalized()
-            
+
         elif edge == EDGE_BOTTOM:
             new_bottom = rect.bottom() + delta_y
             # Allow bottom to move past top, which will create a flipped rectangle
             new_rect.setBottom(new_bottom)
             # Normalize the rectangle to ensure it has positive width and height
             new_rect = new_rect.normalized()
-            
+
         elif edge == EDGE_LEFT:
             new_left = rect.left() + delta_x
             # Allow left to move past right, which will create a flipped rectangle
@@ -517,8 +496,6 @@ class VideoCanvas(QWidget):
             new_rect = new_rect.normalized()
 
         return new_rect
-
-
 
     def find_annotation_at_pos(self, pos):
         """Find annotation at the given position"""
@@ -549,13 +526,16 @@ class VideoCanvas(QWidget):
                 return
 
             # Check if we're in two-click mode and already have the first point
-            if self.annotation_method == "TwoClick" and self.two_click_first_point is not None:
+            if (
+                self.annotation_method == "TwoClick"
+                and self.two_click_first_point is not None
+            ):
                 # Second click - create the bounding box regardless of what's under the cursor
                 self.current_point = img_pos
-                
+
                 # Create a rectangle from the two points
                 rect = QRect(self.two_click_first_point, img_pos).normalized()
-                
+
                 # Only create annotation if it has a minimum size
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
@@ -577,7 +557,7 @@ class VideoCanvas(QWidget):
                                 self.main_window.current_frame
                             ] = self.annotations.copy()
                             self.main_window.update_annotation_list()
-                
+
                 # Reset drawing state
                 self.is_drawing = False
                 self.two_click_first_point = None
@@ -645,39 +625,42 @@ class VideoCanvas(QWidget):
             # Update the annotation with the new rectangle
             if new_img_rect:
                 self.selected_annotation.rect = new_img_rect
-                
+
                 # Apply smart edge refinement if enabled
-                if hasattr(self, 'smart_edge_enabled') and self.smart_edge_enabled:
+                if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
                     # Get current frame from main window
-                    if self.main_window and hasattr(self.main_window, 'cap'):
+                    if self.main_window and hasattr(self.main_window, "cap"):
                         # Get current frame
                         ret, frame = self.main_window.cap.read()
                         if ret:
                             # Move back one frame to get the current frame again
-                            self.main_window.cap.set(cv2.CAP_PROP_POS_FRAMES, 
-                                                   self.main_window.current_frame)
-                            
+                            self.main_window.cap.set(
+                                cv2.CAP_PROP_POS_FRAMES, self.main_window.current_frame
+                            )
+
                             # Map edge type to smart_edge format
                             edge_type_map = {
-                                EDGE_TOP: 'top',
-                                EDGE_RIGHT: 'right',
-                                EDGE_BOTTOM: 'bottom',
-                                EDGE_LEFT: 'left'
+                                EDGE_TOP: "top",
+                                EDGE_RIGHT: "right",
+                                EDGE_BOTTOM: "bottom",
+                                EDGE_LEFT: "left",
                             }
-                            
+
                             if self.active_edge in edge_type_map:
                                 edge_type = edge_type_map[self.active_edge]
-                                
+
                                 # Import the smart edge function
                                 from smart_edge import refine_edge_position
-                                
+
                                 # Get refined position
-                                refined_pos = refine_edge_position(frame, self.selected_annotation.rect, edge_type)
-                                
+                                refined_pos = refine_edge_position(
+                                    frame, self.selected_annotation.rect, edge_type
+                                )
+
                                 if refined_pos is not None:
                                     # Update the rectangle with the refined edge position
                                     updated_rect = QRect(self.selected_annotation.rect)
-                                    
+
                                     if self.active_edge == EDGE_TOP:
                                         updated_rect.setTop(refined_pos)
                                     elif self.active_edge == EDGE_RIGHT:
@@ -686,10 +669,10 @@ class VideoCanvas(QWidget):
                                         updated_rect.setBottom(refined_pos)
                                     elif self.active_edge == EDGE_LEFT:
                                         updated_rect.setLeft(refined_pos)
-                                    
+
                                     # Apply the updated rectangle
                                     self.selected_annotation.rect = updated_rect
-                
+
                 self.update()
             return
         # If we're dragging an annotation
@@ -744,7 +727,10 @@ class VideoCanvas(QWidget):
                 self.setCursor(Qt.PointingHandCursor)
             else:
                 # Show crosshair cursor when in two-click mode and first point is set
-                if self.annotation_method == "TwoClick" and self.two_click_first_point is not None:
+                if (
+                    self.annotation_method == "TwoClick"
+                    and self.two_click_first_point is not None
+                ):
                     self.setCursor(Qt.CrossCursor)
                 else:
                     self.setCursor(Qt.ArrowCursor)
@@ -787,7 +773,12 @@ class VideoCanvas(QWidget):
                 return
 
             # If we were drawing a new annotation with drag method
-            if self.is_drawing and self.start_point and self.current_point and self.annotation_method == "Drag":
+            if (
+                self.is_drawing
+                and self.start_point
+                and self.current_point
+                and self.annotation_method == "Drag"
+            ):
                 # Create a rectangle from the start and current points
                 rect = QRect(self.start_point, self.current_point).normalized()
 
@@ -818,7 +809,7 @@ class VideoCanvas(QWidget):
                 self.start_point = None
                 self.current_point = None
                 self.update()
- 
+
     def select_annotation(self, annotation):
         """Select the specified annotation."""
         self.selected_annotation = annotation

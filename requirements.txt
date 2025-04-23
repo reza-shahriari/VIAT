@@ -9,8 +9,8 @@ moviepy==1.0.3
 ffmpeg-python==0.2.0
 
 # Machine learning and tracking
-torch==1.12.1
-torchvision==0.13.1
+# torch==1.12.1
+# torchvision==0.13.1
 filterpy==1.4.5  # For Kalman filter
 scikit-learn==1.1.2
 
