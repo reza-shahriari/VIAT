@@ -1,6 +1,6 @@
-# VAT - Video Annotation Tool
+# VIAT - Video-Image Annotation Tool
 
-VAT is a desktop application for annotating videos with bounding boxes and custom attributes. It provides an intuitive interface for creating, editing, and managing annotations for computer vision datasets.
+VIAT is a desktop application for annotating videos or Image with bounding boxes and custom attributes. It provides an intuitive interface for creating, editing, and managing annotations for computer vision datasets.
 
 ## Features
 
@@ -23,8 +23,8 @@ VAT is a desktop application for annotating videos with bounding boxes and custo
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/vat.git
-cd vat
+[git clone https://github.com/yourusername/viat.git](https://github.com/reza-shahriari/VIAT.git)
+cd viat
 ```
 
 2. Install dependencies:
