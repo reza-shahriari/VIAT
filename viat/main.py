@@ -34,8 +34,8 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QDoubleSpinBox,
 )
-from PyQt5.QtCore import Qt, QTimer, QRect,QDateTime
-from PyQt5.QtGui import  QColor, QIcon
+from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime
+from PyQt5.QtGui import QColor, QIcon
 
 from canvas import VideoCanvas
 from annotation import BoundingBox
@@ -44,8 +44,14 @@ from widgets import AnnotationDock, ClassDock, AnnotationToolbar
 import sys
 import json
 from utils import (
-    save_project, load_project, export_annotations, get_config_directory,
-    get_recent_projects, get_last_project, save_last_state, load_last_state
+    save_project,
+    load_project,
+    export_annotations,
+    get_config_directory,
+    get_recent_projects,
+    get_last_project,
+    save_last_state,
+    load_last_state,
 )
 
 from smart_edge import refine_edge_position
@@ -81,17 +87,17 @@ class VideoAnnotationTool(QMainWindow):
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
 
-
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
         if self.load_application_state():
             return
-        
+
         # If that fails, try to get the most recent project
         last_project = get_last_project()
         if last_project and os.path.exists(last_project):
             self.load_project(last_project)
+
     def init_properties(self):
         """Initialize the application properties and state variables."""
         # Available styles
@@ -119,14 +125,20 @@ class VideoAnnotationTool(QMainWindow):
         self.total_frames = 0
         self.zoom_level = 1.0
 
+        # Add annotation attribute settings
+        self.auto_show_attribute_dialog = (
+            True  # Show attribute dialog when creating annotation
+        )
+        self.use_previous_attributes = True  # Use attributes from previous annotations
+
         # Annotation data
         self.frame_annotations = {}  # Dictionary to store annotations by frame number
-        
+
         # Class attribute configurations
         self.canvas_class_attributes = {
             "Drone": {
                 "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
-                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100}
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
             }
         }
 
@@ -135,10 +147,10 @@ class VideoAnnotationTool(QMainWindow):
         self.project_modified = False
         self.autosave_timer = None
         self.autosave_enabled = True
-        self.autosave_interval = 5000  
+        self.autosave_interval = 5000
         self.autosave_file = None
         self.last_autosave_time = None
-    
+
     def init_ui(self):
         """Initialize the user interface components."""
         # Create central widget with video canvas
@@ -180,8 +192,9 @@ class VideoAnnotationTool(QMainWindow):
         self.create_tools_menu(menubar)
 
         # Settings menu
-        self.create_settings_menu(menubar)
-    
+        self.settings_menu = menubar.addMenu("Settings")
+        self.create_settings_menu(self.settings_menu)
+        
         # Style menu
         self.create_style_menu(menubar)
 
@@ -239,7 +252,7 @@ class VideoAnnotationTool(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-    
+
     def create_edit_menu(self, menubar):
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
@@ -253,11 +266,13 @@ class VideoAnnotationTool(QMainWindow):
         add_action = QAction("Add Annotation", self)
         add_action.triggered.connect(self.add_annotation)
         edit_menu.addAction(add_action)
-        
+
         # Batch Edit Annotations action
         batch_edit_action = QAction("Batch Edit Annotations", self)
         batch_edit_action.setShortcut("Ctrl+B")
-        batch_edit_action.triggered.connect(lambda: self.annotation_dock.batch_edit_annotations())
+        batch_edit_action.triggered.connect(
+            lambda: self.annotation_dock.batch_edit_annotations()
+        )
         edit_menu.addAction(batch_edit_action)
 
         # Add Class action
@@ -278,13 +293,13 @@ class VideoAnnotationTool(QMainWindow):
         track_action = QAction("Track Objects", self)
         track_action.triggered.connect(self.track_objects)
         tools_menu.addAction(track_action)
-        
+
         # Smart Edge Movement action
         smart_edge_action = QAction("Smart Edge Movement", self, checkable=True)
         smart_edge_action.setShortcut("Ctrl+E")
         smart_edge_action.triggered.connect(self.toggle_smart_edge)
         tools_menu.addAction(smart_edge_action)
-        
+
         # Store reference to keep menu and toolbar in sync
         self.smart_edge_action = smart_edge_action
 
@@ -307,7 +322,6 @@ class VideoAnnotationTool(QMainWindow):
             style_group.addAction(style_action)
             self.style_menu.addAction(style_action)
 
-
     def create_help_menu(self, menubar):
         """Create the Help menu and its actions."""
         help_menu = menubar.addMenu("Help")
@@ -316,20 +330,22 @@ class VideoAnnotationTool(QMainWindow):
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
-    
+
     def create_toolbar(self):
         """Create the annotation toolbar."""
         self.toolbar = AnnotationToolbar(self)
         self.addToolBar(self.toolbar)
         self.class_selector = self.toolbar.class_selector
-        
+
         # Add annotation method selector
         method_label = QLabel("Method:")
         self.toolbar.addWidget(method_label)
-        
+
         self.method_selector = QComboBox()
         self.method_selector.addItems(["Drag", "TwoClick"])
-        self.method_selector.setToolTip("Drag: Click and drag to create box\nTwoClick: Click two corners to create box")
+        self.method_selector.setToolTip(
+            "Drag: Click and drag to create box\nTwoClick: Click two corners to create box"
+        )
         self.method_selector.currentTextChanged.connect(self.change_annotation_method)
         self.toolbar.addWidget(self.method_selector)
 
@@ -337,9 +353,11 @@ class VideoAnnotationTool(QMainWindow):
         """Toggle smart edge movement functionality."""
         is_active = self.smart_edge_action.isChecked()
         self.canvas.smart_edge_enabled = is_active
-        
+
         if is_active:
-            self.statusBar.showMessage("Smart Edge Movement enabled - edges will snap to image features")
+            self.statusBar.showMessage(
+                "Smart Edge Movement enabled - edges will snap to image features"
+            )
         else:
             self.statusBar.showMessage("Smart Edge Movement disabled")
 
@@ -348,12 +366,16 @@ class VideoAnnotationTool(QMainWindow):
         if method_name in ["Drag", "TwoClick"]:
             # Update canvas annotation method
             self.canvas.set_annotation_method(method_name)
-            
+
             if method_name == "TwoClick":
-                self.statusBar.showMessage("Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel.")
+                self.statusBar.showMessage(
+                    "Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel."
+                )
             else:
-                self.statusBar.showMessage(f"Annotation method changed to {method_name}")
-    
+                self.statusBar.showMessage(
+                    f"Annotation method changed to {method_name}"
+                )
+
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
         # Annotation dock
@@ -437,6 +459,7 @@ class VideoAnnotationTool(QMainWindow):
         autosave_action = QAction("Enable Auto-save", self, checkable=True)
         autosave_action.setChecked(self.autosave_enabled)
         autosave_action.triggered.connect(self.toggle_autosave)
+        autosave_action.setToolTip("Automatically save the project at regular intervals")
         settings_menu.addAction(autosave_action)
         
         # Auto-save interval submenu
@@ -460,35 +483,71 @@ class VideoAnnotationTool(QMainWindow):
             action.triggered.connect(lambda checked, ms=ms: self.set_autosave_interval(ms))
             interval_group.addAction(action)
             interval_menu.addAction(action)
+        
+        # Add separator
+        settings_menu.addSeparator()
+        
+        # Annotation attribute settings
+        attr_dialog_action = QAction("Show Attribute Dialog for New Annotations", self, checkable=True)
+        attr_dialog_action.setChecked(self.auto_show_attribute_dialog)
+        attr_dialog_action.triggered.connect(self.toggle_attribute_dialog)
+        attr_dialog_action.setToolTip("Automatically show the attribute dialog when creating a new annotation (Ctrl+A)")
+        attr_dialog_action.setShortcut("Ctrl+A")
+        settings_menu.addAction(attr_dialog_action)
+        
+        prev_attr_action = QAction("Use Previous Annotation Attributes as Default", self, checkable=True)
+        prev_attr_action.setChecked(self.use_previous_attributes)
+        prev_attr_action.triggered.connect(self.toggle_previous_attributes)
+        prev_attr_action.setToolTip("Use attribute values from previous annotations of the same class as default values")
+        settings_menu.addAction(prev_attr_action)
+
+
+    def toggle_attribute_dialog(self):
+        """Toggle automatic attribute dialog display."""
+        self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
+        self.statusBar.showMessage(
+            f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}",
+            3000,
+        )
+
+    def toggle_previous_attributes(self):
+        """Toggle using previous annotation attributes as default."""
+        self.use_previous_attributes = not self.use_previous_attributes
+        self.statusBar.showMessage(
+            f"Using previous annotation attributes as default {'enabled' if self.use_previous_attributes else 'disabled'}",
+            3000,
+        )
 
     def toggle_autosave(self):
         """Toggle auto-save functionality."""
         self.autosave_enabled = not self.autosave_enabled
-        
+
         if self.autosave_enabled:
             self.autosave_timer.start(self.autosave_interval)
             self.statusBar.showMessage("Auto-save enabled", 3000)
         else:
             self.autosave_timer.stop()
             self.statusBar.showMessage("Auto-save disabled", 3000)
-        
+
     def set_autosave_interval(self, interval_ms):
         """Set the auto-save interval."""
         self.autosave_interval = interval_ms
-        
+
         # Restart timer if it's active
         if self.autosave_enabled and self.autosave_timer.isActive():
             self.autosave_timer.stop()
             self.autosave_timer.start(self.autosave_interval)
-        
+
         # Convert to minutes for display
         minutes = interval_ms / 60000
-        self.statusBar.showMessage(f"Auto-save interval set to {minutes} minute{'s' if minutes != 1 else ''}", 3000)
+        self.statusBar.showMessage(
+            f"Auto-save interval set to {minutes} minute{'s' if minutes != 1 else ''}",
+            3000,
+        )
 
     #
     # Video handling methods
     #
-
 
     def zoom_in(self):
         """Zoom in on the canvas."""
@@ -530,7 +589,7 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(self, "Error", "Could not open video file!")
             self.cap = None
             return False
-        
+
         self.video_filename = filename
         # Get video properties
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -545,27 +604,29 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.set_frame(frame)
             self.update_frame_info()
             self.statusBar.showMessage(f"Loaded video: {os.path.basename(filename)}")
-            
+
             # Set up auto-save for this video
             self.video_filename = filename
             video_base = os.path.splitext(filename)[0]
             self.autosave_file = f"{video_base}_autosave.json"
-            
+
             # Start auto-save timer
             if self.autosave_enabled and not self.autosave_timer.isActive():
                 self.autosave_timer.start(self.autosave_interval)
-            
+
             # Only check for annotation files if this is a direct video open, not from a project load
-            if not hasattr(self, '_loading_from_project') or not self._loading_from_project:
+            if (
+                not hasattr(self, "_loading_from_project")
+                or not self._loading_from_project
+            ):
                 self.check_for_annotation_files(filename)
-            
+
             return True
         else:
             QMessageBox.critical(self, "Error", "Could not read video frame!")
             self.cap.release()
             self.cap = None
             return False
-
 
     def check_for_annotation_files(self, video_filename):
         """
@@ -581,25 +642,25 @@ class VideoAnnotationTool(QMainWindow):
 
         # Check for auto-save file first
         autosave_file = os.path.join(directory, f"{base_name}_autosave.json")
-        
+
         # Only show auto-save prompt if we're not loading from a project
-        if os.path.exists(autosave_file) and not hasattr(self, '_loading_from_project'):
+        if os.path.exists(autosave_file) and not hasattr(self, "_loading_from_project"):
             # Store that we've already shown the auto-save prompt for this video
-            if not hasattr(self, '_autosave_prompted'):
+            if not hasattr(self, "_autosave_prompted"):
                 self._autosave_prompted = set()
-            
+
             # Only show the prompt if we haven't already shown it for this video
             if video_filename not in self._autosave_prompted:
                 self._autosave_prompted.add(video_filename)
-                
+
                 reply = QMessageBox.question(
                     self,
                     "Auto-Save Found",
                     f"An auto-save file was found for this video.\nWould you like to load it?",
                     QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
+                    QMessageBox.Yes,
                 )
-                
+
                 if reply == QMessageBox.Yes:
                     try:
                         # Set flag to prevent recursive auto-save prompts
@@ -612,7 +673,7 @@ class VideoAnnotationTool(QMainWindow):
                         QMessageBox.warning(
                             self,
                             "Auto-Save Error",
-                            f"Error loading auto-save file: {str(e)}"
+                            f"Error loading auto-save file: {str(e)}",
                         )
 
         # List of possible annotation file extensions to check
@@ -648,7 +709,6 @@ class VideoAnnotationTool(QMainWindow):
                 else:
                     # Only one file found, import it directly
                     self.import_annotations(annotation_files[0])
-
 
     def show_annotation_file_selection_dialog(self, annotation_files):
         """
@@ -847,19 +907,21 @@ class VideoAnnotationTool(QMainWindow):
                 current_frame=self.current_frame,
                 frame_annotations=self.frame_annotations,
                 class_attributes=class_attributes,
-                current_style=self.current_style
+                current_style=self.current_style,
+                auto_show_attribute_dialog=self.auto_show_attribute_dialog,
+                use_previous_attributes=self.use_previous_attributes,
             )
 
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(f"Project saved to {os.path.basename(filename)}")
-            
+
             # Update recent projects menu
             self.update_recent_projects_menu()
-            
+
             # Save application state
             self.save_application_state()
-    
+
     def load_project(self, filename=None):
         """Load a saved project."""
         if not filename:
@@ -879,21 +941,23 @@ class VideoAnnotationTool(QMainWindow):
                     frame_annotations,
                     class_attributes,
                     current_style,
+                    auto_show_attribute_dialog,
+                    use_previous_attributes,
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
                 self.canvas.annotations = annotations
                 self.canvas.class_colors = class_colors
-                
+
                 # Update class attributes if available
                 if class_attributes:
                     self.canvas.class_attributes = class_attributes
-                
+
                 # Apply the saved style if available
                 if current_style and current_style in self.styles:
                     self.current_style = current_style
                     self.styles[current_style]()
-                    
+
                     # Update style menu to show the correct checked item
                     for action in self.style_menu.actions():
                         if action.text() == current_style:
@@ -904,11 +968,21 @@ class VideoAnnotationTool(QMainWindow):
                 # Store frame annotations
                 self.frame_annotations = frame_annotations
 
+                # Update annotation settings
+                self.auto_show_attribute_dialog = auto_show_attribute_dialog
+                self.use_previous_attributes = use_previous_attributes
 
+                # Update settings menu to reflect loaded settings
+                for action in self.settings_menu.actions():
+                    if action.text() == "Show Attribute Dialog for New Annotations":
+                        action.setChecked(self.auto_show_attribute_dialog)
+                    elif (
+                        action.text() == "Use Previous Annotation Attributes as Default"
+                    ):
+                        action.setChecked(self.use_previous_attributes)
 
                 # Update UI
-                self.update_annotation_list()
-                 # Update UI
+                self.update_settings_menu_actions()
                 self.update_annotation_list()
                 self.toolbar.update_class_selector()
                 self.class_dock.update_class_list()
@@ -944,35 +1018,36 @@ class VideoAnnotationTool(QMainWindow):
 
                             # Update recent projects menu
                             self.update_recent_projects_menu()
-                            
+
                             # Save application state
                             self.save_application_state()
 
                             self.statusBar.showMessage(
                                 f"Project loaded from {os.path.basename(filename)}"
                             )
-                    
+
                     self._loading_from_project = False
-            
+
             except Exception as e:
                 self._loading_from_project = False
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
                 import traceback
+
                 traceback.print_exc()
 
     # Add these methods to save and load application state
     def save_application_state(self):
         """Save the current application state."""
-        if not hasattr(self, 'project_file') or not self.project_file:
+        if not hasattr(self, "project_file") or not self.project_file:
             return
-        
+
         state = {
             "last_project": self.project_file,
             "current_style": self.current_style,
             "autosave_enabled": self.autosave_enabled,
-            "autosave_interval": self.autosave_interval
+            "autosave_interval": self.autosave_interval,
         }
-        
+
         save_last_state(state)
 
     def load_application_state(self):
@@ -980,13 +1055,13 @@ class VideoAnnotationTool(QMainWindow):
         state = load_last_state()
         if not state:
             return False
-        
+
         # Load last project if it exists
         last_project = state.get("last_project")
         if last_project and os.path.exists(last_project):
             self.load_project(last_project)
             return True
-        
+
         return False
 
     # Modify the closeEvent method to save state before closing
@@ -998,9 +1073,9 @@ class VideoAnnotationTool(QMainWindow):
                 "Save Project",
                 "The project has been modified. Do you want to save changes?",
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Save
+                QMessageBox.Save,
             )
-            
+
             if reply == QMessageBox.Save:
                 self.save_project()
                 event.accept()
@@ -1010,67 +1085,18 @@ class VideoAnnotationTool(QMainWindow):
                 event.accept()
         else:
             event.accept()
-        
+
         # Save application state
         self.save_application_state()
-        
+
         # Perform final auto-save if enabled
-        if self.autosave_enabled and hasattr(self, 'project_file') and self.project_file:
+        if (
+            self.autosave_enabled
+            and hasattr(self, "project_file")
+            and self.project_file
+        ):
             self.perform_autosave()
 
-    # Fix the auto-save functionality
-    def setup_autosave(self):
-        """Set up auto-save functionality."""
-        # Create auto-save timer
-        self.autosave_timer = QTimer()
-        self.autosave_timer.timeout.connect(self.perform_autosave)
-        
-        # Start timer if enabled
-        if self.autosave_enabled:
-            self.autosave_timer.start(self.autosave_interval)
-            if hasattr(self, 'statusBar') and self.statusBar:
-                self.statusBar.showMessage("Auto-save enabled", 3000)
-
-    def perform_autosave(self):
-        """Perform auto-save of the current project."""
-        if not self.autosave_enabled or not self.video_filename:
-            return
-        
-        # Only auto-save if we have a project file or video file
-        if not hasattr(self, 'project_file') or not self.project_file:
-            # Create auto-save filename based on video filename if not already set
-            if not self.autosave_file:
-                video_base = os.path.splitext(self.video_filename)[0]
-                self.autosave_file = f"{video_base}_autosave.json"
-        else:
-            # Use the project file for auto-save
-            self.autosave_file = self.project_file
-        
-        try:
-            # Get video path
-            video_path = getattr(self, "video_filename", None)
-            
-            # Get class attributes
-            class_attributes = getattr(self.canvas, "class_attributes", {})
-            
-            # Save project with additional data
-            save_project(
-                self.autosave_file,
-                self.canvas.annotations,
-                self.canvas.class_colors,
-                video_path=video_path,
-                current_frame=self.current_frame,
-                frame_annotations=self.frame_annotations,
-                class_attributes=class_attributes,
-                current_style=self.current_style
-            )
-            
-            self.last_autosave_time = QDateTime.currentDateTime()
-            self.statusBar.showMessage(f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000)
-        except Exception as e:
-            print(f"Auto-save failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
     def export_annotations(self):
         """Export annotations to various formats."""
         # Check if we have any annotations either in the current frame or across all frames
@@ -1236,6 +1262,7 @@ class VideoAnnotationTool(QMainWindow):
         """Update the annotations list widget."""
         self.annotation_dock.update_annotation_list()
         self.perform_autosave()
+
     def add_empty_annotation(self):
         """Add a new empty annotation to the current frame."""
         if not self.cap:
@@ -1251,7 +1278,17 @@ class VideoAnnotationTool(QMainWindow):
             # Create a new bounding box with the current class
             class_name = self.canvas.current_class
             color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-            bbox = BoundingBox(rect, class_name, {"Size": -1, "Quality": -1}, color)
+            
+            # Get default attributes
+            default_attributes = {"Size": -1, "Quality": -1}
+            
+            # Check if we should use attributes from previous annotations
+            if hasattr(self, "use_previous_attributes") and self.use_previous_attributes:
+                prev_attributes = self.get_previous_annotation_attributes(class_name)
+                if prev_attributes:
+                    default_attributes = prev_attributes
+            
+            bbox = BoundingBox(rect, class_name, default_attributes, color)
 
             # Add to annotations
             self.canvas.annotations.append(bbox)
@@ -1260,9 +1297,14 @@ class VideoAnnotationTool(QMainWindow):
             # Update frame_annotations dictionary
             self.frame_annotations[self.current_frame] = self.canvas.annotations
 
+            # Show attribute dialog if enabled
+            if hasattr(self, "auto_show_attribute_dialog") and self.auto_show_attribute_dialog:
+                self.edit_annotation(bbox, focus_first_field=True)
+
             # Update UI
             self.update_annotation_list()
             self.canvas.update()
+
 
     def clear_annotations(self):
         """Clear all annotations."""
@@ -1363,16 +1405,41 @@ class VideoAnnotationTool(QMainWindow):
 
         # Attributes
         attributes_layout = QFormLayout()
+        
+        # Get default values from previous annotations if enabled
+        default_size = -1
+        default_quality = -1
+        
+        if hasattr(self, "use_previous_attributes") and self.use_previous_attributes:
+            # Get the current selected class
+            current_class = class_combo.currentText()
+            prev_attributes = self.get_previous_annotation_attributes(current_class)
+            
+            if prev_attributes:
+                default_size = prev_attributes.get("Size", -1)
+                default_quality = prev_attributes.get("Quality", -1)
+        
+        # Create attribute spinboxes with default values
         size_spin = QSpinBox()
         size_spin.setRange(0, 100)
-        size_spin.setValue(1)  # Default value
-
+        size_spin.setValue(default_size)  # Use default or previous value
+        
         quality_spin = QSpinBox()
         quality_spin.setRange(0, 100)
-        quality_spin.setValue(1)  # Default value
+        quality_spin.setValue(default_quality)  # Use default or previous value
 
         attributes_layout.addRow("Size (0-100):", size_spin)
         attributes_layout.addRow("Quality (0-100):", quality_spin)
+        
+        # Update attributes when class changes
+        def update_attributes_for_class(class_name):
+            if hasattr(self, "use_previous_attributes") and self.use_previous_attributes:
+                prev_attributes = self.get_previous_annotation_attributes(class_name)
+                if prev_attributes:
+                    size_spin.setValue(prev_attributes.get("Size", -1))
+                    quality_spin.setValue(prev_attributes.get("Quality", -1))
+        
+        class_combo.currentTextChanged.connect(update_attributes_for_class)
 
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1385,8 +1452,20 @@ class VideoAnnotationTool(QMainWindow):
         layout.addLayout(coords_layout)
         layout.addLayout(attributes_layout)
         layout.addWidget(buttons)
+        
+        # Set tab order for easy navigation
+        dialog.setTabOrder(class_combo, x_spin)
+        dialog.setTabOrder(x_spin, y_spin)
+        dialog.setTabOrder(y_spin, width_spin)
+        dialog.setTabOrder(width_spin, height_spin)
+        dialog.setTabOrder(height_spin, size_spin)
+        dialog.setTabOrder(size_spin, quality_spin)
+        
+        # Focus on the first field
+        class_combo.setFocus()
 
         return dialog
+
 
     def parse_attributes(self, text):
         """Parse attributes from text input."""
@@ -1396,7 +1475,7 @@ class VideoAnnotationTool(QMainWindow):
                 key, value = line.split("=", 1)
                 attributes[key.strip()] = value.strip()
         return attributes
-    
+
     def keyPressEvent(self, event):
         """Handle keyboard events."""
         # Toggle annotation method with 'M' key
@@ -1413,11 +1492,30 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "smart_edge_action"):
                 self.smart_edge_action.setChecked(not self.smart_edge_action.isChecked())
                 self.toggle_smart_edge()
+        # Toggle attribute dialog with 'A' key
+        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
+            self.statusBar.showMessage(
+                f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}", 
+                3000
+            )
+            # Update menu if it exists
+            for action in self.settings_menu.actions():
+                if action.text() == "Show Attribute Dialog for New Annotations":
+                    action.setChecked(self.auto_show_attribute_dialog)
+                    break
         else:
             super().keyPressEvent(event)
 
-    def edit_annotation(self, annotation):
-        """Edit the properties of an annotation."""
+
+    def edit_annotation(self, annotation, focus_first_field=False):
+        """
+        Edit the properties of an annotation.
+        
+        Args:
+            annotation: The annotation to edit
+            focus_first_field: Whether to focus on the first attribute field
+        """
         if not annotation:
             return
 
@@ -1441,6 +1539,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Create input widgets for all attributes
         attribute_widgets = {}
+        first_widget = None
         
         for attr_name, attr_value in sorted(annotation.attributes.items()):
             # Get attribute type from class configuration or infer from value
@@ -1492,6 +1591,10 @@ class VideoAnnotationTool(QMainWindow):
                 input_widget = QLineEdit()
                 input_widget.setText(str(attr_value))
             
+            # Store the first widget for focus
+            if first_widget is None and attr_name in ["Size", "Quality"]:
+                first_widget = input_widget
+            
             form_layout.addRow(f"{attr_name}:", input_widget)
             attribute_widgets[attr_name] = input_widget
 
@@ -1504,6 +1607,16 @@ class VideoAnnotationTool(QMainWindow):
         layout.addWidget(button_box)
 
         dialog.setLayout(layout)
+        
+        # Set focus on the first attribute field if requested
+        if focus_first_field and first_widget:
+            dialog.finished.connect(lambda: first_widget.setFocus())
+            # For QSpinBox and QDoubleSpinBox, select all text
+            if isinstance(first_widget, (QSpinBox, QDoubleSpinBox)):
+                first_widget.selectAll()
+            # For QLineEdit, select all text
+            elif isinstance(first_widget, QLineEdit):
+                first_widget.selectAll()
 
         # If dialog is accepted, update the annotation
         if dialog.exec_() == QDialog.Accepted:
@@ -1541,7 +1654,6 @@ class VideoAnnotationTool(QMainWindow):
             # Save to frame annotations
             self.frame_annotations[self.current_frame] = self.canvas.annotations
 
-
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
         if annotation in self.canvas.annotations:
@@ -1561,7 +1673,7 @@ class VideoAnnotationTool(QMainWindow):
 
             # Update annotation list
             self.update_annotation_list()
-            
+
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""
         if (
@@ -2077,11 +2189,18 @@ class VideoAnnotationTool(QMainWindow):
 
             # Process attributes
             attributes_config = {}
-            for _, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
+            for (
+                _,
+                name_edit,
+                type_combo,
+                default_edit,
+                min_edit,
+                max_edit,
+            ) in dialog.attribute_widgets:
                 attr_name = name_edit.text().strip()
                 if attr_name:
                     attr_type = type_combo.currentText()
-                    
+
                     # Parse default value based on type
                     default_value = default_edit.text()
                     if attr_type == "int":
@@ -2096,29 +2215,34 @@ class VideoAnnotationTool(QMainWindow):
                             default_value = 0.0
                     elif attr_type == "boolean":
                         default_value = default_value.lower() in ["true", "1", "yes"]
-                    
+
                     # Parse min/max for numeric types
-                    attr_config = {
-                        "type": attr_type,
-                        "default": default_value
-                    }
-                    
+                    attr_config = {"type": attr_type, "default": default_value}
+
                     if attr_type in ["int", "float"]:
                         try:
-                            attr_config["min"] = int(min_edit.text()) if attr_type == "int" else float(min_edit.text())
+                            attr_config["min"] = (
+                                int(min_edit.text())
+                                if attr_type == "int"
+                                else float(min_edit.text())
+                            )
                         except ValueError:
                             attr_config["min"] = 0
-                            
+
                         try:
-                            attr_config["max"] = int(max_edit.text()) if attr_type == "int" else float(max_edit.text())
+                            attr_config["max"] = (
+                                int(max_edit.text())
+                                if attr_type == "int"
+                                else float(max_edit.text())
+                            )
                         except ValueError:
                             attr_config["max"] = 100
-                    
+
                     attributes_config[attr_name] = attr_config
 
             # Add class to canvas
             self.canvas.class_colors[class_name] = color
-            
+
             # Store attributes configuration
             if not hasattr(self.canvas, "class_attributes"):
                 self.canvas.class_attributes = {}
@@ -2131,27 +2255,32 @@ class VideoAnnotationTool(QMainWindow):
             # Set as current class
             self.canvas.set_current_class(class_name)
             self.class_selector.setCurrentText(class_name)
+
     def update_annotation_attributes(self, annotation, attributes_config):
         """Update annotation attributes based on class attribute configuration."""
         # Create a new attributes dictionary with defaults from the configuration
         new_attributes = {}
-        
+
         # First, set defaults from configuration
         for attr_name, attr_config in attributes_config.items():
             new_attributes[attr_name] = attr_config["default"]
-        
+
         # Then, preserve existing values where possible
         for attr_name, attr_value in annotation.attributes.items():
             if attr_name in new_attributes:
                 # Keep existing value if it's within constraints
                 if attr_name in attributes_config:
                     attr_type = attributes_config[attr_name]["type"]
-                    
+
                     if attr_type == "int":
                         try:
                             value = int(attr_value)
-                            min_val = attributes_config[attr_name].get("min", float("-inf"))
-                            max_val = attributes_config[attr_name].get("max", float("inf"))
+                            min_val = attributes_config[attr_name].get(
+                                "min", float("-inf")
+                            )
+                            max_val = attributes_config[attr_name].get(
+                                "max", float("inf")
+                            )
                             if min_val <= value <= max_val:
                                 new_attributes[attr_name] = value
                         except (ValueError, TypeError):
@@ -2159,8 +2288,12 @@ class VideoAnnotationTool(QMainWindow):
                     elif attr_type == "float":
                         try:
                             value = float(attr_value)
-                            min_val = attributes_config[attr_name].get("min", float("-inf"))
-                            max_val = attributes_config[attr_name].get("max", float("inf"))
+                            min_val = attributes_config[attr_name].get(
+                                "min", float("-inf")
+                            )
+                            max_val = attributes_config[attr_name].get(
+                                "max", float("inf")
+                            )
                             if min_val <= value <= max_val:
                                 new_attributes[attr_name] = value
                         except (ValueError, TypeError):
@@ -2172,10 +2305,14 @@ class VideoAnnotationTool(QMainWindow):
                             new_attributes[attr_name] = attr_value
                         else:
                             try:
-                                new_attributes[attr_name] = str(attr_value).lower() in ["true", "1", "yes"]
+                                new_attributes[attr_name] = str(attr_value).lower() in [
+                                    "true",
+                                    "1",
+                                    "yes",
+                                ]
                             except (ValueError, TypeError):
                                 pass
-        
+
         # Update the annotation's attributes
         annotation.attributes = new_attributes
 
@@ -2188,7 +2325,7 @@ class VideoAnnotationTool(QMainWindow):
         class_name = item.text()
         old_name = class_name  # Store the original class name
         current_color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-        
+
         # Get current attributes configuration
         attributes = getattr(self.canvas, "class_attributes", {}).get(class_name, {})
 
@@ -2203,7 +2340,10 @@ class VideoAnnotationTool(QMainWindow):
                 QMessageBox.warning(self, "Edit Class", "Class name cannot be empty!")
                 return
 
-            if new_class_name != old_name and new_class_name in self.canvas.class_colors:
+            if (
+                new_class_name != old_name
+                and new_class_name in self.canvas.class_colors
+            ):
                 # Ask if user wants to merge classes
                 reply = QMessageBox.question(
                     self,
@@ -2222,7 +2362,10 @@ class VideoAnnotationTool(QMainWindow):
                     self.convert_class(old_name, new_class_name)
                     # Remove old class
                     del self.canvas.class_colors[old_name]
-                    if hasattr(self.canvas, "class_attributes") and old_name in self.canvas.class_attributes:
+                    if (
+                        hasattr(self.canvas, "class_attributes")
+                        and old_name in self.canvas.class_attributes
+                    ):
                         del self.canvas.class_attributes[old_name]
                     # Update UI
                     self.toolbar.update_class_selector()
@@ -2239,11 +2382,18 @@ class VideoAnnotationTool(QMainWindow):
 
             # Process attributes
             attributes_config = {}
-            for _, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
+            for (
+                _,
+                name_edit,
+                type_combo,
+                default_edit,
+                min_edit,
+                max_edit,
+            ) in dialog.attribute_widgets:
                 attr_name = name_edit.text().strip()
                 if attr_name:
                     attr_type = type_combo.currentText()
-                    
+
                     # Parse default value based on type
                     default_value = default_edit.text()
                     if attr_type == "int":
@@ -2258,54 +2408,59 @@ class VideoAnnotationTool(QMainWindow):
                             default_value = 0.0
                     elif attr_type == "boolean":
                         default_value = default_value.lower() in ["true", "1", "yes"]
-                    
+
                     # Parse min/max for numeric types
-                    attr_config = {
-                        "type": attr_type,
-                        "default": default_value
-                    }
-                    
+                    attr_config = {"type": attr_type, "default": default_value}
+
                     if attr_type in ["int", "float"]:
                         try:
-                            attr_config["min"] = int(min_edit.text()) if attr_type == "int" else float(min_edit.text())
+                            attr_config["min"] = (
+                                int(min_edit.text())
+                                if attr_type == "int"
+                                else float(min_edit.text())
+                            )
                         except ValueError:
                             attr_config["min"] = 0
-                            
+
                         try:
-                            attr_config["max"] = int(max_edit.text()) if attr_type == "int" else float(max_edit.text())
+                            attr_config["max"] = (
+                                int(max_edit.text())
+                                if attr_type == "int"
+                                else float(max_edit.text())
+                            )
                         except ValueError:
                             attr_config["max"] = 100
-                    
+
                     attributes_config[attr_name] = attr_config
 
             # Update class
             if not hasattr(self.canvas, "class_attributes"):
                 self.canvas.class_attributes = {}
-                
+
             # Update class name in annotations and class attributes
             if old_name != new_class_name:
                 # Update class colors dictionary
                 self.canvas.class_colors[new_class_name] = color
                 del self.canvas.class_colors[old_name]
-                
+
                 # Update class attributes dictionary
                 self.canvas.class_attributes[new_class_name] = attributes_config
                 if old_name in self.canvas.class_attributes:
                     del self.canvas.class_attributes[old_name]
-                    
+
                 # Update annotations
                 for annotation in self.canvas.annotations:
                     if annotation.class_name == old_name:
                         annotation.class_name = new_class_name
                         annotation.color = color
-                        
+
                         # Update attributes based on new configuration
                         self.update_annotation_attributes(annotation, attributes_config)
             else:
                 # Just update the color and attributes
                 self.canvas.class_colors[class_name] = color
                 self.canvas.class_attributes[class_name] = attributes_config
-                
+
                 # Update annotations with new color and attributes
                 for annotation in self.canvas.annotations:
                     if annotation.class_name == class_name:
@@ -2360,57 +2515,61 @@ class VideoAnnotationTool(QMainWindow):
         # Attributes section
         attributes_group = QGroupBox("Attributes")
         attributes_layout = QVBoxLayout(attributes_group)
-        
+
         # List to store attribute widgets
         attribute_widgets = []
-        
+
         # Function to add a new attribute row
-        def add_attribute_row(name="", attr_type="int", default_value="0", min_value="0", max_value="100"):
+        def add_attribute_row(
+            name="", attr_type="int", default_value="0", min_value="0", max_value="100"
+        ):
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            
+
             name_edit = QLineEdit(name)
             name_edit.setPlaceholderText("Attribute Name")
-            
+
             type_combo = QComboBox()
             type_combo.addItems(["int", "float", "string", "boolean"])
             type_combo.setCurrentText(attr_type)
-            
+
             default_edit = QLineEdit(default_value)
             default_edit.setPlaceholderText("Default")
-            
+
             min_edit = QLineEdit(min_value)
             min_edit.setPlaceholderText("Min")
-            
+
             max_edit = QLineEdit(max_value)
             max_edit.setPlaceholderText("Max")
-            
+
             delete_btn = QPushButton("X")
             delete_btn.setMaximumWidth(30)
             delete_btn.clicked.connect(lambda: remove_attribute_row(row_widget))
-            
+
             row_layout.addWidget(name_edit)
             row_layout.addWidget(type_combo)
             row_layout.addWidget(default_edit)
             row_layout.addWidget(min_edit)
             row_layout.addWidget(max_edit)
             row_layout.addWidget(delete_btn)
-            
+
             attributes_layout.addWidget(row_widget)
-            attribute_widgets.append((row_widget, name_edit, type_combo, default_edit, min_edit, max_edit))
-            
+            attribute_widgets.append(
+                (row_widget, name_edit, type_combo, default_edit, min_edit, max_edit)
+            )
+
             # Update type-dependent visibility
             def update_type_visibility():
                 is_numeric = type_combo.currentText() in ["int", "float"]
                 min_edit.setVisible(is_numeric)
                 max_edit.setVisible(is_numeric)
-            
+
             type_combo.currentTextChanged.connect(update_type_visibility)
             update_type_visibility()
-            
+
             return row_widget
-        
+
         def remove_attribute_row(row_widget):
             for widget, *_ in attribute_widgets[:]:
                 if widget == row_widget:
@@ -2418,12 +2577,12 @@ class VideoAnnotationTool(QMainWindow):
                     widget.deleteLater()
                     attribute_widgets.remove((widget, *_))
                     break
-        
+
         # Add button for attributes
         add_attr_btn = QPushButton("Add Attribute")
         add_attr_btn.clicked.connect(lambda: add_attribute_row())
         attributes_layout.addWidget(add_attr_btn)
-        
+
         # Add default attributes if editing an existing class
         if attributes:
             for attr_name, attr_info in attributes.items():
@@ -2432,13 +2591,13 @@ class VideoAnnotationTool(QMainWindow):
                     attr_type=attr_info.get("type", "int"),
                     default_value=str(attr_info.get("default", "0")),
                     min_value=str(attr_info.get("min", "0")),
-                    max_value=str(attr_info.get("max", "100"))
+                    max_value=str(attr_info.get("max", "100")),
                 )
         else:
             # Add default Size and Quality attributes for new classes
             add_attribute_row("Size", "int", "-1", "0", "100")
             add_attribute_row("Quality", "int", "-1", "0", "100")
-        
+
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -2449,12 +2608,12 @@ class VideoAnnotationTool(QMainWindow):
         layout.addLayout(color_layout)
         layout.addWidget(attributes_group)
         layout.addWidget(buttons)
-        
+
         # Store attribute widgets for access when dialog is accepted
         dialog.attribute_widgets = attribute_widgets
         dialog.name_edit = name_edit
         dialog.color = color
-        
+
         return dialog
 
     def convert_class(self, old_class, new_class):
@@ -2665,16 +2824,17 @@ class VideoAnnotationTool(QMainWindow):
             "- Right-click context menu for quick editing\n\n"
             "Created as a demonstration of PyQt5 capabilities.",
         )
+
     def setup_autosave(self):
         """Set up auto-save functionality."""
         # Create auto-save timer
         self.autosave_timer = QTimer()
         self.autosave_timer.timeout.connect(self.perform_autosave)
-        
+
         # Start timer if enabled
         if self.autosave_enabled:
             self.autosave_timer.start(self.autosave_interval)
-            if hasattr(self, 'statusBar') and self.statusBar:
+            if hasattr(self, "statusBar") and self.statusBar:
                 self.statusBar.showMessage("Auto-save enabled", 3000)
 
     def perform_autosave(self):
@@ -2682,10 +2842,15 @@ class VideoAnnotationTool(QMainWindow):
         if not self.autosave_enabled or not self.video_filename:
             return
             
-        # Create auto-save filename based on video filename if not already set
-        if not self.autosave_file:
-            video_base = os.path.splitext(self.video_filename)[0]
-            self.autosave_file = f"{video_base}_autosave.json"
+        # Only auto-save if we have a project file or video file
+        if not hasattr(self, 'project_file') or not self.project_file:
+            # Create auto-save filename based on video filename if not already set
+            if not self.autosave_file:
+                video_base = os.path.splitext(self.video_filename)[0]
+                self.autosave_file = f"{video_base}_autosave.json"
+        else:
+            # Use the project file for auto-save
+            self.autosave_file = self.project_file
         
         try:
             # Get video path
@@ -2703,33 +2868,39 @@ class VideoAnnotationTool(QMainWindow):
                 current_frame=self.current_frame,
                 frame_annotations=self.frame_annotations,
                 class_attributes=class_attributes,
-                current_style=self.current_style
+                current_style=self.current_style,
+                auto_show_attribute_dialog=self.auto_show_attribute_dialog,
+                use_previous_attributes=self.use_previous_attributes
             )
             
             self.last_autosave_time = QDateTime.currentDateTime()
             self.statusBar.showMessage(f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000)
         except Exception as e:
             print(f"Auto-save failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
     def update_recent_projects_menu(self):
         """Update the recent projects menu with the latest projects."""
         self.recent_projects_menu.clear()
-        
+
         recent_projects = get_recent_projects()
         if not recent_projects:
             no_recent = QAction("No Recent Projects", self)
             no_recent.setEnabled(False)
             self.recent_projects_menu.addAction(no_recent)
             return
-        
+
         for project_path in recent_projects:
             project_name = os.path.basename(project_path)
             action = QAction(project_name, self)
             action.setData(project_path)
-            action.triggered.connect(lambda checked, path=project_path: self.load_project(path))
+            action.triggered.connect(
+                lambda checked, path=project_path: self.load_project(path)
+            )
             self.recent_projects_menu.addAction(action)
-        
+
         self.recent_projects_menu.addSeparator()
         clear_action = QAction("Clear Recent Projects", self)
         clear_action.triggered.connect(self.clear_recent_projects)
@@ -2741,9 +2912,51 @@ class VideoAnnotationTool(QMainWindow):
 
         config_dir = get_config_directory()
         recent_projects_file = os.path.join(config_dir, "recent_projects.json")
-        
-        with open(recent_projects_file, 'w') as f:
+
+        with open(recent_projects_file, "w") as f:
             json.dump([], f)
-        
+
         self.update_recent_projects_menu()
         self.statusBar.showMessage("Recent projects cleared", 3000)
+
+    def get_previous_annotation_attributes(self, class_name):
+        """
+        Find the most recent annotation of the same class and return its attributes.
+
+        Args:
+            class_name (str): The class name to match
+
+        Returns:
+            dict: Attributes dictionary or None if no previous annotation found
+        """
+        if not self.use_previous_attributes:
+            return None
+
+        # First check current frame
+        for annotation in reversed(self.canvas.annotations):
+            if annotation.class_name == class_name:
+                return annotation.attributes.copy()
+
+        # Then check previous frames in reverse order
+        for frame_num in sorted(self.frame_annotations.keys(), reverse=True):
+            if frame_num >= self.current_frame:
+                continue
+
+            for annotation in reversed(self.frame_annotations[frame_num]):
+                if annotation.class_name == class_name:
+                    return annotation.attributes.copy()
+
+        # If no previous annotation found, return None
+        return None
+    def update_settings_menu_actions(self):
+        """Update the settings menu actions to reflect current settings."""
+        if not hasattr(self, "settings_menu"):
+            return
+            
+        for action in self.settings_menu.actions():
+            if action.text() == "Enable Auto-save":
+                action.setChecked(self.autosave_enabled)
+            elif action.text() == "Show Attribute Dialog for New Annotations":
+                action.setChecked(self.auto_show_attribute_dialog)
+            elif action.text() == "Use Previous Annotation Attributes as Default":
+                action.setChecked(self.use_previous_attributes)

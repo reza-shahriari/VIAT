@@ -540,13 +540,27 @@ class VideoCanvas(QWidget):
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
                     color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
+                    
+                    # Get default attributes
+                    default_attributes = {"Size": -1, "Quality": -1}
+                    
+                    # Check if we should use attributes from previous annotations
+                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
+                        prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
+                        if prev_attributes:
+                            default_attributes = prev_attributes
+                    
                     bbox = BoundingBox(
-                        rect, self.current_class, {"Size": -1, "Quality": -1}, color
+                        rect, self.current_class, default_attributes, color
                     )
 
                     # Add to annotations list
                     self.annotations.append(bbox)
                     self.selected_annotation = bbox
+
+                    # Show attribute dialog if enabled
+                    if self.main_window and hasattr(self.main_window, "auto_show_attribute_dialog") and self.main_window.auto_show_attribute_dialog:
+                        self.main_window.edit_annotation(bbox, focus_first_field=True)
 
                     # Update the annotation list in the main window
                     if self.main_window:
@@ -565,44 +579,47 @@ class VideoCanvas(QWidget):
                 self.current_point = None
                 self.update()
                 return
-
-            # Check if we're on an edge of the selected annotation
-            if self.selected_annotation:
-                display_rect = self.image_to_display_rect(self.selected_annotation.rect)
+                
+            # Check if we're in two-click mode and need to set the first point
+            if self.annotation_method == "TwoClick" and self.two_click_first_point is None:
+                self.two_click_first_point = img_pos
+                self.setCursor(Qt.CrossCursor)
+                self.update()
+                return
+                
+            # Check if we're clicking on an existing annotation
+            annotation = self.find_annotation_at_pos(event.pos())
+            if annotation:
+                # Select the annotation
+                self.selected_annotation = annotation
+                
+                # Check if we're clicking on an edge
+                display_rect = self.image_to_display_rect(annotation.rect)
                 edge = self.detect_edge(display_rect, event.pos())
-
+                
                 if edge != EDGE_NONE:
+                    # Start edge movement
                     self.edge_moving = True
                     self.active_edge = edge
                     self.edge_start_pos = event.pos()
-                    self.original_rect = QRect(self.selected_annotation.rect)
-                    return
-
-            # Check if clicking on an existing annotation
-            annotation = self.find_annotation_at_pos(event.pos())
-            if annotation:
-                self.selected_annotation = annotation
-                self.drag_start_pos = img_pos
-                self.original_rect = QRect(annotation.rect)
+                    self.original_rect = QRect(annotation.rect)
+                else:
+                    # Start dragging the annotation
+                    self.drag_start_pos = img_pos
+                    self.original_rect = QRect(annotation.rect)
+                    
+                self.update()
+                return
+            
+            # If we're not interacting with an existing annotation and in Drag mode, start drawing a new one
+            if self.annotation_method == "Drag":
+                self.is_drawing = True
+                self.start_point = img_pos
+                self.current_point = img_pos
+                self.selected_annotation = None
                 self.update()
                 return
 
-            # Start drawing a new annotation based on the current method
-            if self.annotation_method == "Drag":
-                # Traditional drag method
-                self.is_drawing = True
-                self.start_point = img_pos
-                self.current_point = img_pos
-                self.selected_annotation = None
-                self.update()
-            elif self.annotation_method == "TwoClick":
-                # First click of two-click method
-                self.two_click_first_point = img_pos
-                self.is_drawing = True
-                self.start_point = img_pos
-                self.current_point = img_pos
-                self.selected_annotation = None
-                self.update()
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
@@ -786,14 +803,28 @@ class VideoCanvas(QWidget):
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
                     color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
+                    
+                    # Get default attributes
+                    default_attributes = {"Size": -1, "Quality": -1}
+                    
+                    # Check if we should use attributes from previous annotations
+                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
+                        prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
+                        if prev_attributes:
+                            default_attributes = prev_attributes
+                    
                     bbox = BoundingBox(
-                        rect, self.current_class, {"Size": -1, "Quality": -1}, color
+                        rect, self.current_class, default_attributes, color
                     )
 
                     # Add to annotations list
                     self.annotations.append(bbox)
                     self.selected_annotation = bbox
 
+                    # Show attribute dialog if enabled
+                    if self.main_window and hasattr(self.main_window, "auto_show_attribute_dialog") and self.main_window.auto_show_attribute_dialog:
+                        self.main_window.edit_annotation(bbox, focus_first_field=True)
+                    
                     # Update the annotation list in the main window
                     if self.main_window:
                         self.main_window.update_annotation_list()
