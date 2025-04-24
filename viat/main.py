@@ -34,14 +34,20 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QDoubleSpinBox,
 )
-from PyQt5.QtCore import Qt, QTimer, QRect
+from PyQt5.QtCore import Qt, QTimer, QRect,QDateTime
 from PyQt5.QtGui import  QColor, QIcon
 
 from canvas import VideoCanvas
 from annotation import BoundingBox
 from widgets.styles import StyleManager
 from widgets import AnnotationDock, ClassDock, AnnotationToolbar
-from utils import save_project, load_project, export_annotations
+import sys
+import json
+from utils import (
+    save_project, load_project, export_annotations, get_config_directory,
+    get_recent_projects, get_last_project, save_last_state, load_last_state
+)
+
 from smart_edge import refine_edge_position
 
 
@@ -71,7 +77,21 @@ class VideoAnnotationTool(QMainWindow):
         # Set up the user interface
         self.init_ui()
         self.canvas.smart_edge_enabled = False
+        self.setup_autosave()
+        # Load last project if available
+        QTimer.singleShot(100, self.load_last_project)
 
+
+    def load_last_project(self):
+        """Load the last project that was open."""
+        # Try to load from application state first
+        if self.load_application_state():
+            return
+        
+        # If that fails, try to get the most recent project
+        last_project = get_last_project()
+        if last_project and os.path.exists(last_project):
+            self.load_project(last_project)
     def init_properties(self):
         """Initialize the application properties and state variables."""
         # Available styles
@@ -114,8 +134,11 @@ class VideoAnnotationTool(QMainWindow):
         self.project_file = None
         self.project_modified = False
         self.autosave_timer = None
-        self.autosave_interval = 300000  # 5 minutes in milliseconds
-
+        self.autosave_enabled = True
+        self.autosave_interval = 5000  
+        self.autosave_file = None
+        self.last_autosave_time = None
+    
     def init_ui(self):
         """Initialize the user interface components."""
         # Create central widget with video canvas
@@ -156,6 +179,9 @@ class VideoAnnotationTool(QMainWindow):
         # Tools menu
         self.create_tools_menu(menubar)
 
+        # Settings menu
+        self.create_settings_menu(menubar)
+    
         # Style menu
         self.create_style_menu(menubar)
 
@@ -178,11 +204,21 @@ class VideoAnnotationTool(QMainWindow):
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
 
+        # Save Project As action
+        save_as_action = QAction("Save Project As...", self)
+        save_as_action.setShortcut("Ctrl+Shift+S")
+        save_as_action.triggered.connect(lambda: self.save_project(True))
+        file_menu.addAction(save_as_action)
+
         # Load Project action
         load_action = QAction("Load Project", self)
         load_action.setShortcut("Ctrl+L")
         load_action.triggered.connect(self.load_project)
         file_menu.addAction(load_action)
+
+        # Recent Projects submenu
+        self.recent_projects_menu = file_menu.addMenu("Recent Projects")
+        self.update_recent_projects_menu()
 
         # Import Annotations action
         import_action = QAction("Import Annotations", self)
@@ -203,7 +239,7 @@ class VideoAnnotationTool(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-
+    
     def create_edit_menu(self, menubar):
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
@@ -254,7 +290,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def create_style_menu(self, menubar):
         """Create the Style menu and its actions."""
-        style_menu = menubar.addMenu("Style")
+        self.style_menu = menubar.addMenu("Style")
 
         # Create action group for styles to make them exclusive
         style_group = QActionGroup(self)
@@ -269,7 +305,8 @@ class VideoAnnotationTool(QMainWindow):
                 lambda checked, s=style_name: self.change_style(s)
             )
             style_group.addAction(style_action)
-            style_menu.addAction(style_action)
+            self.style_menu.addAction(style_action)
+
 
     def create_help_menu(self, menubar):
         """Create the Help menu and its actions."""
@@ -316,6 +353,7 @@ class VideoAnnotationTool(QMainWindow):
                 self.statusBar.showMessage("Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel.")
             else:
                 self.statusBar.showMessage(f"Annotation method changed to {method_name}")
+    
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
         # Annotation dock
@@ -391,6 +429,62 @@ class VideoAnnotationTool(QMainWindow):
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self.next_frame)
 
+    def create_settings_menu(self, menubar):
+        """Create the Settings menu and its actions."""
+        settings_menu = menubar.addMenu("Settings")
+        
+        # Auto-save toggle
+        autosave_action = QAction("Enable Auto-save", self, checkable=True)
+        autosave_action.setChecked(self.autosave_enabled)
+        autosave_action.triggered.connect(self.toggle_autosave)
+        settings_menu.addAction(autosave_action)
+        
+        # Auto-save interval submenu
+        interval_menu = settings_menu.addMenu("Auto-save Interval")
+        
+        # Add interval options
+        intervals = [
+            ("10 seconds", 10000),
+            ("30 seconds", 30000),
+            ("1 minutes", 60000),
+            ("1.5 minutes", 90000),
+            ("3 minutes", 180000)
+        ]
+        
+        interval_group = QActionGroup(self)
+        interval_group.setExclusive(True)
+        
+        for name, ms in intervals:
+            action = QAction(name, self, checkable=True)
+            action.setChecked(self.autosave_interval == ms)
+            action.triggered.connect(lambda checked, ms=ms: self.set_autosave_interval(ms))
+            interval_group.addAction(action)
+            interval_menu.addAction(action)
+
+    def toggle_autosave(self):
+        """Toggle auto-save functionality."""
+        self.autosave_enabled = not self.autosave_enabled
+        
+        if self.autosave_enabled:
+            self.autosave_timer.start(self.autosave_interval)
+            self.statusBar.showMessage("Auto-save enabled", 3000)
+        else:
+            self.autosave_timer.stop()
+            self.statusBar.showMessage("Auto-save disabled", 3000)
+        
+    def set_autosave_interval(self, interval_ms):
+        """Set the auto-save interval."""
+        self.autosave_interval = interval_ms
+        
+        # Restart timer if it's active
+        if self.autosave_enabled and self.autosave_timer.isActive():
+            self.autosave_timer.stop()
+            self.autosave_timer.start(self.autosave_interval)
+        
+        # Convert to minutes for display
+        minutes = interval_ms / 60000
+        self.statusBar.showMessage(f"Auto-save interval set to {minutes} minute{'s' if minutes != 1 else ''}", 3000)
+
     #
     # Video handling methods
     #
@@ -436,6 +530,7 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(self, "Error", "Could not open video file!")
             self.cap = None
             return False
+        
         self.video_filename = filename
         # Get video properties
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -450,16 +545,27 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.set_frame(frame)
             self.update_frame_info()
             self.statusBar.showMessage(f"Loaded video: {os.path.basename(filename)}")
-
-            # Check for annotation files with the same name
-            self.check_for_annotation_files(filename)
-
+            
+            # Set up auto-save for this video
+            self.video_filename = filename
+            video_base = os.path.splitext(filename)[0]
+            self.autosave_file = f"{video_base}_autosave.json"
+            
+            # Start auto-save timer
+            if self.autosave_enabled and not self.autosave_timer.isActive():
+                self.autosave_timer.start(self.autosave_interval)
+            
+            # Only check for annotation files if this is a direct video open, not from a project load
+            if not hasattr(self, '_loading_from_project') or not self._loading_from_project:
+                self.check_for_annotation_files(filename)
+            
             return True
         else:
             QMessageBox.critical(self, "Error", "Could not read video frame!")
             self.cap.release()
             self.cap = None
             return False
+
 
     def check_for_annotation_files(self, video_filename):
         """
@@ -473,6 +579,42 @@ class VideoAnnotationTool(QMainWindow):
         directory = os.path.dirname(video_filename)
         base_name = os.path.splitext(os.path.basename(video_filename))[0]
 
+        # Check for auto-save file first
+        autosave_file = os.path.join(directory, f"{base_name}_autosave.json")
+        
+        # Only show auto-save prompt if we're not loading from a project
+        if os.path.exists(autosave_file) and not hasattr(self, '_loading_from_project'):
+            # Store that we've already shown the auto-save prompt for this video
+            if not hasattr(self, '_autosave_prompted'):
+                self._autosave_prompted = set()
+            
+            # Only show the prompt if we haven't already shown it for this video
+            if video_filename not in self._autosave_prompted:
+                self._autosave_prompted.add(video_filename)
+                
+                reply = QMessageBox.question(
+                    self,
+                    "Auto-Save Found",
+                    f"An auto-save file was found for this video.\nWould you like to load it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    try:
+                        # Set flag to prevent recursive auto-save prompts
+                        self._loading_from_project = True
+                        self.load_project(autosave_file)
+                        self._loading_from_project = False
+                        return
+                    except Exception as e:
+                        self._loading_from_project = False
+                        QMessageBox.warning(
+                            self,
+                            "Auto-Save Error",
+                            f"Error loading auto-save file: {str(e)}"
+                        )
+
         # List of possible annotation file extensions to check
         extensions = [".txt", ".json", ".xml"]
 
@@ -480,7 +622,7 @@ class VideoAnnotationTool(QMainWindow):
         annotation_files = []
         for ext in extensions:
             potential_file = os.path.join(directory, base_name + ext)
-            if os.path.exists(potential_file):
+            if os.path.exists(potential_file) and potential_file != autosave_file:
                 annotation_files.append(potential_file)
 
         if annotation_files:
@@ -506,6 +648,7 @@ class VideoAnnotationTool(QMainWindow):
                 else:
                     # Only one file found, import it directly
                     self.import_annotations(annotation_files[0])
+
 
     def show_annotation_file_selection_dialog(self, annotation_files):
         """
@@ -679,11 +822,14 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Project handling methods
     #
-    def save_project(self):
+    def save_project(self, save_as=False):
         """Save the current project."""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
-        )
+        if not save_as and self.project_file:
+            filename = self.project_file
+        else:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
+            )
 
         if filename:
             # Get video path if available
@@ -700,22 +846,30 @@ class VideoAnnotationTool(QMainWindow):
                 video_path=video_path,
                 current_frame=self.current_frame,
                 frame_annotations=self.frame_annotations,
-                class_attributes=class_attributes
+                class_attributes=class_attributes,
+                current_style=self.current_style
             )
 
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(f"Project saved to {os.path.basename(filename)}")
-
-
-    def load_project(self):
+            
+            # Update recent projects menu
+            self.update_recent_projects_menu()
+            
+            # Save application state
+            self.save_application_state()
+    
+    def load_project(self, filename=None):
         """Load a saved project."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Load Project", "", "JSON Files (*.json);;All Files (*)"
-        )
+        if not filename:
+            filename, _ = QFileDialog.getOpenFileName(
+                self, "Load Project", "", "JSON Files (*.json);;All Files (*)"
+            )
 
-        if filename:
+        if filename and os.path.exists(filename):
             try:
+                self._loading_from_project = True
                 # Load project with additional data
                 (
                     annotations,
@@ -724,6 +878,7 @@ class VideoAnnotationTool(QMainWindow):
                     current_frame,
                     frame_annotations,
                     class_attributes,
+                    current_style,
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
@@ -733,11 +888,27 @@ class VideoAnnotationTool(QMainWindow):
                 # Update class attributes if available
                 if class_attributes:
                     self.canvas.class_attributes = class_attributes
+                
+                # Apply the saved style if available
+                if current_style and current_style in self.styles:
+                    self.current_style = current_style
+                    self.styles[current_style]()
+                    
+                    # Update style menu to show the correct checked item
+                    for action in self.style_menu.actions():
+                        if action.text() == current_style:
+                            action.setChecked(True)
+                        else:
+                            action.setChecked(False)
 
                 # Store frame annotations
                 self.frame_annotations = frame_annotations
 
+
+
                 # Update UI
+                self.update_annotation_list()
+                 # Update UI
                 self.update_annotation_list()
                 self.toolbar.update_class_selector()
                 self.class_dock.update_class_list()
@@ -767,17 +938,139 @@ class VideoAnnotationTool(QMainWindow):
                                 self.update_frame_info()
                                 self.load_current_frame_annotations()
 
-                self.project_file = filename
-                self.project_modified = False
-                self.canvas.update()
+                            self.project_file = filename
+                            self.project_modified = False
+                            self.canvas.update()
 
-                self.statusBar.showMessage(
-                    f"Project loaded from {os.path.basename(filename)}"
-                )
+                            # Update recent projects menu
+                            self.update_recent_projects_menu()
+                            
+                            # Save application state
+                            self.save_application_state()
+
+                            self.statusBar.showMessage(
+                                f"Project loaded from {os.path.basename(filename)}"
+                            )
+                    
+                    self._loading_from_project = False
+            
             except Exception as e:
+                self._loading_from_project = False
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
+    # Add these methods to save and load application state
+    def save_application_state(self):
+        """Save the current application state."""
+        if not hasattr(self, 'project_file') or not self.project_file:
+            return
+        
+        state = {
+            "last_project": self.project_file,
+            "current_style": self.current_style,
+            "autosave_enabled": self.autosave_enabled,
+            "autosave_interval": self.autosave_interval
+        }
+        
+        save_last_state(state)
 
+    def load_application_state(self):
+        """Load the last application state."""
+        state = load_last_state()
+        if not state:
+            return False
+        
+        # Load last project if it exists
+        last_project = state.get("last_project")
+        if last_project and os.path.exists(last_project):
+            self.load_project(last_project)
+            return True
+        
+        return False
+
+    # Modify the closeEvent method to save state before closing
+    def closeEvent(self, event):
+        """Handle application close event."""
+        if self.project_modified:
+            reply = QMessageBox.question(
+                self,
+                "Save Project",
+                "The project has been modified. Do you want to save changes?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save
+            )
+            
+            if reply == QMessageBox.Save:
+                self.save_project()
+                event.accept()
+            elif reply == QMessageBox.Cancel:
+                event.ignore()
+            else:
+                event.accept()
+        else:
+            event.accept()
+        
+        # Save application state
+        self.save_application_state()
+        
+        # Perform final auto-save if enabled
+        if self.autosave_enabled and hasattr(self, 'project_file') and self.project_file:
+            self.perform_autosave()
+
+    # Fix the auto-save functionality
+    def setup_autosave(self):
+        """Set up auto-save functionality."""
+        # Create auto-save timer
+        self.autosave_timer = QTimer()
+        self.autosave_timer.timeout.connect(self.perform_autosave)
+        
+        # Start timer if enabled
+        if self.autosave_enabled:
+            self.autosave_timer.start(self.autosave_interval)
+            if hasattr(self, 'statusBar') and self.statusBar:
+                self.statusBar.showMessage("Auto-save enabled", 3000)
+
+    def perform_autosave(self):
+        """Perform auto-save of the current project."""
+        if not self.autosave_enabled or not self.video_filename:
+            return
+        
+        # Only auto-save if we have a project file or video file
+        if not hasattr(self, 'project_file') or not self.project_file:
+            # Create auto-save filename based on video filename if not already set
+            if not self.autosave_file:
+                video_base = os.path.splitext(self.video_filename)[0]
+                self.autosave_file = f"{video_base}_autosave.json"
+        else:
+            # Use the project file for auto-save
+            self.autosave_file = self.project_file
+        
+        try:
+            # Get video path
+            video_path = getattr(self, "video_filename", None)
+            
+            # Get class attributes
+            class_attributes = getattr(self.canvas, "class_attributes", {})
+            
+            # Save project with additional data
+            save_project(
+                self.autosave_file,
+                self.canvas.annotations,
+                self.canvas.class_colors,
+                video_path=video_path,
+                current_frame=self.current_frame,
+                frame_annotations=self.frame_annotations,
+                class_attributes=class_attributes,
+                current_style=self.current_style
+            )
+            
+            self.last_autosave_time = QDateTime.currentDateTime()
+            self.statusBar.showMessage(f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000)
+        except Exception as e:
+            print(f"Auto-save failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
     def export_annotations(self):
         """Export annotations to various formats."""
         # Check if we have any annotations either in the current frame or across all frames
@@ -942,7 +1235,7 @@ class VideoAnnotationTool(QMainWindow):
     def update_annotation_list(self):
         """Update the annotations list widget."""
         self.annotation_dock.update_annotation_list()
-
+        self.perform_autosave()
     def add_empty_annotation(self):
         """Add a new empty annotation to the current frame."""
         if not self.cap:
@@ -1123,7 +1416,6 @@ class VideoAnnotationTool(QMainWindow):
         else:
             super().keyPressEvent(event)
 
-
     def edit_annotation(self, annotation):
         """Edit the properties of an annotation."""
         if not annotation:
@@ -1245,7 +1537,7 @@ class VideoAnnotationTool(QMainWindow):
 
             # Update annotation list
             self.update_annotation_list()
-
+            
             # Save to frame annotations
             self.frame_annotations[self.current_frame] = self.canvas.annotations
 
@@ -1269,7 +1561,7 @@ class VideoAnnotationTool(QMainWindow):
 
             # Update annotation list
             self.update_annotation_list()
-
+            
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""
         if (
@@ -2373,3 +2665,85 @@ class VideoAnnotationTool(QMainWindow):
             "- Right-click context menu for quick editing\n\n"
             "Created as a demonstration of PyQt5 capabilities.",
         )
+    def setup_autosave(self):
+        """Set up auto-save functionality."""
+        # Create auto-save timer
+        self.autosave_timer = QTimer()
+        self.autosave_timer.timeout.connect(self.perform_autosave)
+        
+        # Start timer if enabled
+        if self.autosave_enabled:
+            self.autosave_timer.start(self.autosave_interval)
+            if hasattr(self, 'statusBar') and self.statusBar:
+                self.statusBar.showMessage("Auto-save enabled", 3000)
+
+    def perform_autosave(self):
+        """Perform auto-save of the current project."""
+        if not self.autosave_enabled or not self.video_filename:
+            return
+            
+        # Create auto-save filename based on video filename if not already set
+        if not self.autosave_file:
+            video_base = os.path.splitext(self.video_filename)[0]
+            self.autosave_file = f"{video_base}_autosave.json"
+        
+        try:
+            # Get video path
+            video_path = getattr(self, "video_filename", None)
+            
+            # Get class attributes
+            class_attributes = getattr(self.canvas, "class_attributes", {})
+            
+            # Save project with additional data
+            save_project(
+                self.autosave_file,
+                self.canvas.annotations,
+                self.canvas.class_colors,
+                video_path=video_path,
+                current_frame=self.current_frame,
+                frame_annotations=self.frame_annotations,
+                class_attributes=class_attributes,
+                current_style=self.current_style
+            )
+            
+            self.last_autosave_time = QDateTime.currentDateTime()
+            self.statusBar.showMessage(f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000)
+        except Exception as e:
+            print(f"Auto-save failed: {str(e)}")
+
+
+    def update_recent_projects_menu(self):
+        """Update the recent projects menu with the latest projects."""
+        self.recent_projects_menu.clear()
+        
+        recent_projects = get_recent_projects()
+        if not recent_projects:
+            no_recent = QAction("No Recent Projects", self)
+            no_recent.setEnabled(False)
+            self.recent_projects_menu.addAction(no_recent)
+            return
+        
+        for project_path in recent_projects:
+            project_name = os.path.basename(project_path)
+            action = QAction(project_name, self)
+            action.setData(project_path)
+            action.triggered.connect(lambda checked, path=project_path: self.load_project(path))
+            self.recent_projects_menu.addAction(action)
+        
+        self.recent_projects_menu.addSeparator()
+        clear_action = QAction("Clear Recent Projects", self)
+        clear_action.triggered.connect(self.clear_recent_projects)
+        self.recent_projects_menu.addAction(clear_action)
+
+    # Add this method to clear recent projects
+    def clear_recent_projects(self):
+        """Clear the list of recent projects."""
+
+        config_dir = get_config_directory()
+        recent_projects_file = os.path.join(config_dir, "recent_projects.json")
+        
+        with open(recent_projects_file, 'w') as f:
+            json.dump([], f)
+        
+        self.update_recent_projects_menu()
+        self.statusBar.showMessage("Recent projects cleared", 3000)

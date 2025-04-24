@@ -6,7 +6,8 @@ from PyQt5.QtCore import QRect
 from PyQt5.QtGui import QColor
 
 
-def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, frame_annotations=None, class_attributes=None):
+def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, 
+                frame_annotations=None, class_attributes=None, current_style=None):
     """
     Save project data to a JSON file.
     
@@ -17,44 +18,59 @@ def save_project(filename, annotations, class_colors, video_path=None, current_f
         video_path (str, optional): Path to the video file
         current_frame (int, optional): Current frame number
         frame_annotations (dict, optional): Dictionary mapping frame numbers to annotations
-        class_attributes (dict, optional): Dictionary mapping class names to attribute configurations
+        class_attributes (dict, optional): Dictionary of class attribute configurations
+        current_style (str, optional): Current UI style name
     """
-    import json
-    
-    # Convert annotations to serializable format
-    serialized_annotations = []
-    for annotation in annotations:
-        serialized_annotations.append(annotation.to_dict())
-    
-    # Convert class colors to serializable format
-    serialized_colors = {}
-    for class_name, color in class_colors.items():
-        serialized_colors[class_name] = {
-            "r": color.red(),
-            "g": color.green(),
-            "b": color.blue(),
-            "a": color.alpha()
+    try:
+        # Convert annotations to serializable format
+        serialized_annotations = []
+        for annotation in annotations:
+            serialized_annotations.append(annotation.to_dict())
+        
+        # Convert class colors to serializable format
+        serialized_colors = {}
+        for class_name, color in class_colors.items():
+            serialized_colors[class_name] = {
+                "r": color.red(),
+                "g": color.green(),
+                "b": color.blue(),
+                "a": color.alpha()
+            }
+        
+        # Convert frame annotations to serializable format
+        serialized_frame_annotations = {}
+        if frame_annotations:
+            for frame_num, frame_anns in frame_annotations.items():
+                # Ensure frame_num is converted to string for JSON compatibility
+                serialized_frame_annotations[str(frame_num)] = [ann.to_dict() for ann in frame_anns]
+        
+        # Create project data dictionary
+        project_data = {
+            "annotations": serialized_annotations,
+            "class_colors": serialized_colors,
+            "video_path": video_path,
+            "current_frame": current_frame,
+            "frame_annotations": serialized_frame_annotations,
+            "class_attributes": class_attributes if class_attributes else {}
         }
-    
-    # Convert frame annotations to serializable format
-    serialized_frame_annotations = {}
-    if frame_annotations:
-        for frame_num, frame_anns in frame_annotations.items():
-            serialized_frame_annotations[str(frame_num)] = [ann.to_dict() for ann in frame_anns]
-    
-    # Create project data dictionary
-    project_data = {
-        "annotations": serialized_annotations,
-        "class_colors": serialized_colors,
-        "video_path": video_path,
-        "current_frame": current_frame,
-        "frame_annotations": serialized_frame_annotations,
-        "class_attributes": class_attributes
-    }
-    
-    # Save to file
-    with open(filename, 'w') as f:
-        json.dump(project_data, f, indent=2)
+        
+        # Add current style if provided
+        if current_style:
+            project_data["current_style"] = current_style
+        
+        # Save to file with proper encoding
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(project_data, f, indent=2, ensure_ascii=False)
+        
+        # Update recent projects list
+        update_recent_projects(filename)
+        
+        return True
+    except Exception as e:
+        import traceback
+        print(f"Error saving project: {str(e)}")
+        traceback.print_exc()
+        return False
 
 def load_project(filename, annotation_class):
     """
@@ -65,46 +81,196 @@ def load_project(filename, annotation_class):
         annotation_class (class): Class to use for creating annotation objects
         
     Returns:
-        tuple: (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes)
+        tuple: (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes, current_style)
     """
-    import json
-    from PyQt5.QtGui import QColor
-    
-    with open(filename, 'r') as f:
-        project_data = json.load(f)
-    
-    # Extract data
-    serialized_annotations = project_data.get("annotations", [])
-    serialized_colors = project_data.get("class_colors", {})
-    video_path = project_data.get("video_path", None)
-    current_frame = project_data.get("current_frame", 0)
-    serialized_frame_annotations = project_data.get("frame_annotations", {})
-    class_attributes = project_data.get("class_attributes", {})
-    
-    # Convert annotations back to objects
-    annotations = []
-    for ann_dict in serialized_annotations:
-        annotations.append(annotation_class.from_dict(ann_dict))
-    
-    # Convert class colors back to QColor objects
-    class_colors = {}
-    for class_name, color_dict in serialized_colors.items():
-        class_colors[class_name] = QColor(
-            color_dict.get("r", 0),
-            color_dict.get("g", 0),
-            color_dict.get("b", 0),
-            color_dict.get("a", 255)
-        )
-    
-    # Convert frame annotations back to objects
-    frame_annotations = {}
-    for frame_num_str, frame_anns in serialized_frame_annotations.items():
-        frame_num = int(frame_num_str)
-        frame_annotations[frame_num] = [annotation_class.from_dict(ann_dict) for ann_dict in frame_anns]
-    
-    return (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes)
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            project_data = json.load(f)
+        
+        # Extract data with proper defaults
+        serialized_annotations = project_data.get("annotations", [])
+        serialized_colors = project_data.get("class_colors", {})
+        video_path = project_data.get("video_path", None)
+        current_frame = int(project_data.get("current_frame", 0))
+        serialized_frame_annotations = project_data.get("frame_annotations", {})
+        class_attributes = project_data.get("class_attributes", {})
+        current_style = project_data.get("current_style", "Default")
+        
+        # Convert annotations back to objects
+        annotations = []
+        for ann_dict in serialized_annotations:
+            try:
+                annotations.append(annotation_class.from_dict(ann_dict))
+            except Exception as e:
+                print(f"Error loading annotation: {str(e)}")
+                continue
+        
+        # Convert class colors back to QColor objects
+        class_colors = {}
+        for class_name, color_dict in serialized_colors.items():
+            try:
+                class_colors[class_name] = QColor(
+                    int(color_dict.get("r", 0)),
+                    int(color_dict.get("g", 0)),
+                    int(color_dict.get("b", 0)),
+                    int(color_dict.get("a", 255))
+                )
+            except Exception as e:
+                print(f"Error loading color for class {class_name}: {str(e)}")
+                # Use a default color
+                class_colors[class_name] = QColor(255, 0, 0)
+        
+        # Convert frame annotations back to objects
+        frame_annotations = {}
+        for frame_num_str, frame_anns in serialized_frame_annotations.items():
+            try:
+                # Convert frame number to integer
+                frame_num = int(frame_num_str)
+                frame_annotations[frame_num] = []
+                
+                # Convert each annotation
+                for ann_dict in frame_anns:
+                    try:
+                        frame_annotations[frame_num].append(annotation_class.from_dict(ann_dict))
+                    except Exception as e:
+                        print(f"Error loading frame annotation: {str(e)}")
+                        continue
+            except Exception as e:
+                print(f"Error loading frame {frame_num_str}: {str(e)}")
+                continue
+        
+        # Update recent projects list
+        update_recent_projects(filename)
+        
+        return (annotations, class_colors, video_path, current_frame, frame_annotations, class_attributes, current_style)
+    except Exception as e:
+        import traceback
+        print(f"Error loading project: {str(e)}")
+        traceback.print_exc()
+        raise Exception(f"Failed to load project: {str(e)}")
 
+def get_recent_projects():
+    """
+    Get list of recent projects.
+    
+    Returns:
+        list: List of recent project file paths
+    """
+    config_dir = get_config_directory()
+    recent_projects_file = os.path.join(config_dir, "recent_projects.json")
+    
+    if os.path.exists(recent_projects_file):
+        try:
+            with open(recent_projects_file, 'r') as f:
+                recent_projects = json.load(f)
+            
+            # Filter out projects that no longer exist
+            recent_projects = [p for p in recent_projects if os.path.exists(p)]
+            return recent_projects
+        except Exception:
+            return []
+    else:
+        return []
 
+def update_recent_projects(project_file, max_projects=10):
+    """
+    Update the list of recent projects.
+    
+    Args:
+        project_file (str): Path to the project file to add
+        max_projects (int): Maximum number of recent projects to keep
+    """
+    config_dir = get_config_directory()
+    recent_projects_file = os.path.join(config_dir, "recent_projects.json")
+    
+    # Create config directory if it doesn't exist
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
+    
+    # Load existing recent projects
+    recent_projects = []
+    if os.path.exists(recent_projects_file):
+        try:
+            with open(recent_projects_file, 'r') as f:
+                recent_projects = json.load(f)
+        except Exception:
+            recent_projects = []
+    
+    # Add current project to the top of the list
+    if project_file in recent_projects:
+        recent_projects.remove(project_file)
+    recent_projects.insert(0, project_file)
+    
+    # Limit to max_projects
+    recent_projects = recent_projects[:max_projects]
+    
+    # Save updated list
+    with open(recent_projects_file, 'w') as f:
+        json.dump(recent_projects, f)
+
+def get_last_project():
+    """
+    Get the most recently used project.
+    
+    Returns:
+        str: Path to the most recent project file, or None if no recent projects
+    """
+    recent_projects = get_recent_projects()
+    if recent_projects:
+        return recent_projects[0]
+    return None
+
+def get_config_directory():
+    """
+    Get the configuration directory for the application.
+    
+    Returns:
+        str: Path to the configuration directory
+    """
+    # Use platform-specific config directory
+    if os.name == 'nt':  # Windows
+        config_dir = os.path.join(os.environ['APPDATA'], 'VideoAnnotationTool')
+    else:  # macOS, Linux, etc.
+        config_dir = os.path.join(os.path.expanduser('~'), '.config', 'VideoAnnotationTool')
+    
+    return config_dir
+
+def save_last_state(state_data):
+    """
+    Save the last application state.
+    
+    Args:
+        state_data (dict): Dictionary containing application state data
+    """
+    config_dir = get_config_directory()
+    state_file = os.path.join(config_dir, "last_state.json")
+    
+    # Create config directory if it doesn't exist
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
+    
+    # Save state data
+    with open(state_file, 'w') as f:
+        json.dump(state_data, f, indent=2)
+
+def load_last_state():
+    """
+    Load the last application state.
+    
+    Returns:
+        dict: Dictionary containing application state data, or None if no state file
+    """
+    config_dir = get_config_directory()
+    state_file = os.path.join(config_dir, "last_state.json")
+    
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return None
+    else:
+        return None
 
 def export_annotations(
     filename, annotations, image_width, image_height, format_type="coco"
