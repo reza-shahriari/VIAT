@@ -136,7 +136,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Class attribute configurations
         self.canvas_class_attributes = {
-            "Drone": {
+            "Quad": {
                 "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
                 "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
             }
@@ -1605,18 +1605,33 @@ class VideoAnnotationTool(QMainWindow):
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
+        
+        # Get direct references to the OK and Cancel buttons
+        ok_button = button_box.button(QDialogButtonBox.Ok)
+        cancel_button = button_box.button(QDialogButtonBox.Cancel)
 
         dialog.setLayout(layout)
         
         # Set focus on the first attribute field if requested
         if focus_first_field and first_widget:
-            dialog.finished.connect(lambda: first_widget.setFocus())
+            # Use singleShot timer to ensure focus happens after dialog is shown
+            QTimer.singleShot(0, lambda: first_widget.setFocus())
             # For QSpinBox and QDoubleSpinBox, select all text
             if isinstance(first_widget, (QSpinBox, QDoubleSpinBox)):
-                first_widget.selectAll()
+                QTimer.singleShot(0, lambda: first_widget.selectAll())
             # For QLineEdit, select all text
             elif isinstance(first_widget, QLineEdit):
-                first_widget.selectAll()
+                QTimer.singleShot(0, lambda: first_widget.selectAll())
+
+        # Set proper tab order
+        previous_widget = class_combo
+        for attr_name, widget in attribute_widgets.items():
+            dialog.setTabOrder(previous_widget, widget)
+            previous_widget = widget
+        
+        # Make sure the last tab goes to the OK button first, then Cancel
+        dialog.setTabOrder(previous_widget, ok_button)
+        dialog.setTabOrder(ok_button, cancel_button)
 
         # If dialog is accepted, update the annotation
         if dialog.exec_() == QDialog.Accepted:
