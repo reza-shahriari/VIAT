@@ -67,7 +67,7 @@ conda activate viat
 
 3. Run the Application:
 
-python viat/main.py
+python viat/run.py
 
 
 
