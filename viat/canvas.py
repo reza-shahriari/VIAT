@@ -520,6 +520,8 @@ class VideoCanvas(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
+            if self.main_window and hasattr(self.main_window, "is_playing") and self.main_window.is_playing:
+                self.main_window.play_pause_video()
             # Convert to image coordinates
             img_pos = self.display_to_image_pos(event.pos())
             if not img_pos:
@@ -913,8 +915,56 @@ class VideoCanvas(QWidget):
             else:
                 self.selected_annotation = None
             self.update()
+        # WASD keys to move the selected annotation
+        elif self.selected_annotation:
+            # Move annotation with WASD keys
+            if event.key() == Qt.Key_W:  # Move up
+                self.selected_annotation.rect.moveTop(self.selected_annotation.rect.top() - 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_A:  # Move left
+                self.selected_annotation.rect.moveLeft(self.selected_annotation.rect.left() - 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_S:  # Move down
+                self.selected_annotation.rect.moveTop(self.selected_annotation.rect.top() + 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_D:  # Move right
+                self.selected_annotation.rect.moveLeft(self.selected_annotation.rect.left() + 1)
+                self.update_annotation_after_edit()
+            # Resize annotation with 8456 keys (numpad or regular)
+            elif event.key() == Qt.Key_8:  # Move top edge up
+                self.selected_annotation.rect.setTop(self.selected_annotation.rect.top() - 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_4:  # Move left edge left
+                self.selected_annotation.rect.setLeft(self.selected_annotation.rect.left() - 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_5:  # Move bottom edge down
+                self.selected_annotation.rect.setBottom(self.selected_annotation.rect.bottom() - 1)
+                self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_6:  # Move right edge right
+                self.selected_annotation.rect.setRight(self.selected_annotation.rect.right() - 1)
+                self.update_annotation_after_edit()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def update_annotation_after_edit(self):
+        """Update UI after annotation has been edited"""
+        # Normalize the rectangle to ensure it has positive width and height
+        self.selected_annotation.rect = self.selected_annotation.rect.normalized()
+        
+        # Update the canvas
+        self.update()
+        
+        # Update the annotation list in the main window
+        if self.main_window:
+            self.main_window.update_annotation_list()
+            # Save annotations to current frame
+            if hasattr(self.main_window, "frame_annotations"):
+                self.main_window.frame_annotations[
+                    self.main_window.current_frame
+                ] = self.annotations.copy()
+
 
     def set_zoom(self, zoom_level):
         """Set the zoom level and update the display"""

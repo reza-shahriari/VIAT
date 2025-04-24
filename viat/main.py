@@ -33,15 +33,16 @@ from PyQt5.QtWidgets import (
     QActionGroup,
     QGroupBox,
     QDoubleSpinBox,
+    QApplication
 )
-from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime
+from PyQt5.QtCore import  Qt, QTimer, QRect, QDateTime, QEvent
 from PyQt5.QtGui import QColor, QIcon
 
 from canvas import VideoCanvas
 from annotation import BoundingBox
 from widgets.styles import StyleManager
 from widgets import AnnotationDock, ClassDock, AnnotationToolbar
-import sys
+
 import json
 from utils import (
     save_project,
@@ -54,7 +55,7 @@ from utils import (
     load_last_state,
 )
 
-from smart_edge import refine_edge_position
+
 
 
 class VideoAnnotationTool(QMainWindow):
@@ -84,8 +85,13 @@ class VideoAnnotationTool(QMainWindow):
         self.init_ui()
         self.canvas.smart_edge_enabled = False
         self.setup_autosave()
+        
+        # Install event filter to handle global shortcuts
+        QApplication.instance().installEventFilter(self)
+        
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
+
 
     def load_last_project(self):
         """Load the last project that was open."""
@@ -656,7 +662,7 @@ class VideoAnnotationTool(QMainWindow):
                 reply = QMessageBox.question(
                     self,
                     "Auto-Save Found",
-                    f"An auto-save file was found for this video.\nWould you like to load it?",
+                    "An auto-save file was found for this video.\nWould you like to load it?",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes,
                 )
@@ -870,6 +876,7 @@ class VideoAnnotationTool(QMainWindow):
         if self.is_playing:
             self.play_timer.stop()
             self.is_playing = False
+            self.play_button.setIcon(QIcon.fromTheme("media-playback-start"))
             self.statusBar.showMessage("Paused")
         else:
             # Set timer interval based on playback speed
@@ -877,7 +884,29 @@ class VideoAnnotationTool(QMainWindow):
             interval = int(1000 / (fps * self.playback_speed))
             self.play_timer.start(interval)
             self.is_playing = True
+            self.play_button.setIcon(QIcon.fromTheme("media-playback-pause"))
             self.statusBar.showMessage("Playing")
+
+    def eventFilter(self, obj, event):
+        """Global event filter to handle shortcuts regardless of focus."""
+        if event.type() == QEvent.KeyPress:
+            # Handle arrow keys for frame navigation
+            if event.key() == Qt.Key_Right:
+                # Right or Down arrow - go to next frame
+                self.next_frame()
+                return True
+            elif event.key() == Qt.Key_Left :
+                # Left or Up arrow - go to previous frame
+                self.prev_frame()
+                return True
+            # Handle space key for play/pause
+            elif event.key() == Qt.Key_Space:
+                # Space - toggle play/pause
+                self.play_pause_video()
+                return True
+        
+        # Let other events pass through
+        return super().eventFilter(obj, event)
 
     #
     # Project handling methods
@@ -1478,8 +1507,21 @@ class VideoAnnotationTool(QMainWindow):
 
     def keyPressEvent(self, event):
         """Handle keyboard events."""
+        # Handle arrow keys for frame navigation
+        if event.key() == Qt.Key_Right:
+            # Right or Down arrow - go to next frame
+            self.next_frame()
+            return
+        elif event.key() == Qt.Key_Left :
+            # Left or Up arrow - go to previous frame
+            self.prev_frame()
+            return
+        elif event.key() == Qt.Key_Space:
+            # Space - toggle play/pause
+            self.play_pause_video()
+            return True
         # Toggle annotation method with 'M' key
-        if event.key() == Qt.Key_M:
+        elif event.key() == Qt.Key_M:
             current_index = self.method_selector.currentIndex()
             new_index = (current_index + 1) % self.method_selector.count()
             self.method_selector.setCurrentIndex(new_index)
@@ -1506,6 +1548,7 @@ class VideoAnnotationTool(QMainWindow):
                     break
         else:
             super().keyPressEvent(event)
+
 
 
     def edit_annotation(self, annotation, focus_first_field=False):
@@ -1821,7 +1864,7 @@ class VideoAnnotationTool(QMainWindow):
         try:
             with open(filename, "r") as f:
                 content = f.read()
-        except:
+        except (IOError, OSError):
             return None
 
         # Detect format based on extension and content
@@ -1870,11 +1913,10 @@ class VideoAnnotationTool(QMainWindow):
                 if isinstance(data, dict):
                     if "annotations" in data and "images" in data:
                         return "COCO"
-            except:
+            except json.JSONDecodeError:
                 pass
 
         return None
-
     def import_coco_annotations(self, filename, image_width, image_height):
         """
         Import annotations from COCO JSON format.
@@ -2125,7 +2167,7 @@ class VideoAnnotationTool(QMainWindow):
                         # Remove any remaining brackets
                         parts = [p.strip("[]") for p in parts]
 
-                        class_id = int(parts[0])
+                        
                         x = float(parts[1])
                         y = float(parts[2])
                         width = float(parts[3])
