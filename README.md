@@ -23,8 +23,8 @@ VIAT is a desktop application for annotating videos or Image with bounding boxes
 
 1. Clone the repository:
 ```bash
-[git clone https://github.com/yourusername/viat.git](https://github.com/reza-shahriari/VIAT.git)
-cd viat
+git clone https://github.com/reza-shahriari/VIAT.git
+cd VIAT
 ```
 
 2. Install dependencies:
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 3. Run the application:
 ```bash
-python -m run.py
+python run.py
 ```
 
 ## Usage
