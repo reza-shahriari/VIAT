@@ -1,4 +1,4 @@
-name: vat
+name: viat
 channels:
   - conda-forge
   - pytorch
