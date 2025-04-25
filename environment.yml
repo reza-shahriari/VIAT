@@ -6,8 +6,8 @@ channels:
 dependencies:
   - python=3.9
   - pip=22.2
-  - pyqt=5.15.7
-  - opencv=4.6.0
+  - pyqt=5.12.3
+  - opencv=4.11.0
   - numpy=1.23.3
   - pillow=9.2.0
   - ffmpeg=4.4.2
