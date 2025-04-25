@@ -157,6 +157,10 @@ class VideoAnnotationTool(QMainWindow):
         self.autosave_file = None
         self.last_autosave_time = None
 
+        # Add image dataset flag
+        self.is_image_dataset = False
+        self.image_files = []
+
     def init_ui(self):
         """Initialize the user interface components."""
         # Create central widget with video canvas
@@ -216,6 +220,12 @@ class VideoAnnotationTool(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_video)
         file_menu.addAction(open_action)
+        
+        # Open Image Folder action
+        open_image_folder_action = QAction("Open Image Folder", self)
+        open_image_folder_action.setShortcut("Ctrl+I")
+        open_image_folder_action.triggered.connect(self.open_image_folder)
+        file_menu.addAction(open_image_folder_action)
 
         # Save Project action
         save_action = QAction("Save Project", self)
@@ -258,6 +268,42 @@ class VideoAnnotationTool(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+    def clear_recent_projects(self):
+        """Clear the list of recent projects."""
+        config_dir = get_config_directory()
+        recent_projects_file = os.path.join(config_dir, "recent_projects.json")
+
+        with open(recent_projects_file, "w") as f:
+            json.dump([], f)
+
+        self.update_recent_projects_menu()
+        self.statusBar.showMessage("Recent projects cleared", 3000)
+
+    def update_recent_projects_menu(self):
+        """Update the recent projects menu with the latest projects."""
+        self.recent_projects_menu.clear()
+
+        recent_projects = get_recent_projects()
+        if not recent_projects:
+            no_recent = QAction("No Recent Projects", self)
+            no_recent.setEnabled(False)
+            self.recent_projects_menu.addAction(no_recent)
+            return
+
+        for project_path in recent_projects:
+            project_name = os.path.basename(project_path)
+            action = QAction(project_name, self)
+            action.setData(project_path)
+            action.triggered.connect(
+                lambda checked, path=project_path: self.load_project(path)
+            )
+            self.recent_projects_menu.addAction(action)
+
+        self.recent_projects_menu.addSeparator()
+        clear_action = QAction("Clear Recent Projects", self)
+        clear_action.triggered.connect(self.clear_recent_projects)
+        self.recent_projects_menu.addAction(clear_action)
 
     def create_edit_menu(self, menubar):
         """Create the Edit menu and its actions."""
@@ -808,7 +854,12 @@ class VideoAnnotationTool(QMainWindow):
 
     def slider_changed(self, value):
         """Handle slider value changes."""
-        if self.cap and self.cap.isOpened():
+        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+            if 0 <= value < self.total_frames:
+                self.current_frame = value
+                self.load_current_image()
+                self.update_frame_info()
+        elif self.cap and self.cap.isOpened():
             # Calculate the frame number from slider value
             frame_number = int(value)
 
@@ -824,8 +875,13 @@ class VideoAnnotationTool(QMainWindow):
                 self.load_current_frame_annotations()
 
     def prev_frame(self):
-        """Go to the previous frame in the video."""
-        if self.cap and self.cap.isOpened():
+        """Go to the previous frame in the video or previous image in the dataset."""
+        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+            if self.current_frame > 0:
+                self.current_frame -= 1
+                self.load_current_image()
+                self.update_frame_info()
+        elif self.cap and self.cap.isOpened():
             # Get current position
             current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
 
@@ -842,8 +898,16 @@ class VideoAnnotationTool(QMainWindow):
                     self.load_current_frame_annotations()
 
     def next_frame(self):
-        """Go to the next frame in the video."""
-        if self.cap and self.cap.isOpened():
+        """Go to the next frame in the video or next image in the dataset."""
+        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+            if self.current_frame < self.total_frames - 1:
+                self.current_frame += 1
+                self.load_current_image()
+                self.update_frame_info()
+            else:
+                # End of dataset
+                self.statusBar.showMessage("End of image dataset")
+        elif self.cap and self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
                 self.current_frame += 1
@@ -3017,3 +3081,60 @@ class VideoAnnotationTool(QMainWindow):
                 action.setChecked(self.auto_show_attribute_dialog)
             elif action.text() == "Use Previous Annotation Attributes as Default":
                 action.setChecked(self.use_previous_attributes)
+    def open_image_folder(self):
+        """Open a folder of images as a dataset."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Open Image Folder", "", QFileDialog.ShowDirsOnly
+        )
+        
+        if not folder_path:
+            return
+        
+        # Check if the folder contains any images
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
+        image_files = []
+        
+        for file in os.listdir(folder_path):
+            if any(file.lower().endswith(ext) for ext in image_extensions):
+                image_files.append(os.path.join(folder_path, file))
+        
+        if not image_files:
+            QMessageBox.warning(self, "Open Image Folder", "No image files found in the selected folder!")
+            return
+        
+        # Sort the image files to ensure consistent ordering
+        image_files.sort()
+        
+        # Store the image files and set up the "video" interface
+        self.image_files = image_files
+        self.total_frames = len(image_files)
+        self.current_frame = 0
+        self.is_image_dataset = True
+        
+        # Load the first image
+        self.load_current_image()
+        
+        # Update UI
+        self.frame_slider.setMaximum(self.total_frames - 1)
+        self.update_frame_info()
+        self.statusBar.showMessage(f"Loaded {len(image_files)} images from {os.path.basename(folder_path)}")
+    def load_current_image(self):
+        """Load the current image from the image dataset."""
+        if not hasattr(self, 'image_files') or not self.image_files:
+            return
+        
+        if 0 <= self.current_frame < len(self.image_files):
+            image_path = self.image_files[self.current_frame]
+            
+            # Load the image using OpenCV
+            frame = cv2.imread(image_path)
+            
+            if frame is not None:
+                # Convert from BGR to RGB for display
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Set the frame to the canvas
+                self.canvas.set_frame(frame)
+                
+                # Load annotations for this frame if they exist
+                self.load_current_frame_annotations()
