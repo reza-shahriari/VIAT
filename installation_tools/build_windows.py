@@ -44,18 +44,16 @@ def create_installer():
     """Create Windows installer using NSIS"""
     print("Creating Windows installer...")
     
-
-    
-
-    icon_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon", "installation_Icon.ico")
-    icon_path = icon_path.replace("\\", "/")
-
+    installer_icon_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon", "installation_Icon.ico")
+    # installer_icon_path = installer_icon_path.replace("\\", "/")
+    app_icon_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon", "Icon.ico")
+    # app_icon_path = app_icon_path.replace("\\", "/")
     dist_path = os.path.join(os.getcwd(), "dist")
     if not os.path.exists(dist_path) or not os.listdir(dist_path):
         print("Error: dist directory is empty or doesn't exist.")
         print("Cannot create installer without application files.")
         return False
-    dist_path = dist_path.replace("\\", "/")
+    # dist_path = dist_path.replace("\\", "/")
 
     nsis_script = f"""
         !include "MUI2.nsh"
@@ -67,8 +65,8 @@ def create_installer():
         InstallDirRegKey HKLM "Software\\VIAT" "Install_Dir"
         RequestExecutionLevel admin
 
-        Icon {icon_path} 
-        !define MUI_ICON {icon_path}
+        Icon {app_icon_path} 
+        !define MUI_ICON {installer_icon_path}
 
         !insertmacro MUI_PAGE_WELCOME
         !insertmacro MUI_PAGE_DIRECTORY
@@ -86,11 +84,12 @@ def create_installer():
 
             # Copy all files
             File /r {dist_path}*.*
+            File /r {app_icon_path}
 
             # Create shortcuts AFTER copying files
             CreateDirectory "$SMPROGRAMS\\VIAT"
-            CreateShortcut "$SMPROGRAMS\\VIAT\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon\\app_icon.ico"
-            CreateShortcut "$DESKTOP\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon\\app_icon.ico"
+            CreateShortcut "$SMPROGRAMS\\VIAT\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon.ico"
+            CreateShortcut "$DESKTOP\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon.ico"
 
             # Save install path
             WriteRegStr HKLM "Software\\VIAT" "Install_Dir" "$INSTDIR"
@@ -120,8 +119,8 @@ def create_installer():
     """
     
     viat_installer_path = os.path.join(os.getcwd(), "viat_installer.nsi")
-    if not os.path.exists(viat_installer_path):
-        with open(viat_installer_path, "w") as f:
+    
+    with open(viat_installer_path, "w") as f:
             f.write(nsis_script)
 
     try:
