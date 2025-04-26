@@ -1,5 +1,6 @@
 from PyQt5.QtGui import QIcon
 import os
+import sys
 import qtawesome as qta
 
 def get_icon(icon_name):
@@ -53,13 +54,23 @@ def get_icon(icon_name):
     # Get the icon filename
     icon_file = icon_map.get(icon_name, f"{icon_name}.png")
     
-    # Get the path to the icons directory
-    icon_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icons")
-    icon_path = os.path.join(icon_dir, icon_file)
+    # Determine the base path based on whether we're running from source or installed
+    if getattr(sys, 'frozen', False):
+        # Running as compiled executable
+        base_path = os.path.dirname(sys.executable)
+        # Try multiple possible icon locations
+        icon_paths = [
+            os.path.join(base_path, "Icon", icon_file)
+        ]
+    else:
+        # Running in development environment
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        icon_paths = [os.path.join(base_path, "Icon", icon_file)]
     
-    # Check if the icon exists
-    if os.path.exists(icon_path):
-        return QIcon(icon_path)
+    # Try each possible path
+    for icon_path in icon_paths:
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
     
     # If not found, try system theme as fallback (works on Linux)
     return QIcon.fromTheme(icon_name, QIcon())

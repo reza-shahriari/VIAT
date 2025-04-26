@@ -21,7 +21,6 @@ a = Analysis(
         'json',
         'qtawesome',
         'qtawesome.iconic_font',
-        
     ],
     hookspath=[],
     hooksconfig={},

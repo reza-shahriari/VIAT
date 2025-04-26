@@ -1,4 +1,3 @@
-
         !include "MUI2.nsh"
         !include "x64.nsh"
 
@@ -8,8 +7,10 @@
         InstallDirRegKey HKLM "Software\VIAT" "Install_Dir"
         RequestExecutionLevel admin
 
-        Icon D:\VIAT\viat\Icon\Icon.ico 
-        !define MUI_ICON D:\VIAT\viat\Icon\installation_Icon.ico
+        # Use relative paths instead of absolute paths
+        !define ICON_PATH "..\viat\Icon"
+        Icon "${ICON_PATH}\Icon.ico" 
+        !define MUI_ICON "${ICON_PATH}\installation_Icon.ico"
 
         !insertmacro MUI_PAGE_WELCOME
         !insertmacro MUI_PAGE_DIRECTORY
@@ -25,14 +26,21 @@
             SetRegView 64
             SetOutPath "$INSTDIR"
 
-            # Copy all files
-            File /r D:\VIAT\installation_tools\dist*.*
-            File /r D:\VIAT\viat\Icon*.*
+            # Copy all files from the distribution
+            File /r "..\installation_tools\dist\*.*"
+            
+            # Create Icon directory and copy icons
+            CreateDirectory "$INSTDIR\Icon"
+            SetOutPath "$INSTDIR\Icon"
+            File /r "${ICON_PATH}\*.*"
+            
+            # Reset output path to install directory
+            SetOutPath "$INSTDIR"
 
             # Create shortcuts AFTER copying files
             CreateDirectory "$SMPROGRAMS\VIAT"
-            CreateShortcut "$SMPROGRAMS\VIAT\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon.ico"
-            CreateShortcut "$DESKTOP\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon.ico"
+            CreateShortcut "$SMPROGRAMS\VIAT\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon\Icon.ico"
+            CreateShortcut "$DESKTOP\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon\Icon.ico"
 
             # Save install path
             WriteRegStr HKLM "Software\VIAT" "Install_Dir" "$INSTDIR"
@@ -43,7 +51,7 @@
             # Add uninstaller to Programs & Features
             WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "DisplayName" "Video Annotation Tool (VIAT)"
             WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "UninstallString" "$INSTDIR\Uninstall.exe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "DisplayIcon" "$INSTDIR\Icon\app_icon.ico"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "DisplayIcon" "$INSTDIR\Icon\Icon.ico"
             WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "NoModify" 1
             WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "NoRepair" 1
         SectionEnd
@@ -59,4 +67,3 @@
             DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT"
             DeleteRegKey HKLM "Software\VIAT"
         SectionEnd 
-    

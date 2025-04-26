@@ -56,25 +56,22 @@ def create_installer():
         return False
 
 
-    nsis_script = f"""
+    nsis_script = r"""
         !include "MUI2.nsh"
         !include "x64.nsh"
 
         Name "Video Annotation Tool (VIAT)"
         OutFile "VIAT_Setup.exe"
-        InstallDir "$PROGRAMFILES64\\VIAT"
-        InstallDirRegKey HKLM "Software\\VIAT" "Install_Dir"
+        InstallDir "$PROGRAMFILES64\VIAT"
+        InstallDirRegKey HKLM "Software\VIAT" "Install_Dir"
         RequestExecutionLevel admin
 
-        Icon {app_icon_path} 
-        !define MUI_ICON {installer_icon_path}
+        # Use relative paths instead of absolute paths
+        !define ICON_PATH "..\viat\Icon"
+        Icon "${ICON_PATH}\Icon.ico" 
+        !define MUI_ICON "${ICON_PATH}\installation_Icon.ico"
 
-        !insertmacro MUI_PAGE_WELCOME
-        !insertmacro MUI_PAGE_DIRECTORY
-        !insertmacro MUI_PAGE_INSTFILES
-        !insertmacro MUI_PAGE_FINISH
-
-        !insertmacro MUI_UNPAGE_CONFIRM
+         !insertmacro MUI_UNPAGE_CONFIRM
         !insertmacro MUI_UNPAGE_INSTFILES
 
         !insertmacro MUI_LANGUAGE "English"
@@ -83,46 +80,54 @@ def create_installer():
             SetRegView 64
             SetOutPath "$INSTDIR"
 
-            # Copy all files
-            File /r {dist_path}*.*
-            File /r {icon_folder_path}*.*
-
-            # Create shortcuts AFTER copying files
-            CreateDirectory "$SMPROGRAMS\\VIAT"
-            CreateShortcut "$SMPROGRAMS\\VIAT\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon.ico"
-            CreateShortcut "$DESKTOP\\VIAT.lnk" "$INSTDIR\\VIAT.exe" "" "$INSTDIR\\Icon.ico"
+            # Copy all files from the distribution
+            File /r "..\installation_tools\dist\*.*"
+            # Create Icon directory and copy icons
+            CreateDirectory "$INSTDIR\icons"
+            SetOutPath "$INSTDIR\icons"
+            File /r "..\viat\icons\*.*"
+            # Also copy to Icon directory for backward compatibility
+            CreateDirectory "$INSTDIR\Icon"
+            SetOutPath "$INSTDIR\Icon"
+            File /r "..\viat\Icon\*.*"
+            # Reset output path to install directory
+            SetOutPath "$INSTDIR"
+           # Create shortcuts AFTER copying files
+            CreateDirectory "$SMPROGRAMS\VIAT"
+            CreateShortcut "$SMPROGRAMS\VIAT\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon\Icon.ico"
+            CreateShortcut "$DESKTOP\VIAT.lnk" "$INSTDIR\VIAT.exe" "" "$INSTDIR\Icon\Icon.ico"
 
             # Save install path
-            WriteRegStr HKLM "Software\\VIAT" "Install_Dir" "$INSTDIR"
+            WriteRegStr HKLM "Software\VIAT" "Install_Dir" "$INSTDIR"
 
             # Create uninstaller
-            WriteUninstaller "$INSTDIR\\Uninstall.exe"
+            WriteUninstaller "$INSTDIR\Uninstall.exe"
 
             # Add uninstaller to Programs & Features
-            WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT" "DisplayName" "Video Annotation Tool (VIAT)"
-            WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT" "UninstallString" "$INSTDIR\\Uninstall.exe"
-            WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT" "DisplayIcon" "$INSTDIR\\Icon\\app_icon.ico"
-            WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT" "NoModify" 1
-            WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT" "NoRepair" 1
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "DisplayName" "Video Annotation Tool (VIAT)"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "UninstallString" "$INSTDIR\Uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "DisplayIcon" "$INSTDIR\Icon\Icon.ico"
+            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "NoModify" 1
+            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT" "NoRepair" 1
         SectionEnd
 
         Section "Uninstall"
             SetRegView 64
 
             RMDir /r "$INSTDIR"
-            Delete "$SMPROGRAMS\\VIAT\\VIAT.lnk"
-            RMDir "$SMPROGRAMS\\VIAT"
-            Delete "$DESKTOP\\VIAT.lnk"
+            Delete "$SMPROGRAMS\VIAT\VIAT.lnk"
+            RMDir "$SMPROGRAMS\VIAT"
+            Delete "$DESKTOP\VIAT.lnk"
             
-            DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VIAT"
-            DeleteRegKey HKLM "Software\\VIAT"
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VIAT"
+            DeleteRegKey HKLM "Software\VIAT"
         SectionEnd 
     """
     
     viat_installer_path = os.path.join(os.getcwd(), "viat_installer.nsi")
     
-    with open(viat_installer_path, "w") as f:
-            f.write(nsis_script)
+    # with open(viat_installer_path, "w") as f:
+            # f.write(nsis_script)
 
     try:
         subprocess.run(["makensis", viat_installer_path], check=True)
