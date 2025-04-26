@@ -8,8 +8,8 @@
         InstallDirRegKey HKLM "Software\VIAT" "Install_Dir"
         RequestExecutionLevel admin
 
-        Icon D:\VIAT\viat\Icon\installation_Icon.ico 
-        !define MUI_ICON D:\VIAT\viat\Icon\Icon.ico
+        Icon D:\VIAT\viat\Icon\Icon.ico 
+        !define MUI_ICON D:\VIAT\viat\Icon\installation_Icon.ico
 
         !insertmacro MUI_PAGE_WELCOME
         !insertmacro MUI_PAGE_DIRECTORY
@@ -27,7 +27,7 @@
 
             # Copy all files
             File /r D:\VIAT\installation_tools\dist*.*
-            File /r D:\VIAT\viat\Icon\Icon.ico
+            File /r D:\VIAT\viat\Icon*.*
 
             # Create shortcuts AFTER copying files
             CreateDirectory "$SMPROGRAMS\VIAT"

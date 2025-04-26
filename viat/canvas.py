@@ -56,10 +56,10 @@ class VideoCanvas(QWidget):
         self.selected_annotation = None
         self.current_class = "Drone"  # Default class
         self.class_colors = {
-            "Drone": QColor(0, 255, 255),
+            "Quad": QColor(0, 255, 255),
         }
         self.class_attributes = {
-            "Drone": {
+            "Quad": {
                 "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
                 "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
             }

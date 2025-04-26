@@ -475,19 +475,24 @@ def export_raya_annotations(filename, annotations):
 
                 # Get annotation properties
                 rect = annotation.rect
-                class_id = 0  # Default to 0 for Drone class
+                class_id = 0  # Default to 0 for Quad class
                 x = rect.x()
                 y = rect.y()
                 width = rect.width()
                 height = rect.height()
                 size = annotation.attributes.get("Size", -1)
                 quality = annotation.attributes.get("Quality", -1)
-                shadow = annotation.attributes.get("Shadow", 0)
+                shadow = annotation.attributes.get("Shadow", -1)
 
                 # Format the annotation with a semicolon after each one
-                frame_str += (
-                    f"[{class_id},{x},{y},{width},{height},{size},{quality},{shadow}];"
-                )
+                if shadow==-1:
+                    frame_str += (
+                        f"[{class_id},{x},{y},{width},{height},{size},{quality}];"
+                    )
+                else:
+                    frame_str += (
+                        f"[{class_id},{x},{y},{width},{height},{size},{quality},{shadow}];"
+                    )
 
             lines[frame_num] = frame_str
 

@@ -28,8 +28,8 @@ def build_executable():
     # Run PyInstaller with the spec file
     subprocess.run(["pyinstaller", spec_file], check=True)
     
-    # Check if the build was successful
-    if os.path.exists("dist") and "VIAT" in os.listdir("dist"):
+    dist_path = os.path.join(os.getcwd(), "dist")
+    if os.path.exists(dist_path) and "VIAT.exe" in os.listdir(dist_path):
         print("Windows executable built successfully!")
         return True
     else:
@@ -45,15 +45,16 @@ def create_installer():
     print("Creating Windows installer...")
     
     installer_icon_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon", "installation_Icon.ico")
-    # installer_icon_path = installer_icon_path.replace("\\", "/")
+
     app_icon_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon", "Icon.ico")
-    # app_icon_path = app_icon_path.replace("\\", "/")
+    icon_folder_path = os.path.join(Path(os.getcwd()).parent, "viat", "Icon",)
+
     dist_path = os.path.join(os.getcwd(), "dist")
     if not os.path.exists(dist_path) or not os.listdir(dist_path):
         print("Error: dist directory is empty or doesn't exist.")
         print("Cannot create installer without application files.")
         return False
-    # dist_path = dist_path.replace("\\", "/")
+
 
     nsis_script = f"""
         !include "MUI2.nsh"
@@ -84,7 +85,7 @@ def create_installer():
 
             # Copy all files
             File /r {dist_path}*.*
-            File /r {app_icon_path}
+            File /r {icon_folder_path}*.*
 
             # Create shortcuts AFTER copying files
             CreateDirectory "$SMPROGRAMS\\VIAT"
@@ -141,5 +142,5 @@ if __name__ == "__main__":
     # Ensure we're in the right directory
     os.chdir(Path(__file__).parent)
     
-    # if build_executable():
-    create_installer()
+    if build_executable():
+        create_installer()

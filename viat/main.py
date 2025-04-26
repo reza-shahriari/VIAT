@@ -54,6 +54,7 @@ from utils import (
     get_last_project,
     save_last_state,
     load_last_state,
+    get_icon,
 )
 
 
@@ -74,11 +75,6 @@ class VideoAnnotationTool(QMainWindow):
         # Basic window setup
         self.setWindowTitle("Video Annotation Tool")
         self.setGeometry(100, 100, 1200, 800)
-        icon_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "Icon", "Icon.png"
-        )
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
         # Initialize properties
         self.init_properties()
         self.video_filename = ""
@@ -454,7 +450,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Play/Pause button
         self.play_button = QPushButton()
-        self.play_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.play_button.setIcon(get_icon("media-playback-start"))
         self.play_button.setToolTip("Play/Pause")
         self.play_button.clicked.connect(self.play_pause_video)
         self.play_button.setMaximumWidth(30)  # Make button smaller
@@ -462,7 +458,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Previous frame button
         prev_button = QPushButton()
-        prev_button.setIcon(QIcon.fromTheme("media-skip-backward"))
+        prev_button.setIcon(get_icon("media-skip-backward"))
         prev_button.setToolTip("Previous Frame")
         prev_button.clicked.connect(self.prev_frame)
         prev_button.setMaximumWidth(30)  # Make button smaller
@@ -470,7 +466,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Next frame button
         next_button = QPushButton()
-        next_button.setIcon(QIcon.fromTheme("media-skip-forward"))
+        next_button.setIcon(get_icon("media-skip-forward"))
         next_button.setToolTip("Next Frame")
         next_button.clicked.connect(self.next_frame)
         next_button.setMaximumWidth(30)  # Make button smaller
@@ -941,7 +937,7 @@ class VideoAnnotationTool(QMainWindow):
         if self.is_playing:
             self.play_timer.stop()
             self.is_playing = False
-            self.play_button.setIcon(QIcon.fromTheme("media-playback-start"))
+            self.play_button.setIcon(get_icon("media-playback-start"))
             self.statusBar.showMessage("Paused")
         else:
             # Set timer interval based on playback speed
@@ -949,7 +945,7 @@ class VideoAnnotationTool(QMainWindow):
             interval = int(1000 / (fps * self.playback_speed))
             self.play_timer.start(interval)
             self.is_playing = True
-            self.play_button.setIcon(QIcon.fromTheme("media-playback-pause"))
+            self.play_button.setIcon(get_icon("media-playback-pause"))
             self.statusBar.showMessage("Playing")
 
     def eventFilter(self, obj, event):
@@ -2241,8 +2237,9 @@ class VideoAnnotationTool(QMainWindow):
                         quality = float(parts[6]) if len(parts) > 6 else 100.0
                         shadow = float(parts[7]) if len(parts) > 7 else 0.0
 
+
                         # Create class name based on class ID
-                        class_name = "Drone"
+                        class_name = "Quad"
 
                         # Create QRect
                         rect = QRect(int(x), int(y), int(width), int(height))
@@ -2260,9 +2257,9 @@ class VideoAnnotationTool(QMainWindow):
                         attributes = {
                             "Size": int(size),
                             "Quality": int(quality),
-                            "Shadow": shadow if len(parts) > 7 else 0,
                         }
-
+                        if shadow != 0.0:
+                            attributes["Shadow"] = int(shadow)
                         # Create bounding box
                         bbox_obj = BoundingBox(rect, class_name, attributes, color)
                         frame_annotations.append(bbox_obj)

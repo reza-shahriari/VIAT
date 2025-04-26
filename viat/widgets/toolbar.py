@@ -1,7 +1,7 @@
-from PyQt5.QtWidgets import QToolBar, QLabel, QComboBox, QPushButton, QSlider, QAction
+from PyQt5.QtWidgets import QToolBar, QLabel, QComboBox, QPushButton, QSlider, QAction,QToolButton
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
-
+from utils import get_icon
 
 class AnnotationToolbar(QToolBar):
     def __init__(self, main_window):
@@ -56,47 +56,48 @@ class AnnotationToolbar(QToolBar):
         self.addSeparator()
 
         # Add button
-        add_action = QAction(
-            QIcon.fromTheme("list-add", QIcon()), "Add Annotation", self
-        )
-        add_action.triggered.connect(self.add_class)
-        self.addAction(add_action)
-
+        self.add_button = QToolButton()
+        self.add_button.setIcon(get_icon("add"))
+        self.add_button.setToolTip("Add Annotation (A)")
+        self.add_button.clicked.connect(self.add_class)
+        self.addWidget(self.add_button)
+        
         # Edit button
-        edit_action = QAction(
-            QIcon.fromTheme("document-edit", QIcon()), "Edit Selected", self
-        )
-        edit_action.triggered.connect(self.edit_selected)
-        self.addAction(edit_action)
+
+        self.edit_button = QToolButton()
+        self.edit_button.setIcon(get_icon("edit"))
+        self.edit_button.setToolTip("Edit Selected Annotation (E)")
+        self.edit_button.clicked.connect(self.edit_selected)
+        self.addWidget(self.edit_button)
 
         # Delete button
-        delete_action = QAction(
-            QIcon.fromTheme("edit-delete", QIcon()), "Delete Selected", self
-        )
-        delete_action.triggered.connect(self.delete_selected)
-        self.addAction(delete_action)
+        self.delete_button = QToolButton()
+        self.delete_button.setIcon(get_icon("delete"))
+        self.delete_button.setToolTip("Delete Selected Annotation (Del)")
+        self.delete_button.clicked.connect(self.delete_selected)
+        self.addWidget(self.delete_button)
 
         # Add zoom controls
         self.addSeparator()
 
         # Zoom in button
-        zoom_in_action = QAction(QIcon.fromTheme("zoom-in", QIcon()), "Zoom In", self)
-        zoom_in_action.triggered.connect(self.zoom_in)
-        self.addAction(zoom_in_action)
-
+        self.zoom_in_button = QToolButton()
+        self.zoom_in_button.setIcon(get_icon("zoom-in"))
+        self.zoom_in_button.setToolTip("Zoom In (+)")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        self.addWidget(self.zoom_in_button)
         # Zoom out button
-        zoom_out_action = QAction(
-            QIcon.fromTheme("zoom-out", QIcon()), "Zoom Out", self
-        )
-        zoom_out_action.triggered.connect(self.zoom_out)
-        self.addAction(zoom_out_action)
-
+        self.zoom_out_button = QToolButton()
+        self.zoom_out_button.setIcon(get_icon("zoom-out"))
+        self.zoom_out_button.setToolTip("Zoom Out (-)")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        self.addWidget(self.zoom_out_button)
         # Reset zoom button
-        reset_zoom_action = QAction(
-            QIcon.fromTheme("zoom-original", QIcon()), "Reset Zoom", self
-        )
-        reset_zoom_action.triggered.connect(self.reset_zoom)
-        self.addAction(reset_zoom_action)
+        self.zoom_reset_button = QToolButton()
+        self.zoom_reset_button.setIcon(get_icon("zoom-original"))
+        self.zoom_reset_button.setToolTip("Reset Zoom (0)")
+        self.zoom_reset_button.clicked.connect(self.reset_zoom)
+        self.addWidget(self.zoom_reset_button)
 
     def update_class_selector(self):
         """Update the class selector with available classes"""

@@ -18,7 +18,10 @@ a = Analysis(
         'cv2',
         'numpy',
         'xml.etree.ElementTree',
-        'json'
+        'json',
+        'qtawesome',
+        'qtawesome.iconic_font',
+        
     ],
     hookspath=[],
     hooksconfig={},
@@ -51,5 +54,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='../viat/Icon/icon.ico' if os.name == 'nt' else '../viat/Icon/app_icon.ico',
+    icon='../viat/Icon/Icon.ico' 
 )

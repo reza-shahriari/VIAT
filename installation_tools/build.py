@@ -67,8 +67,8 @@ def main():
         print("Detected Windows platform")
         from build_windows import build_executable, create_installer
         
-        # if build_executable():
-        create_installer()
+        if build_executable():
+            create_installer()
     
     elif system == "Linux":
         print("Detected Linux platform")
