@@ -23,11 +23,12 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
 # PyInstaller
-*.manifest
-*.spec
-
+installation_tools/deb/*
+installation_tools/deb_dist/*
+installation_tools/dist/*
+*.deb
+*.exe
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

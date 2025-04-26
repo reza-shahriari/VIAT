@@ -20,7 +20,11 @@ import cv2
 from PyQt5.QtWidgets import QWidget, QMenu
 from PyQt5.QtCore import Qt, QRect, QPoint
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
-from annotation import BoundingBox
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+  
+from .annotation import BoundingBox
 import random
 
 # Edge detection constants

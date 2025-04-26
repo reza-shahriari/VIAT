@@ -37,11 +37,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import  Qt, QTimer, QRect, QDateTime, QEvent
 from PyQt5.QtGui import QColor, QIcon
-
-from canvas import VideoCanvas
-from annotation import BoundingBox
-from widgets.styles import StyleManager
-from widgets import AnnotationDock, ClassDock, AnnotationToolbar
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+  
+from .canvas import VideoCanvas
+from .annotation import BoundingBox
+from .widgets import AnnotationDock,StyleManager, ClassDock, AnnotationToolbar
 
 import json
 from utils import (

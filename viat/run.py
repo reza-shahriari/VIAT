@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from viat.main import VideoAnnotationTool  
+
 from PyQt5.QtWidgets import QApplication
-from main import VideoAnnotationTool
+
 
 
 def main():
