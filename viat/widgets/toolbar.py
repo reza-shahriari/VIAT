@@ -1,12 +1,13 @@
 from PyQt5.QtWidgets import QToolBar, QLabel, QComboBox, QPushButton, QSlider, QAction,QToolButton
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
-from utils import get_icon
+
 
 class AnnotationToolbar(QToolBar):
-    def __init__(self, main_window):
+    def __init__(self, main_window,icon_provider):
         super().__init__("Annotation Toolbar")
         self.main_window = main_window
+        self.icon_provider = icon_provider
         # Default annotation methods if not defined in main window
         self.default_annotation_methods = {
             "Rectangle": "Draw rectangular bounding boxes",
@@ -57,7 +58,7 @@ class AnnotationToolbar(QToolBar):
 
         # Add button
         self.add_button = QToolButton()
-        self.add_button.setIcon(get_icon("add"))
+        self.add_button.setIcon(self.icon_provider.get_icon("add"))
         self.add_button.setToolTip("Add Annotation (A)")
         self.add_button.clicked.connect(self.add_class)
         self.addWidget(self.add_button)
@@ -65,14 +66,14 @@ class AnnotationToolbar(QToolBar):
         # Edit button
 
         self.edit_button = QToolButton()
-        self.edit_button.setIcon(get_icon("edit"))
+        self.edit_button.setIcon(self.icon_provider.get_icon("edit"))
         self.edit_button.setToolTip("Edit Selected Annotation (E)")
         self.edit_button.clicked.connect(self.edit_selected)
         self.addWidget(self.edit_button)
 
         # Delete button
         self.delete_button = QToolButton()
-        self.delete_button.setIcon(get_icon("delete"))
+        self.delete_button.setIcon(self.icon_provider.get_icon("delete"))
         self.delete_button.setToolTip("Delete Selected Annotation (Del)")
         self.delete_button.clicked.connect(self.delete_selected)
         self.addWidget(self.delete_button)
@@ -82,19 +83,19 @@ class AnnotationToolbar(QToolBar):
 
         # Zoom in button
         self.zoom_in_button = QToolButton()
-        self.zoom_in_button.setIcon(get_icon("zoom-in"))
+        self.zoom_in_button.setIcon(self.icon_provider.get_icon("zoom-in"))
         self.zoom_in_button.setToolTip("Zoom In (+)")
         self.zoom_in_button.clicked.connect(self.zoom_in)
         self.addWidget(self.zoom_in_button)
         # Zoom out button
         self.zoom_out_button = QToolButton()
-        self.zoom_out_button.setIcon(get_icon("zoom-out"))
+        self.zoom_out_button.setIcon(self.icon_provider.get_icon("zoom-out"))
         self.zoom_out_button.setToolTip("Zoom Out (-)")
         self.zoom_out_button.clicked.connect(self.zoom_out)
         self.addWidget(self.zoom_out_button)
         # Reset zoom button
         self.zoom_reset_button = QToolButton()
-        self.zoom_reset_button.setIcon(get_icon("zoom-original"))
+        self.zoom_reset_button.setIcon(self.icon_provider.get_icon("zoom-original"))
         self.zoom_reset_button.setToolTip("Reset Zoom (0)")
         self.zoom_reset_button.clicked.connect(self.reset_zoom)
         self.addWidget(self.zoom_reset_button)
@@ -176,3 +177,9 @@ class AnnotationToolbar(QToolBar):
         """Reset zoom to default"""
         if hasattr(self.main_window, "reset_zoom"):
             self.main_window.reset_zoom()
+
+    def refresh_icons(self):
+        """Refresh all icons in the toolbar to match the current theme."""
+        for action in self.actions():
+            if hasattr(action, 'icon_name') and action.icon_name:
+                action.setIcon(self.icon_provider.get_icon(action.icon_name))

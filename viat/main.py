@@ -33,17 +33,20 @@ from PyQt5.QtWidgets import (
     QActionGroup,
     QGroupBox,
     QDoubleSpinBox,
-    QApplication
+    QApplication,
+    QProgressBar,
+    QCheckBox,
+
 )
 from PyQt5.QtCore import  Qt, QTimer, QRect, QDateTime, QEvent
-from PyQt5.QtGui import QColor, QIcon
+from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
   
 from .canvas import VideoCanvas
 from .annotation import BoundingBox
 from .widgets import AnnotationDock,StyleManager, ClassDock, AnnotationToolbar
-
+import numpy as np
 import json
 from utils import (
     save_project,
@@ -54,9 +57,9 @@ from utils import (
     get_last_project,
     save_last_state,
     load_last_state,
-    get_icon,
-)
 
+)
+from utils.icon_provider import IconProvider
 
 
 
@@ -75,6 +78,7 @@ class VideoAnnotationTool(QMainWindow):
         # Basic window setup
         self.setWindowTitle("Video Annotation Tool")
         self.setGeometry(100, 100, 1200, 800)
+
         # Initialize properties
         self.init_properties()
         self.video_filename = ""
@@ -82,6 +86,7 @@ class VideoAnnotationTool(QMainWindow):
         self.init_ui()
         self.canvas.smart_edge_enabled = False
         self.setup_autosave()
+
         
         # Install event filter to handle global shortcuts
         QApplication.instance().installEventFilter(self)
@@ -104,13 +109,19 @@ class VideoAnnotationTool(QMainWindow):
     def init_properties(self):
         """Initialize the application properties and state variables."""
         # Available styles
+        self.duplicate_frames_enabled = True
+        self.duplicate_frames_cache = {}  # Maps frame hash to list of frame numbers
+        self.frame_hashes = {}  # Maps frame number to its hash
         self.styles = {}
+        self.icon_provider = IconProvider()
+
         for style_name in StyleManager.get_available_styles():
-            method_name = f"set_{style_name.lower()}_style"
-            if style_name.lower() == "default":
-                self.styles[style_name] = StyleManager.set_default_style
-            else:
+            method_name = f"set_{style_name.lower().replace(' ', '_')}_style"
+            if hasattr(StyleManager, method_name):
                 self.styles[style_name] = getattr(StyleManager, method_name)
+            elif style_name.lower() == "default":
+                self.styles[style_name] = StyleManager.set_default_style
+        
         # Annotation methods
         self.annotation_methods = {
             "Rectangle": "Draw rectangular bounding boxes",
@@ -348,6 +359,23 @@ class VideoAnnotationTool(QMainWindow):
         smart_edge_action.setShortcut("Ctrl+E")
         smart_edge_action.triggered.connect(self.toggle_smart_edge)
         tools_menu.addAction(smart_edge_action)
+        
+        # Add separator
+        tools_menu.addSeparator()
+        
+        # Detect Duplicate Frames action
+        duplicate_frames_action = QAction("Detect Duplicate Frames", self, checkable=True)
+        duplicate_frames_action.setToolTip("Automatically detect and propagate annotations to duplicate frames")
+        duplicate_frames_action.triggered.connect(self.toggle_duplicate_frames_detection)
+        tools_menu.addAction(duplicate_frames_action)
+        self.duplicate_frames_action = duplicate_frames_action
+        
+        # Propagate Annotations action
+        propagate_action = QAction("Propagate Annotations...", self)
+        propagate_action.setToolTip("Copy current frame annotations to multiple frames")
+        propagate_action.setShortcut("Ctrl+P")
+        propagate_action.triggered.connect(self.propagate_annotations)
+        tools_menu.addAction(propagate_action)
 
         # Store reference to keep menu and toolbar in sync
         self.smart_edge_action = smart_edge_action
@@ -382,7 +410,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def create_toolbar(self):
         """Create the annotation toolbar."""
-        self.toolbar = AnnotationToolbar(self)
+        self.toolbar = AnnotationToolbar(self,self.icon_provider)
         self.addToolBar(self.toolbar)
         self.class_selector = self.toolbar.class_selector
 
@@ -450,7 +478,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Play/Pause button
         self.play_button = QPushButton()
-        self.play_button.setIcon(get_icon("media-playback-start"))
+        self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
         self.play_button.setToolTip("Play/Pause")
         self.play_button.clicked.connect(self.play_pause_video)
         self.play_button.setMaximumWidth(30)  # Make button smaller
@@ -458,7 +486,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Previous frame button
         prev_button = QPushButton()
-        prev_button.setIcon(get_icon("media-skip-backward"))
+        prev_button.setIcon(self.icon_provider.get_icon("media-skip-backward"))
         prev_button.setToolTip("Previous Frame")
         prev_button.clicked.connect(self.prev_frame)
         prev_button.setMaximumWidth(30)  # Make button smaller
@@ -466,7 +494,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Next frame button
         next_button = QPushButton()
-        next_button.setIcon(get_icon("media-skip-forward"))
+        next_button.setIcon(self.icon_provider.get_icon("media-skip-forward"))
         next_button.setToolTip("Next Frame")
         next_button.clicked.connect(self.next_frame)
         next_button.setMaximumWidth(30)  # Make button smaller
@@ -662,6 +690,21 @@ class VideoAnnotationTool(QMainWindow):
             # Start auto-save timer
             if self.autosave_enabled and not self.autosave_timer.isActive():
                 self.autosave_timer.start(self.autosave_interval)
+
+            # Reset duplicate frame detection if this is a new video
+            if self.duplicate_frames_enabled and not self.frame_hashes:
+                # Ask if user wants to scan for duplicates
+                reply = QMessageBox.question(
+                    self,
+                    "Duplicate Frame Detection",
+                    "Would you like to scan this video for duplicate frames?\n"
+                    "(This will help automatically propagate annotations)",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    QTimer.singleShot(500, self.scan_video_for_duplicates)
 
             # Only check for annotation files if this is a direct video open, not from a project load
             if (
@@ -911,6 +954,13 @@ class VideoAnnotationTool(QMainWindow):
                 self.canvas.set_frame(frame)
                 self.update_frame_info()
 
+                # Check for duplicate frames and propagate annotations if enabled
+                if self.duplicate_frames_enabled and self.current_frame in self.frame_hashes:
+                    current_hash = self.frame_hashes[self.current_frame]
+                    # If this is a duplicate frame, check if any other frame with this hash has annotations
+                    if current_hash in self.duplicate_frames_cache and len(self.duplicate_frames_cache[current_hash]) > 1:
+                        self.propagate_annotations_to_duplicate(current_hash)
+                        
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
             else:
@@ -937,7 +987,7 @@ class VideoAnnotationTool(QMainWindow):
         if self.is_playing:
             self.play_timer.stop()
             self.is_playing = False
-            self.play_button.setIcon(get_icon("media-playback-start"))
+            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
             self.statusBar.showMessage("Paused")
         else:
             # Set timer interval based on playback speed
@@ -945,7 +995,7 @@ class VideoAnnotationTool(QMainWindow):
             interval = int(1000 / (fps * self.playback_speed))
             self.play_timer.start(interval)
             self.is_playing = True
-            self.play_button.setIcon(get_icon("media-playback-pause"))
+            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-pause"))
             self.statusBar.showMessage("Playing")
 
     def eventFilter(self, obj, event):
@@ -1351,7 +1401,16 @@ class VideoAnnotationTool(QMainWindow):
     def update_annotation_list(self):
         """Update the annotations list widget."""
         self.annotation_dock.update_annotation_list()
+        
+        # If duplicate frame detection is enabled, propagate annotations to duplicates
+        if self.duplicate_frames_enabled and self.current_frame in self.frame_hashes:
+            current_hash = self.frame_hashes[self.current_frame]
+            if current_hash in self.duplicate_frames_cache and len(self.duplicate_frames_cache[current_hash]) > 1:
+                # Propagate current frame annotations to all duplicates
+                self.propagate_to_duplicate_frames(current_hash)
+        
         self.perform_autosave()
+
 
     def add_empty_annotation(self):
         """Add a new empty annotation to the current frame."""
@@ -1607,8 +1666,12 @@ class VideoAnnotationTool(QMainWindow):
                 if action.text() == "Show Attribute Dialog for New Annotations":
                     action.setChecked(self.auto_show_attribute_dialog)
                     break
+        # Propagate annotations with 'P' key
+        elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
+            self.propagate_annotations()
         else:
             super().keyPressEvent(event)
+
 
 
 
@@ -2878,24 +2941,38 @@ class VideoAnnotationTool(QMainWindow):
 
             # Update canvas background based on style
             if style_name == "Dark":
+                self.icon_provider.set_theme('dark')
+                self.refresh_icons()
+
                 self.canvas.setStyleSheet(
                     "background-color: #151515;"
                 )  # Darker background
             elif style_name == "Light":
+                self.icon_provider.set_theme('light')
+                self.refresh_icons()
                 self.canvas.setStyleSheet(
                     "background-color: #FFFFFF;"
                 )  # White background
             elif style_name == "Blue":
+                self.icon_provider.set_theme('light')
+                self.refresh_icons()
                 self.canvas.setStyleSheet(
                     "background-color: #E5F0FF;"
                 )  # Light blue background
             elif style_name == "Green":
+                self.icon_provider.set_theme('light')
+                self.refresh_icons()
                 self.canvas.setStyleSheet(
                     "background-color: #E5FFE5;"
                 )  # Light green background
-            else:
+            elif 'dark' in style_name:
+                self.icon_provider.set_theme('dark')
+                self.refresh_icons()
                 self.canvas.setStyleSheet("")  # Default background
-
+            else:
+                self.icon_provider.set_theme('light')
+                self.refresh_icons()
+                self.canvas.setStyleSheet("")  # Default background
             # Clear any existing stylesheet for annotation dock
             if hasattr(self, "annotation_dock"):
                 if style_name == "Dark":
@@ -2927,6 +3004,25 @@ class VideoAnnotationTool(QMainWindow):
                     self.class_dock.setStyleSheet("")
 
             self.statusBar.showMessage(f"Style changed to {style_name}")
+
+    def refresh_icons(self):
+        """Refresh all icons in the UI to match the current theme."""
+        
+        # Update play button icon
+        if hasattr(self, "play_button"):
+            icon_name = "media-playback-pause" if self.is_playing else "media-playback-start"
+            self.play_button.setIcon(self.icon_provider.get_icon(icon_name))
+        
+        # Update prev/next buttons
+        if hasattr(self, "prev_button"):
+            self.prev_button.setIcon(self.icon_provider.get_icon("media-skip-backward"))
+        
+        if hasattr(self, "next_button"):
+            self.next_button.setIcon(self.icon_provider.get_icon("media-skip-forward"))
+        
+        # Update toolbar if it exists
+        if hasattr(self, "toolbar") and hasattr(self.toolbar, "refresh_icons"):
+            self.toolbar.refresh_icons()
 
     def show_about(self):
         """Show about dialog."""
@@ -3136,3 +3232,592 @@ class VideoAnnotationTool(QMainWindow):
                 
                 # Load annotations for this frame if they exist
                 self.load_current_frame_annotations()
+    def toggle_duplicate_frames_detection(self):
+            """Toggle automatic duplicate frame detection and annotation propagation."""
+            self.duplicate_frames_enabled = self.duplicate_frames_action.isChecked()
+            
+            if self.duplicate_frames_enabled:
+                reply = QMessageBox.question(
+                    self,
+                    "Duplicate Frame Detection",
+                    "This will automatically propagate annotations to duplicate frames.\n\n"
+                    "Do you want to scan the entire video now for duplicate frames?\n"
+                    "(This may take some time for long videos)",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self.scan_video_for_duplicates()
+                
+                self.statusBar.showMessage("Duplicate frame detection enabled - annotations will be propagated automatically")
+            else:
+                self.statusBar.showMessage("Duplicate frame detection disabled")
+    def scan_video_for_duplicates(self):
+        """Scan the entire video to identify duplicate frames."""
+        if not self.cap or not self.cap.isOpened():
+            QMessageBox.warning(self, "Scan Video", "Please open a video first!")
+            return
+        
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Scanning Video")
+        progress.setFixedSize(300, 100)
+        layout = QVBoxLayout(progress)
+        
+        label = QLabel("Scanning for duplicate frames...")
+        layout.addWidget(label)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, self.total_frames)
+        layout.addWidget(progress_bar)
+        
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Remember current position
+        current_pos = self.current_frame
+        
+        # Reset cache
+        self.duplicate_frames_cache = {}
+        self.frame_hashes = {}
+        
+        # Scan video
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        for frame_num in range(self.total_frames):
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 10 == 0:  # Update UI every 10 frames
+                QApplication.processEvents()
+            
+            # Calculate frame hash
+            frame_hash = self.calculate_frame_hash(frame)
+            self.frame_hashes[frame_num] = frame_hash
+            
+            # Add to duplicate cache
+            if frame_hash in self.duplicate_frames_cache:
+                self.duplicate_frames_cache[frame_hash].append(frame_num)
+            else:
+                self.duplicate_frames_cache[frame_hash] = [frame_num]
+        
+        # Restore position
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+        ret, frame = self.cap.read()
+        if ret:
+            self.canvas.set_frame(frame)
+        
+        # Close progress dialog
+        progress.close()
+        
+        # Report results
+        duplicate_count = sum(len(frames) - 1 for frames in self.duplicate_frames_cache.values() if len(frames) > 1)
+        QMessageBox.information(
+            self,
+            "Scan Complete",
+            f"Found {duplicate_count} duplicate frames in {self.total_frames} total frames."
+        )
+    def calculate_frame_hash(self, frame):
+        """
+        Calculate a perceptual hash of a frame for duplicate detection.
+        
+        Args:
+            frame (numpy.ndarray): The frame to hash
+            
+        Returns:
+            str: A hash string representing the frame content
+        """
+        # Resize to a small size to focus on overall structure and ignore minor differences
+        small_frame = cv2.resize(frame, (32, 32))
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate mean value
+        mean_val = gray.mean()
+        
+        # Create binary hash (1 if pixel value is greater than mean, 0 otherwise)
+        binary_hash = (gray > mean_val).flatten()
+        
+        # Convert binary array to hexadecimal string
+        hex_hash = ''.join('1' if b else '0' for b in binary_hash)
+        return hex_hash
+    def propagate_annotations_to_duplicate(self, frame_hash):
+        """
+        Propagate annotations from other frames with the same hash to the current frame.
+        
+        Args:
+            frame_hash (str): The hash of the current frame
+        """
+        duplicate_frames = self.duplicate_frames_cache[frame_hash]
+        
+        # Skip if this is the first occurrence of this frame
+        if duplicate_frames[0] == self.current_frame:
+            return
+        
+        # Look for annotations in other frames with the same hash
+        for frame_num in duplicate_frames:
+            if frame_num != self.current_frame and frame_num in self.frame_annotations:
+                # Found annotations in another frame with the same hash
+                if not self.frame_annotations.get(self.current_frame):
+                    # Copy annotations to current frame
+                    self.frame_annotations[self.current_frame] = [
+                        self.clone_annotation(ann) for ann in self.frame_annotations[frame_num]
+                    ]
+                    self.statusBar.showMessage(
+                        f"Automatically copied annotations from duplicate frame {frame_num}", 3000
+                    )
+                    return
+    def clone_annotation(self, annotation):
+        """
+        Create a deep copy of an annotation.
+        
+        Args:
+            annotation: The annotation to clone
+            
+        Returns:
+            A new annotation object with the same properties
+        """
+        from copy import deepcopy
+        return deepcopy(annotation)
+    def propagate_annotations(self):
+        """Propagate current frame annotations to a range of frames."""
+        if not self.canvas.annotations:
+            QMessageBox.warning(self, "Propagate Annotations", "No annotations in current frame to propagate!")
+            return
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Propagate Annotations")
+        dialog.setMinimumWidth(300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Frame range selection
+        range_group = QGroupBox("Frame Range")
+        range_layout = QFormLayout(range_group)
+        
+        start_spin = QSpinBox()
+        start_spin.setRange(0, self.total_frames - 1)
+        start_spin.setValue(self.current_frame)
+        
+        end_spin = QSpinBox()
+        end_spin.setRange(0, self.total_frames - 1)
+        end_spin.setValue(min(self.current_frame + 10, self.total_frames - 1))
+        
+        range_layout.addRow("Start Frame:", start_spin)
+        range_layout.addRow("End Frame:", end_spin)
+        
+        # Options
+        options_group = QGroupBox("Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        overwrite_check = QCheckBox("Overwrite existing annotations")
+        overwrite_check.setChecked(False)
+        
+        smart_check = QCheckBox("Smart propagation (skip duplicate frames)")
+        smart_check.setChecked(True)
+        smart_check.setEnabled(self.duplicate_frames_enabled)
+        
+        options_layout.addWidget(overwrite_check)
+        options_layout.addWidget(smart_check)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        # Add widgets to layout
+        layout.addWidget(range_group)
+        layout.addWidget(options_group)
+        layout.addWidget(buttons)
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            start_frame = start_spin.value()
+            end_frame = end_spin.value()
+            overwrite = overwrite_check.isChecked()
+            smart = smart_check.isChecked() and self.duplicate_frames_enabled
+            
+            # Validate range
+            if start_frame > end_frame:
+                start_frame, end_frame = end_frame, start_frame
+            
+            # Get current annotations
+            current_annotations = [self.clone_annotation(ann) for ann in self.canvas.annotations]
+            
+            # Create progress dialog
+            progress = QDialog(self)
+            progress.setWindowTitle("Propagating Annotations")
+            progress.setFixedSize(300, 100)
+            progress_layout = QVBoxLayout(progress)
+            
+            label = QLabel(f"Propagating annotations to frames {start_frame}-{end_frame}...")
+            progress_layout.addWidget(label)
+            
+            progress_bar = QProgressBar()
+            progress_bar.setRange(start_frame, end_frame)
+            progress_layout.addWidget(progress_bar)
+            
+            # Non-blocking progress dialog
+            progress.setModal(False)
+            progress.show()
+            QApplication.processEvents()
+            
+            # Track processed frames for smart propagation
+            processed_hashes = set()
+            
+            # Propagate annotations
+            for frame_num in range(start_frame, end_frame + 1):
+                # Skip current frame
+                if frame_num == self.current_frame:
+                    continue
+                    
+                # Update progress
+                progress_bar.setValue(frame_num)
+                if frame_num % 5 == 0:  # Update UI every 5 frames
+                    QApplication.processEvents()
+                
+                # Skip frames with existing annotations if not overwriting
+                if not overwrite and frame_num in self.frame_annotations and self.frame_annotations[frame_num]:
+                    continue
+                
+                # Smart propagation - skip duplicate frames that have already been processed
+                if smart and frame_num in self.frame_hashes:
+                    frame_hash = self.frame_hashes[frame_num]
+                    if frame_hash in processed_hashes:
+                        continue
+                    processed_hashes.add(frame_hash)
+                
+                # Copy annotations to this frame
+                self.frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in current_annotations]
+            
+            # Close progress dialog
+            progress.close()
+            
+            # Update UI if we're on one of the affected frames
+            if start_frame <= self.current_frame <= end_frame:
+                self.load_current_frame_annotations()
+            
+            self.statusBar.showMessage(
+                f"Annotations propagated to frames {start_frame}-{end_frame}", 5000
+            )
+    def propagate_to_duplicate_frames(self, frame_hash):
+        """
+        Propagate current frame annotations to all duplicate frames with the same hash.
+        
+        Args:
+            frame_hash (str): The hash of the current frame
+        """
+        if not frame_hash or frame_hash not in self.duplicate_frames_cache:
+            return
+            
+        duplicate_frames = self.duplicate_frames_cache[frame_hash]
+        if len(duplicate_frames) <= 1:
+            return
+            
+        # Get current frame annotations
+        current_annotations = [self.clone_annotation(ann) for ann in self.canvas.annotations]
+        
+        # Count how many frames will be updated
+        update_count = 0
+        
+        # Copy to all duplicate frames
+        for frame_num in duplicate_frames:
+            if frame_num != self.current_frame:
+                self.frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in current_annotations]
+                update_count += 1
+        
+        if update_count > 0:
+            self.statusBar.showMessage(
+                f"Automatically propagated annotations to {update_count} duplicate frames", 3000
+            )
+    def detect_similar_frames(self, reference_frame, similarity_threshold=0.9):
+        """
+        Detect frames that are similar to the reference frame.
+        
+        Args:
+            reference_frame (int): The reference frame number
+            similarity_threshold (float): Threshold for considering frames similar (0-1)
+            
+        Returns:
+            list: List of frame numbers that are similar to the reference frame
+        """
+        if not self.cap or not self.cap.isOpened():
+            return []
+            
+        # Get reference frame image
+        current_pos = self.current_frame
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
+        ret, ref_frame = self.cap.read()
+        if not ret:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+            return []
+        
+        # Convert to grayscale and resize for faster comparison
+        ref_gray = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
+        ref_small = cv2.resize(ref_gray, (64, 64))
+        
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Finding Similar Frames")
+        progress.setFixedSize(300, 100)
+        layout = QVBoxLayout(progress)
+        
+        label = QLabel("Scanning for similar frames...")
+        layout.addWidget(label)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, self.total_frames)
+        layout.addWidget(progress_bar)
+        
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Scan video
+        similar_frames = [reference_frame]  # Include reference frame in results
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        
+        for frame_num in range(self.total_frames):
+            # Skip reference frame
+            if frame_num == reference_frame:
+                continue
+                
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 10 == 0:  # Update UI every 10 frames
+                QApplication.processEvents()
+                
+            # Read frame
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+                
+            # Convert to grayscale and resize
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            small = cv2.resize(gray, (64, 64))
+            
+           
+            mse = np.mean((ref_small.astype("float") - small.astype("float")) ** 2)
+            similarity = 1 - (mse / 255**2)  # Convert MSE to similarity score
+                
+            # Add to similar frames if above threshold
+            if similarity >= similarity_threshold:
+                similar_frames.append(frame_num)
+                
+        # Restore position
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+        
+        # Close progress dialog
+        progress.close()
+        
+        return similar_frames
+
+    def propagate_to_similar_frames(self):
+        """Propagate current frame annotations to similar frames."""
+        if not self.canvas.annotations:
+            QMessageBox.warning(self, "Propagate Annotations", "No annotations in current frame to propagate!")
+            return
+            
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Propagate to Similar Frames")
+        dialog.setMinimumWidth(350)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Similarity threshold
+        threshold_layout = QHBoxLayout()
+        threshold_label = QLabel("Similarity Threshold:")
+        threshold_slider = QSlider(Qt.Horizontal)
+        threshold_slider.setRange(50, 99)
+        threshold_slider.setValue(90)  # Default 0.9
+        threshold_value = QLabel("0.90")
+        
+        def update_threshold_label(value):
+            threshold_value.setText(f"{value/100:.2f}")
+            
+        threshold_slider.valueChanged.connect(update_threshold_label)
+        
+        threshold_layout.addWidget(threshold_label)
+        threshold_layout.addWidget(threshold_slider)
+        threshold_layout.addWidget(threshold_value)
+        
+        # Options
+        options_group = QGroupBox("Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        overwrite_check = QCheckBox("Overwrite existing annotations")
+        overwrite_check.setChecked(False)
+        
+        preview_check = QCheckBox("Preview similar frames before propagating")
+        preview_check.setChecked(True)
+        
+        options_layout.addWidget(overwrite_check)
+        options_layout.addWidget(preview_check)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        # Add widgets to layout
+        layout.addLayout(threshold_layout)
+        layout.addWidget(options_group)
+        layout.addWidget(buttons)
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            similarity_threshold = threshold_slider.value() / 100.0
+            overwrite = overwrite_check.isChecked()
+            preview = preview_check.isChecked()
+            
+            # Find similar frames
+            self.statusBar.showMessage("Finding similar frames... This may take a moment.")
+            QApplication.processEvents()
+            
+            similar_frames = self.detect_similar_frames(self.current_frame, similarity_threshold)
+            
+            if len(similar_frames) <= 1:
+                QMessageBox.information(
+                    self, 
+                    "No Similar Frames", 
+                    "No similar frames were found with the current threshold."
+                )
+                return
+                
+            # Show preview if requested
+            if preview:
+                preview_result = self.preview_similar_frames(similar_frames)
+                if not preview_result:
+                    return  # User cancelled
+                    
+            # Get current annotations
+            current_annotations = [self.clone_annotation(ann) for ann in self.canvas.annotations]
+            
+            # Propagate to similar frames
+            propagated_count = 0
+            for frame_num in similar_frames:
+                # Skip current frame
+                if frame_num == self.current_frame:
+                    continue
+                    
+                # Skip frames with existing annotations if not overwriting
+                if not overwrite and frame_num in self.frame_annotations and self.frame_annotations[frame_num]:
+                    continue
+                    
+                # Copy annotations to this frame
+                self.frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in current_annotations]
+                propagated_count += 1
+                
+            self.statusBar.showMessage(
+                f"Annotations propagated to {propagated_count} similar frames", 5000
+            )
+
+    def preview_similar_frames(self, frame_numbers):
+        """
+        Show a preview of similar frames and let the user select which ones to include.
+        
+        Args:
+            frame_numbers (list): List of frame numbers to preview
+            
+        Returns:
+            bool: True if user confirmed, False if cancelled
+        """
+        if not frame_numbers or len(frame_numbers) <= 1:
+            return False
+            
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Preview Similar Frames")
+        dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Instructions
+        instructions = QLabel("Select frames to propagate annotations to:")
+        layout.addWidget(instructions)
+        
+        # Frame list
+        frame_list = QListWidget()
+        frame_list.setSelectionMode(QListWidget.MultiSelection)
+        layout.addWidget(frame_list)
+        
+        # Remember current position
+        current_pos = self.current_frame
+        
+        # Add frames to list
+        for frame_num in frame_numbers:
+            # Skip current frame
+            if frame_num == self.current_frame:
+                continue
+                
+            # Create item with frame number
+            item = QListWidgetItem(f"Frame {frame_num}")
+            item.setData(Qt.UserRole, frame_num)
+            
+            # Get frame thumbnail
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = self.cap.read()
+            if ret:
+                # Create thumbnail
+                thumbnail = cv2.resize(frame, (160, 90))
+                thumbnail = cv2.cvtColor(thumbnail, cv2.COLOR_BGR2RGB)
+                
+                # Convert to QImage and QPixmap
+                h, w, c = thumbnail.shape
+                qimg = QImage(thumbnail.data, w, h, w * c, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimg)
+                
+                # Set icon
+                item.setIcon(QIcon(pixmap))
+                
+            # Add to list and select by default
+            frame_list.addItem(item)
+            item.setSelected(True)
+        
+        # Restore position
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+        
+        # Select/Deselect All buttons
+        button_layout = QHBoxLayout()
+        
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: [frame_list.item(i).setSelected(True) for i in range(frame_list.count())])
+        
+        deselect_all_btn = QPushButton("Deselect All")
+        deselect_all_btn.clicked.connect(lambda: [frame_list.item(i).setSelected(False) for i in range(frame_list.count())])
+        
+        button_layout.addWidget(select_all_btn)
+        button_layout.addWidget(deselect_all_btn)
+        layout.addLayout(button_layout)
+        
+        # Dialog buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            # Update frame_numbers to only include selected frames
+            selected_frames = [self.current_frame]  # Always include current frame
+            for i in range(frame_list.count()):
+                item = frame_list.item(i)
+                if item.isSelected():
+                    selected_frames.append(item.data(Qt.UserRole))
+                    
+            # Update the original list
+            frame_numbers.clear()
+            frame_numbers.extend(selected_frames)
+            return True
+        else:
+            return False

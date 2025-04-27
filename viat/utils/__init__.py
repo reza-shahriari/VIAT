@@ -9,4 +9,3 @@ from .file_operations import (
     get_config_directory,
     update_recent_projects,
 )
-from .icon_provider import get_icon

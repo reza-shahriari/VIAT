@@ -23,6 +23,9 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
+    QRadioButton,
+    QProgressBar,
+    QApplication
 )
 from PyQt5.QtCore import Qt, QRect
 from PyQt5.QtGui import QColor,QIntValidator,QDoubleValidator
@@ -327,36 +330,77 @@ class AnnotationDock(QDockWidget):
                 self.delete_selected_annotation()
 
     def batch_edit_annotations(self):
-        """Open a dialog to edit all annotation attributes at once"""
-        # Check if there are any annotations in any frame, not just the current frame
-        if (
-            not hasattr(self.main_window, "frame_annotations")
-            or not self.main_window.frame_annotations
-        ):
-            from PyQt5.QtWidgets import QMessageBox
-
-            QMessageBox.information(
-                self, "Batch Edit", "No annotations found in any frame."
-            )
-            return
-
-        # Create and show the batch edit dialog
+        """Show dialog for batch editing annotations across frames."""
+        # Create dialog
         dialog = self.create_batch_edit_dialog()
+        
+        # Add frame range selection
+        range_group = QGroupBox("Frame Range")
+        range_layout = QFormLayout(range_group)
+        
+        start_spin = QSpinBox()
+        start_spin.setRange(0, self.main_window.total_frames - 1)
+        start_spin.setValue(self.main_window.current_frame)
+        
+        end_spin = QSpinBox()
+        end_spin.setRange(0, self.main_window.total_frames - 1)
+        end_spin.setValue(min(self.main_window.current_frame + 10, self.main_window.total_frames - 1))
+        
+        range_layout.addRow("Start Frame:", start_spin)
+        range_layout.addRow("End Frame:", end_spin)
+        
+        # Add to dialog layout
+        dialog.layout().insertWidget(0, range_group)
+        
+        # Add propagation options
+        prop_group = QGroupBox("Propagation Options")
+        prop_layout = QVBoxLayout(prop_group)
+        
+        all_frames_radio = QRadioButton("Apply to all frames in range")
+        all_frames_radio.setChecked(True)
+        
+        duplicate_frames_radio = QRadioButton("Apply only to duplicate frames")
+        duplicate_frames_radio.setEnabled(self.main_window.duplicate_frames_enabled)
+        
+        similar_frames_radio = QRadioButton("Apply to similar frames (experimental)")
+        similar_frames_radio.setEnabled(False)  # Not implemented yet
+        
+        prop_layout.addWidget(all_frames_radio)
+        prop_layout.addWidget(duplicate_frames_radio)
+        prop_layout.addWidget(similar_frames_radio)
+        
+        # Add to dialog layout
+        dialog.layout().insertWidget(1, prop_group)
+        
+        # Show dialog
         if dialog.exec_() == QDialog.Accepted:
-            # Get the values from the dialog
-            size_value = dialog.size_spin.value()
-            quality_value = dialog.quality_spin.value()
-            apply_to_all_frames = dialog.apply_all_frames_checkbox.isChecked()
-
-            # Apply changes based on user selection
-            if apply_to_all_frames:
-                self.apply_attributes_to_all_frames(size_value, quality_value)
+            # Get frame range
+            start_frame = start_spin.value()
+            end_frame = end_spin.value()
+            
+            # Get propagation mode
+            if duplicate_frames_radio.isChecked():
+                prop_mode = "duplicate"
+            elif similar_frames_radio.isChecked():
+                prop_mode = "similar"
             else:
-                self.apply_attributes_to_current_frame(size_value, quality_value)
-
-            # Update the UI
-            self.update_annotation_list()
-            self.main_window.canvas.update()
+                prop_mode = "all"
+            
+            # Get attribute values from dialog
+            attribute_values = {}
+            for attr_name, widget in dialog.attribute_widgets.items():
+                if widget.isEnabled():  # Only get values from enabled widgets
+                    if isinstance(widget, QComboBox):
+                        attribute_values[attr_name] = widget.currentText() == "True"
+                    elif isinstance(widget, QSpinBox):
+                        attribute_values[attr_name] = widget.value()
+                    elif isinstance(widget, QDoubleSpinBox):
+                        attribute_values[attr_name] = widget.value()
+                    else:
+                        attribute_values[attr_name] = widget.text()
+            
+            # Apply batch edit
+            self.apply_batch_edit(start_frame, end_frame, attribute_values, prop_mode)
 
     def create_batch_edit_dialog(self):
         """Create a dialog for batch editing annotation attributes"""
@@ -475,3 +519,89 @@ class AnnotationDock(QDockWidget):
                 current_frame
             ].copy()
 
+    def apply_batch_edit(self, start_frame, end_frame, attribute_values, prop_mode="all"):
+        """
+        Apply batch edit to annotations across frames.
+        
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            attribute_values (dict): Dictionary of attribute name to value
+            prop_mode (str): Propagation mode - "all", "duplicate", or "similar"
+        """
+        if start_frame > end_frame:
+            start_frame, end_frame = end_frame, start_frame
+        
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Applying Batch Edit")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+        
+        label = QLabel(f"Updating annotations in frames {start_frame}-{end_frame}...")
+        progress_layout.addWidget(label)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+        
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Track processed frames for duplicate mode
+        processed_hashes = set()
+        update_count = 0
+        
+        # Apply edits to each frame
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+            
+            # Skip frames without annotations
+            if frame_num not in self.main_window.frame_annotations:
+                continue
+            
+            # For duplicate mode, check if this is a duplicate frame
+            if prop_mode == "duplicate":
+                if frame_num not in self.main_window.frame_hashes:
+                    continue
+                    
+                frame_hash = self.main_window.frame_hashes[frame_num]
+                
+                # Skip if we've already processed a frame with this hash
+                if frame_hash in processed_hashes:
+                    continue
+                    
+                # Skip if this isn't a duplicate frame
+                if frame_hash not in self.main_window.duplicate_frames_cache or \
+                len(self.main_window.duplicate_frames_cache[frame_hash]) <= 1:
+                    continue
+                    
+                processed_hashes.add(frame_hash)
+            
+            # Update annotations in this frame
+            for annotation in self.main_window.frame_annotations[frame_num]:
+                # Update attributes
+                for attr_name, attr_value in attribute_values.items():
+                    annotation.attributes[attr_name] = attr_value
+                
+                update_count += 1
+            
+            # If this is the current frame, update the canvas
+            if frame_num == self.main_window.current_frame:
+                self.main_window.canvas.update()
+                self.update_annotation_list()
+        
+        # Close progress dialog
+        progress.close()
+        
+        self.main_window.statusBar.showMessage(
+            f"Updated {update_count} annotations across {end_frame - start_frame + 1} frames", 5000
+        )
+        
+        # Mark project as modified
+        self.main_window.project_modified = True
