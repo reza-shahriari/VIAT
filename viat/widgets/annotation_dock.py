@@ -158,6 +158,46 @@ class AnnotationItemWidget(QWidget):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
+    def update_numeric_attribute(self, name, text, attr_type):
+        """Update a numeric attribute value"""
+        if not text:
+            # Handle empty text
+            self.annotation.attributes[name] = 0
+            return
+            
+        try:
+            if attr_type == "int":
+                value = int(text)
+            else:  # float
+                value = float(text)
+            
+            self.annotation.attributes[name] = value
+            
+            # Update canvas if needed
+            if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+                self.parent_dock.main_window.canvas.update()
+        except ValueError:
+            # Invalid numeric input, revert to previous value
+            if name in self.attribute_inputs:
+                current_value = self.annotation.attributes.get(name, 0)
+                self.attribute_inputs[name].setText(str(current_value))
+    
+    def update_boolean_attribute(self, name, value):
+        """Update a boolean attribute value"""
+        bool_value = value == "True"
+        self.annotation.attributes[name] = bool_value
+        
+        # Update canvas if needed
+        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+            self.parent_dock.main_window.canvas.update()
+    
+    def update_string_attribute(self, name, text):
+        """Update a string attribute value"""
+        self.annotation.attributes[name] = text
+        
+        # Update canvas if needed
+        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+            self.parent_dock.main_window.canvas.update()
 class AnnotationDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Annotations", parent)
@@ -434,3 +474,4 @@ class AnnotationDock(QDockWidget):
             self.main_window.canvas.annotations = self.main_window.frame_annotations[
                 current_frame
             ].copy()
+
