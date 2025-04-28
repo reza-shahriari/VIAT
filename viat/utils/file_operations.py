@@ -5,10 +5,10 @@ import numpy as np
 from PyQt5.QtCore import QRect
 from PyQt5.QtGui import QColor
 
-
 def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, 
                 frame_annotations=None, class_attributes=None, current_style=None,
-                auto_show_attribute_dialog=True, use_previous_attributes=True):
+                auto_show_attribute_dialog=True, use_previous_attributes=True,
+                duplicate_frames_enabled=False, frame_hashes=None, duplicate_frames_cache=None):
     """Save project to a JSON file."""
     # Convert annotations to dictionaries
     annotations_dict = [ann.to_dict() for ann in annotations]
@@ -29,6 +29,18 @@ def save_project(filename, annotations, class_colors, video_path=None, current_f
         for frame_num, anns in frame_annotations.items():
             frame_annotations_dict[str(frame_num)] = [ann.to_dict() for ann in anns]
     
+    # Convert frame hashes to string keys for JSON serialization
+    frame_hashes_dict = {}
+    if frame_hashes:
+        for frame_num, hash_value in frame_hashes.items():
+            frame_hashes_dict[str(frame_num)] = hash_value
+    
+    # Convert duplicate frames cache to serializable format
+    duplicate_frames_dict = {}
+    if duplicate_frames_cache:
+        for hash_value, frame_list in duplicate_frames_cache.items():
+            duplicate_frames_dict[hash_value] = frame_list
+    
     # Create project data
     project_data = {
         "annotations": annotations_dict,
@@ -39,14 +51,15 @@ def save_project(filename, annotations, class_colors, video_path=None, current_f
         "class_attributes": class_attributes,
         "current_style": current_style,
         "auto_show_attribute_dialog": auto_show_attribute_dialog,
-        "use_previous_attributes": use_previous_attributes
+        "use_previous_attributes": use_previous_attributes,
+        "duplicate_frames_enabled": duplicate_frames_enabled,
+        "frame_hashes": frame_hashes_dict,
+        "duplicate_frames_cache": duplicate_frames_dict
     }
     
     # Save to file
     with open(filename, "w") as f:
         json.dump(project_data, f, indent=2)
-    
-
 
 def load_project(filename, bbox_class):
     """Load project from a JSON file."""
@@ -89,11 +102,21 @@ def load_project(filename, bbox_class):
     auto_show_attribute_dialog = project_data.get("auto_show_attribute_dialog", True)
     use_previous_attributes = project_data.get("use_previous_attributes", True)
     
-
+    # Load duplicate frame detection settings
+    duplicate_frames_enabled = project_data.get("duplicate_frames_enabled", False)
+    
+    # Load frame hashes
+    frame_hashes = {}
+    for frame_num, hash_value in project_data.get("frame_hashes", {}).items():
+        frame_hashes[int(frame_num)] = hash_value
+    
+    # Load duplicate frames cache
+    duplicate_frames_cache = project_data.get("duplicate_frames_cache", {})
     
     return (annotations, class_colors, video_path, current_frame, 
             frame_annotations, class_attributes, current_style,
-            auto_show_attribute_dialog, use_previous_attributes)
+            auto_show_attribute_dialog, use_previous_attributes,
+            duplicate_frames_enabled, frame_hashes, duplicate_frames_cache)
 
 def get_recent_projects():
     """

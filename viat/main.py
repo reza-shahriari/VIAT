@@ -120,8 +120,8 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(StyleManager, method_name):
                 self.styles[style_name] = getattr(StyleManager, method_name)
             elif style_name.lower() == "default":
-                self.styles[style_name] = StyleManager.set_default_style
-        
+                self.styles[style_name] = StyleManager.set_darkmodern_style
+            
         # Annotation methods
         self.annotation_methods = {
             "Rectangle": "Draw rectangular bounding boxes",
@@ -131,7 +131,7 @@ class VideoAnnotationTool(QMainWindow):
         self.current_annotation_method = "Rectangle"
 
         # Application state
-        self.current_style = "Default"
+        self.current_style = "DarkModern"
         self.playback_speed = 1.0
         self.cap = None  # Video capture object
         self.is_playing = False
@@ -195,7 +195,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Initialize annotation list
         self.update_annotation_list()
-
+        self.styles[self.current_style]()
     def create_menu_bar(self):
         """Create the application menu bar and its actions."""
         menubar = self.menuBar()
@@ -270,12 +270,18 @@ class VideoAnnotationTool(QMainWindow):
         file_menu.addAction(export_action)
 
         file_menu.addSeparator()
+        
+        # Delete History action
+        delete_history_action = QAction("Delete History", self)
+        delete_history_action.triggered.connect(self.delete_history)
+        file_menu.addAction(delete_history_action)
 
         # Exit action
         exit_action = QAction("Exit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
 
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
@@ -367,8 +373,15 @@ class VideoAnnotationTool(QMainWindow):
         duplicate_frames_action = QAction("Detect Duplicate Frames", self, checkable=True)
         duplicate_frames_action.setToolTip("Automatically detect and propagate annotations to duplicate frames")
         duplicate_frames_action.triggered.connect(self.toggle_duplicate_frames_detection)
+        duplicate_frames_action.setChecked(self.duplicate_frames_enabled)  # Set initial state
         tools_menu.addAction(duplicate_frames_action)
         self.duplicate_frames_action = duplicate_frames_action
+        
+        # Scan for Duplicates action
+        scan_action = QAction("Scan Video for Duplicates", self)
+        scan_action.setToolTip("Scan the entire video to identify duplicate frames")
+        scan_action.triggered.connect(self.scan_video_for_duplicates)
+        tools_menu.addAction(scan_action)
         
         # Propagate Annotations action
         propagate_action = QAction("Propagate Annotations...", self)
@@ -376,9 +389,16 @@ class VideoAnnotationTool(QMainWindow):
         propagate_action.setShortcut("Ctrl+P")
         propagate_action.triggered.connect(self.propagate_annotations)
         tools_menu.addAction(propagate_action)
+        
+        # Propagate to Similar Frames action
+        similar_action = QAction("Propagate to Similar Frames...", self)
+        similar_action.setToolTip("Copy annotations to frames that look similar")
+        similar_action.triggered.connect(self.propagate_to_similar_frames)
+        tools_menu.addAction(similar_action)
 
         # Store reference to keep menu and toolbar in sync
         self.smart_edge_action = smart_edge_action
+
 
     def create_style_menu(self, menubar):
         """Create the Style menu and its actions."""
@@ -691,7 +711,7 @@ class VideoAnnotationTool(QMainWindow):
             if self.autosave_enabled and not self.autosave_timer.isActive():
                 self.autosave_timer.start(self.autosave_interval)
 
-            # Reset duplicate frame detection if this is a new video
+            # Check if we need to scan for duplicate frames
             if self.duplicate_frames_enabled and not self.frame_hashes:
                 # Ask if user wants to scan for duplicates
                 reply = QMessageBox.question(
@@ -705,6 +725,12 @@ class VideoAnnotationTool(QMainWindow):
                 
                 if reply == QMessageBox.Yes:
                     QTimer.singleShot(500, self.scan_video_for_duplicates)
+            elif self.duplicate_frames_enabled and self.frame_hashes:
+                # We already have frame hashes for this video
+                duplicate_count = sum(len(frames) - 1 for frames in self.duplicate_frames_cache.values() if len(frames) > 1)
+                self.statusBar.showMessage(
+                    f"Loaded {duplicate_count} duplicate frames from project file", 5000
+                )
 
             # Only check for annotation files if this is a direct video open, not from a project load
             if (
@@ -1050,6 +1076,9 @@ class VideoAnnotationTool(QMainWindow):
                 current_style=self.current_style,
                 auto_show_attribute_dialog=self.auto_show_attribute_dialog,
                 use_previous_attributes=self.use_previous_attributes,
+                duplicate_frames_enabled=self.duplicate_frames_enabled,
+                frame_hashes=self.frame_hashes,
+                duplicate_frames_cache=self.duplicate_frames_cache
             )
 
             self.project_file = filename
@@ -1083,6 +1112,9 @@ class VideoAnnotationTool(QMainWindow):
                     current_style,
                     auto_show_attribute_dialog,
                     use_previous_attributes,
+                    duplicate_frames_enabled,
+                    frame_hashes,
+                    duplicate_frames_cache,
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
@@ -1111,16 +1143,17 @@ class VideoAnnotationTool(QMainWindow):
                 # Update annotation settings
                 self.auto_show_attribute_dialog = auto_show_attribute_dialog
                 self.use_previous_attributes = use_previous_attributes
-
-                # Update settings menu to reflect loaded settings
-                for action in self.settings_menu.actions():
-                    if action.text() == "Show Attribute Dialog for New Annotations":
-                        action.setChecked(self.auto_show_attribute_dialog)
-                    elif (
-                        action.text() == "Use Previous Annotation Attributes as Default"
-                    ):
-                        action.setChecked(self.use_previous_attributes)
-
+                
+                # Update duplicate frame detection settings
+                self.duplicate_frames_enabled = duplicate_frames_enabled
+                if hasattr(self, "duplicate_frames_action"):
+                    self.duplicate_frames_action.setChecked(duplicate_frames_enabled)
+                
+                # Load frame hashes and duplicate frames cache
+                self.frame_hashes = frame_hashes if frame_hashes else {}
+                self.duplicate_frames_cache = duplicate_frames_cache if duplicate_frames_cache else {}
+                if hasattr(self, "duplicate_frames_action"):
+                    self.duplicate_frames_action.setChecked(duplicate_frames_enabled)
                 # Update UI
                 self.update_settings_menu_actions()
                 self.update_annotation_list()
@@ -3232,11 +3265,14 @@ class VideoAnnotationTool(QMainWindow):
                 
                 # Load annotations for this frame if they exist
                 self.load_current_frame_annotations()
+  
     def toggle_duplicate_frames_detection(self):
-            """Toggle automatic duplicate frame detection and annotation propagation."""
-            self.duplicate_frames_enabled = self.duplicate_frames_action.isChecked()
-            
-            if self.duplicate_frames_enabled:
+        """Toggle automatic duplicate frame detection and annotation propagation."""
+        self.duplicate_frames_enabled = self.duplicate_frames_action.isChecked()
+        
+        if self.duplicate_frames_enabled:
+            # Only prompt to scan if we don't already have frame hashes
+            if not self.frame_hashes:
                 reply = QMessageBox.question(
                     self,
                     "Duplicate Frame Detection",
@@ -3249,10 +3285,14 @@ class VideoAnnotationTool(QMainWindow):
                 
                 if reply == QMessageBox.Yes:
                     self.scan_video_for_duplicates()
-                
-                self.statusBar.showMessage("Duplicate frame detection enabled - annotations will be propagated automatically")
-            else:
-                self.statusBar.showMessage("Duplicate frame detection disabled")
+            
+            self.statusBar.showMessage("Duplicate frame detection enabled - annotations will be propagated automatically")
+        else:
+            self.statusBar.showMessage("Duplicate frame detection disabled")
+        
+        # Mark project as modified
+        self.project_modified = True
+
     def scan_video_for_duplicates(self):
         """Scan the entire video to identify duplicate frames."""
         if not self.cap or not self.cap.isOpened():
@@ -3821,3 +3861,132 @@ class VideoAnnotationTool(QMainWindow):
             return True
         else:
             return False
+
+    def clear_application_history():
+        """Clear all application history files."""
+        config_dir = get_config_directory()
+        
+        # List of files to delete
+        files_to_delete = [
+            "recent_projects.json",
+            "last_state.json",
+            "settings.json"
+        ]
+        
+        # Delete each file
+        deleted_files = []
+        for filename in files_to_delete:
+            file_path = os.path.join(config_dir, filename)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                deleted_files.append(filename)
+        
+        return deleted_files
+
+    def reset_application_state(self):
+        """Reset the application to its initial state."""
+        # Reset project-related variables
+        self.project_file = None
+        self.project_modified = False
+        
+        # Reset video-related variables
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        
+        self.video_filename = ""
+        self.current_frame = 0
+        self.total_frames = 0
+        self.is_playing = False
+        
+        # Reset frame slider
+        self.frame_slider.setValue(0)
+        self.frame_slider.setMaximum(100)
+        self.frame_label.setText("0/0")
+        
+        # Reset annotations
+        self.canvas.annotations = []
+        self.frame_annotations = {}
+        
+        # Reset duplicate frame detection
+        self.duplicate_frames_enabled = False
+        self.frame_hashes = {}
+        self.duplicate_frames_cache = {}
+        
+        if hasattr(self, "duplicate_frames_action"):
+            self.duplicate_frames_action.setChecked(False)
+        
+        # Reset canvas
+        self.canvas.pixmap = None
+        self.canvas.update()
+        
+        # Reset UI
+        self.update_annotation_list()
+        
+        # Reset to default style
+        self.change_style("DarkModern")
+        
+        # Reset settings to defaults
+        self.auto_show_attribute_dialog = True
+        self.use_previous_attributes = True
+        self.autosave_enabled = True
+        self.autosave_interval = 5000  # 5 seconds
+        
+        # Update settings menu
+        self.update_settings_menu_actions()
+        
+        # Update status bar
+        self.statusBar.showMessage("Application reset to initial state")
+
+    def delete_history(self):
+        """Delete all application history and reset to initial state."""
+        reply = QMessageBox.question(
+            self,
+            "Delete History",
+            "This will delete all recent projects, saved settings, and application history.\n\n"
+            "The application will return to its initial state after installation.\n\n"
+            "Are you sure you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # Get config directory
+            config_dir = get_config_directory()
+            
+            # List of files to delete
+            files_to_delete = [
+                "recent_projects.json",
+                "last_state.json",
+                "settings.json"
+            ]
+            
+            # Delete each file
+            for filename in files_to_delete:
+                file_path = os.path.join(config_dir, filename)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            
+            # Clear recent projects menu
+            self.update_recent_projects_menu()
+            
+            # Reset application state
+            self.reset_application_state()
+            
+            # Show success message
+            QMessageBox.information(
+                self,
+                "History Deleted",
+                "Application history has been deleted successfully.\n\n"
+                "The application has been reset to its initial state."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"An error occurred while deleting history: {str(e)}"
+            )
