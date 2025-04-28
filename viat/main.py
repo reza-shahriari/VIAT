@@ -57,6 +57,14 @@ from utils import (
     get_last_project,
     save_last_state,
     load_last_state,
+    export_image_dataset_pascal_voc,
+    export_image_dataset_yolo,
+    export_image_dataset_coco,
+    export_standard_annotations,
+    mse_similarity,
+    calculate_frame_hash,
+    create_thumbnail,
+    import_annotations
 )
 from utils.icon_provider import IconProvider
 from natsort import natsorted
@@ -709,6 +717,18 @@ class VideoAnnotationTool(QMainWindow):
         )
 
         if filename:
+            # Reset image dataset related state
+            self.image_dataset_info = None
+            self.is_image_dataset = False
+            
+            # Clear existing annotations
+            self.canvas.annotations = []
+            self.frame_annotations = {}
+            
+            # Reset frame-related variables
+            self.current_frame = 0
+            self.frame_hashes = {}
+            self.duplicate_frames_cache = {}
             self.load_video_file(filename)
 
     def load_video_file(self, filename):
@@ -1272,6 +1292,7 @@ class VideoAnnotationTool(QMainWindow):
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
+                self.reset_media_state()
                 self.canvas.annotations = annotations
                 self.canvas.class_colors = class_colors
 
@@ -1509,7 +1530,7 @@ class VideoAnnotationTool(QMainWindow):
                     QFileDialog.ShowDirsOnly
                 )
                 if export_dir:
-                    self.export_image_dataset_yolo(export_dir)
+                    export_image_dataset_yolo(export_dir, self.image_files, self.frame_annotations, self.canvas.class_colors)
                     self.statusBar.showMessage(
                         f"Annotations exported to YOLO format in {os.path.basename(export_dir)}"
                     )
@@ -1537,7 +1558,12 @@ class VideoAnnotationTool(QMainWindow):
                     QFileDialog.ShowDirsOnly
                 )
                 if export_dir:
-                    self.export_image_dataset_pascal_voc(export_dir)
+                    export_image_dataset_pascal_voc(
+                        export_dir,
+                        self.image_files,
+                        self.frame_annotations,
+                        self.canvas.pixmap
+                    )
                     self.statusBar.showMessage(
                         f"Annotations exported to Pascal VOC format in {os.path.basename(export_dir)}"
                     )
@@ -1581,10 +1607,22 @@ class VideoAnnotationTool(QMainWindow):
 
                 # For image datasets, we need to handle the export differently for some formats
                 if hasattr(self, "is_image_dataset") and self.is_image_dataset and export_format == "coco":
-                    self.export_image_dataset_coco(filename, image_width, image_height)
+                        export_image_dataset_coco(
+                        filename,
+                        self.image_files,
+                        self.frame_annotations,
+                        self.canvas.class_colors,
+                        image_width,
+                        image_height
+                    )
                 else:
-                    # For other formats or video, use the standard export
-                    self.export_standard_annotations(filename, export_format, image_width, image_height)
+                    
+                    export_standard_annotations(filename,
+                    self.frame_annotations,
+                    self.canvas.annotations,
+                    export_format,
+                    image_width,
+                    image_height)
                     
                 self.statusBar.showMessage(
                     f"Annotations exported to {os.path.basename(filename)}"
@@ -2144,36 +2182,31 @@ class VideoAnnotationTool(QMainWindow):
                 return
 
         try:
-            # Detect format based on file extension and content
-            format_type = self.detect_annotation_format(filename)
-
-            if not format_type:
-                QMessageBox.warning(
-                    self,
-                    "Import Annotations",
-                    "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, Raya, or Raya YOLO format.",
-                )
-                return
-
-            # Import annotations based on detected format
-            self.statusBar.showMessage(f"Importing {format_type} annotations...")
-
             # Get image dimensions from canvas
             image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
             image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
 
-            # Import annotations based on format
-            if format_type == "COCO":
-                self.import_coco_annotations(filename, image_width, image_height)
-            elif format_type == "YOLO":
-                self.import_yolo_annotations(filename, image_width, image_height)
-            elif format_type == "Pascal VOC":
-                self.import_pascal_voc_annotations(filename, image_width, image_height)
-            elif format_type == "Raya":
-                self.import_raya_annotations(filename, image_width, image_height)
-            elif format_type == "RayaYOLO":
-                self.import_raya_yolo_annotations(filename, image_width, image_height)
-
+            # Import annotations using the function from file_operations.py
+            self.statusBar.showMessage(f"Importing annotations...")
+            
+            format_type, annotations, imported_frame_annotations = import_annotations(
+                filename, 
+                BoundingBox, 
+                image_width, 
+                image_height, 
+                self.canvas.class_colors
+            )
+            
+            # Update frame annotations with imported annotations
+            for frame_num, frame_anns in imported_frame_annotations.items():
+                if frame_num not in self.frame_annotations:
+                    self.frame_annotations[frame_num] = []
+                self.frame_annotations[frame_num].extend(frame_anns)
+            
+            # Update canvas annotations if we have annotations for the current frame
+            if self.current_frame in imported_frame_annotations:
+                self.canvas.annotations.extend(imported_frame_annotations[self.current_frame])
+            
             # Update UI
             self.update_annotation_list()
             self.update_class_ui_after_import()
@@ -2186,501 +2219,6 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(
                 self, "Error", f"Failed to import annotations: {str(e)}"
             )
-
-    def detect_annotation_format(self, filename):
-        """
-        Detect the annotation format based on file extension and content.
-
-        Args:
-            filename (str): Path to the annotation file
-
-        Returns:
-            str: Detected format ("COCO", "YOLO", "Pascal VOC", "Raya", "RayaYOLO") or None if not detected
-        """
-        # Check file extension
-        ext = os.path.splitext(filename)[1].lower()
-
-        # Read file content
-        try:
-            with open(filename, "r") as f:
-                content = f.read()
-        except (IOError, OSError):
-            return None
-
-        # Detect format based on extension and content
-        if ext == ".json":
-            if (
-                '"images"' in content
-                and '"annotations"' in content
-                and '"categories"' in content
-            ):
-                return "COCO"
-        elif ext == ".xml":
-            if "<annotation>" in content and "<object>" in content:
-                return "Pascal VOC"
-        elif ext == ".txt":
-            lines = content.strip().split("\n")
-
-            # Check for RayaYOLO format
-            if lines and all(
-                line.strip() == "[]"
-                or (
-                    line.strip().startswith("[[")
-                    and line.strip().endswith("]]")
-                    and "], [" in line
-                    or not "], [" in line  # Handle single prediction case
-                )
-                for line in lines
-                if line.strip()
-            ):
-                return "RayaYOLO"
-
-            # Check for Raya format
-            if lines and all(
-                line.strip() == "[]"
-                or (
-                    line.strip().startswith("[")
-                    and (";" in line)
-                    and all(
-                        part.count("[") == 1
-                        and (part.endswith("];") or part.endswith("]"))
-                        for part in line.split(";")
-                        if part.strip()
-                    )
-                )
-                for line in lines
-                if line.strip()
-            ):
-                return "Raya"
-            # YOLO format typically has space-separated numbers (class x y w h)
-            if lines and all(
-                len(line.split()) == 5 and line.split()[0].isdigit()
-                for line in lines
-                if line.strip()
-            ):
-                return "YOLO"
-
-        # If no format detected, try more detailed analysis
-        if ext == ".json":
-            try:
-                import json
-
-                data = json.loads(content)
-                if isinstance(data, dict):
-                    if "annotations" in data and "images" in data:
-                        return "COCO"
-            except json.JSONDecodeError:
-                pass
-
-        return None
-
-    def import_coco_annotations(self, filename, image_width, image_height):
-        """
-        Import annotations from COCO JSON format.
-
-        Args:
-            filename (str): Path to the COCO JSON file
-            image_width (int): Width of the image/video frame
-            image_height (int): Height of the image/video frame
-        """
-        import json
-
-        with open(filename, "r") as f:
-            data = json.load(f)
-
-        # Create a mapping from category ID to category name
-        categories = {cat["id"]: cat["name"] for cat in data.get("categories", [])}
-
-        # Create a mapping from image ID to frame number
-        images = {img["id"]: img.get("frame_id", 0) for img in data.get("images", [])}
-
-        # Process annotations
-        for ann in data.get("annotations", []):
-            image_id = ann.get("image_id")
-            category_id = ann.get("category_id")
-            bbox = ann.get("bbox", [0, 0, 0, 0])  # [x, y, width, height]
-
-            # Skip if missing essential data
-            if not all([image_id is not None, category_id is not None, bbox]):
-                continue
-
-            # Get frame number and category name
-            frame_num = images.get(image_id, 0)
-            class_name = categories.get(category_id, f"class_{category_id}")
-
-            # Create QRect from COCO bbox [x, y, width, height]
-            rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-
-            # Get or create color for this class
-            if class_name not in self.canvas.class_colors:
-                self.canvas.class_colors[class_name] = QColor(
-                    random.randint(0, 255),
-                    random.randint(0, 255),
-                    random.randint(0, 255),
-                )
-            color = self.canvas.class_colors[class_name]
-
-            # Create attributes dictionary
-            attributes = {
-                "Size": ann.get("size", -1),
-                "Quality": ann.get("quality", -1),
-                "id": str(ann.get("id", "")),
-            }
-
-            # Create bounding box
-            bbox_obj = BoundingBox(rect, class_name, attributes, color)
-
-            # Add to frame annotations
-            if frame_num not in self.frame_annotations:
-                self.frame_annotations[frame_num] = []
-            self.frame_annotations[frame_num].append(bbox_obj)
-
-            # If this is the current frame, add to canvas annotations
-            if frame_num == self.current_frame:
-                self.canvas.annotations.append(bbox_obj)
-
-    def import_yolo_annotations(self, filename, image_width, image_height):
-        """
-        Import annotations from YOLO format.
-
-        Args:
-            filename (str): Path to the YOLO txt file
-            image_width (int): Width of the image/video frame
-            image_height (int): Height of the image/video frame
-        """
-        # YOLO format: class_id x_center y_center width height
-        # All values are normalized [0-1]
-
-        # First, try to find a classes.txt file in the same directory
-        classes_file = os.path.join(os.path.dirname(filename), "classes.txt")
-        class_names = []
-
-        if os.path.exists(classes_file):
-            with open(classes_file, "r") as f:
-                class_names = [line.strip() for line in f.readlines()]
-
-        # Read annotations
-        with open(filename, "r") as f:
-            lines = f.readlines()
-
-        # Process each line
-        for line in lines:
-            parts = line.strip().split()
-            if len(parts) != 5:
-                continue
-
-            try:
-                class_id = int(parts[0])
-                x_center = float(parts[1]) * image_width
-                y_center = float(parts[2]) * image_height
-                width = float(parts[3]) * image_width
-                height = float(parts[4]) * image_height
-
-                # Calculate top-left corner from center
-                x = x_center - (width / 2)
-                y = y_center - (height / 2)
-
-                # Create QRect
-                rect = QRect(int(x), int(y), int(width), int(height))
-
-                # Get class name
-                if class_id < len(class_names):
-                    class_name = class_names[class_id]
-                else:
-                    class_name = f"class_{class_id}"
-
-                # Get or create color for this class
-                if class_name not in self.canvas.class_colors:
-                    self.canvas.class_colors[class_name] = QColor(
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                    )
-                color = self.canvas.class_colors[class_name]
-
-                # Create attributes dictionary
-                attributes = {"Size": -1, "Quality": -1}
-
-                # Create bounding box
-                bbox_obj = BoundingBox(rect, class_name, attributes, color)
-
-                # Add to current frame annotations
-                self.canvas.annotations.append(bbox_obj)
-                self.frame_annotations[self.current_frame] = self.canvas.annotations
-
-            except (ValueError, IndexError) as e:
-                print(f"Error parsing YOLO line: {line}. Error: {e}")
-
-    def import_pascal_voc_annotations(self, filename, image_width, image_height):
-        """
-        Import annotations from Pascal VOC XML format.
-
-        Args:
-            filename (str): Path to the Pascal VOC XML file
-            image_width (int): Width of the image/video frame
-            image_height (int): Height of the image/video frame
-        """
-        import xml.etree.ElementTree as ET
-
-        try:
-            tree = ET.parse(filename)
-            root = tree.getroot()
-
-            # Process each object
-            for obj in root.findall("./object"):
-                class_name = obj.find("name").text
-
-                # Get bounding box
-                bndbox = obj.find("bndbox")
-                xmin = int(float(bndbox.find("xmin").text))
-                ymin = int(float(bndbox.find("ymin").text))
-                xmax = int(float(bndbox.find("xmax").text))
-                ymax = int(float(bndbox.find("ymax").text))
-
-                # Create QRect
-                rect = QRect(xmin, ymin, xmax - xmin, ymax - ymin)
-
-                # Get or create color for this class
-                if class_name not in self.canvas.class_colors:
-                    self.canvas.class_colors[class_name] = QColor(
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                    )
-                color = self.canvas.class_colors[class_name]
-
-                # Create attributes dictionary
-                attributes = {"Size": -1, "Quality": -1}
-
-                # Check for additional attributes
-                for attr in obj.findall("./attribute"):
-                    name = attr.find("name")
-                    value = attr.find("value")
-                    if name is not None and value is not None:
-                        attributes[name.text] = value.text
-
-                # Create bounding box
-                bbox_obj = BoundingBox(rect, class_name, attributes, color)
-
-                # Add to current frame annotations
-                self.canvas.annotations.append(bbox_obj)
-                self.frame_annotations[self.current_frame] = self.canvas.annotations
-
-        except Exception as e:
-            raise Exception(f"Error parsing Pascal VOC XML: {str(e)}")
-
-    def import_raya_annotations(self, filename, image_width, image_height):
-        """
-        Import annotations from Raya text format.
-
-        Format: [class,x,y,width,height,size,quality,Difficult(optional)];
-        If no detection: []
-
-        Args:
-            filename (str): Path to the Raya text file
-            image_width (int): Width of the image/video frame
-            image_height (int): Height of the image/video frame
-        """
-        try:
-            with open(filename, "r") as f:
-                lines = f.readlines()
-
-            # Process each line (each line represents a frame)
-            for frame_num, line in enumerate(lines):
-                line = line.strip()
-
-                # Skip empty frames or frames with no detections
-                if not line or line == "[]":
-                    continue
-
-                # Check if the line contains annotations
-                if not ("[" in line and "]" in line):
-                    continue
-
-                # Extract content between the outermost brackets
-                start_idx = line.find("[")
-                end_idx = line.rfind("]")
-                if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
-                    continue
-
-                content = line[start_idx + 1 : end_idx]
-
-                # Split by semicolon for multiple annotations
-                annotations = content.split(";")
-                frame_annotations = []
-
-                for annotation in annotations:
-                    if not annotation.strip():
-                        continue
-
-                    # Parse the annotation values
-                    parts = annotation.split(",")
-
-                    # Ensure we have at least the minimum required fields
-                    if len(parts) < 6:
-                        continue
-
-                    try:
-                        # Remove any remaining brackets
-                        parts = [p.strip("[]") for p in parts]
-
-                        x = float(parts[1])
-                        y = float(parts[2])
-                        width = float(parts[3])
-                        height = float(parts[4])
-                        size = float(parts[5])
-                        quality = float(parts[6]) if len(parts) > 6 else 100.0
-                        Difficult = float(parts[7]) if len(parts) > 7 else 0.0
-
-                        # Create class name based on class ID
-                        class_name = "Quad"
-
-                        # Create QRect
-                        rect = QRect(int(x), int(y), int(width), int(height))
-
-                        # Get or create color for this class
-                        if class_name not in self.canvas.class_colors:
-                            self.canvas.class_colors[class_name] = QColor(
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                            )
-                        color = self.canvas.class_colors[class_name]
-
-                        # Create attributes dictionary
-                        attributes = {
-                            "Size": int(size),
-                            "Quality": int(quality),
-                        }
-                        if Difficult != 0.0:
-                            attributes["Difficult"] = int(Difficult)
-                        # Create bounding box
-                        bbox_obj = BoundingBox(rect, class_name, attributes, color)
-                        frame_annotations.append(bbox_obj)
-
-                    except (ValueError, IndexError) as e:
-                        print(
-                            f"Error parsing Raya annotation: {annotation}. Error: {e}"
-                        )
-
-                # Add to frame annotations
-                if frame_annotations:
-                    self.frame_annotations[frame_num] = frame_annotations
-
-                    # If this is the current frame, update canvas annotations
-                    if frame_num == self.current_frame:
-                        self.canvas.annotations = frame_annotations.copy()
-
-        except Exception as e:
-            raise Exception(f"Error parsing Raya text file: {str(e)}")
-
-    def import_raya_yolo_annotations(self, filename, image_width, image_height):
-        """
-        Import annotations from Raya YOLO format.
-
-        Format:
-        - Empty frames: []
-        - Frames with predictions: [[cls,x1,y1,x2,y2,s], [cls,x1,y1,x2,y2,s], ...]
-
-        Where:
-        - cls: class ID
-        - x1, y1: top-left corner coordinates
-        - x2, y2: bottom-right corner coordinates
-        - s: prediction score (ignored for annotation purposes)
-
-        Args:
-            filename (str): Path to the Raya YOLO text file
-            image_width (int): Width of the image/video frame
-            image_height (int): Height of the image/video frame
-        """
-        try:
-            with open(filename, "r") as f:
-                lines = f.readlines()
-
-            # Process each line (each line represents a frame)
-            for frame_num, line in enumerate(lines):
-                line = line.strip()
-
-                # Skip empty frames or frames with no detections
-                if not line or line == "[]":
-                    continue
-
-                # Extract content between the outermost brackets
-                if not (line.startswith("[[") and line.endswith("]]")):
-                    continue
-
-                content = line[2:-2]  # Remove outer [[ and ]]
-
-                # Split by "], [" for multiple annotations
-                if "], [" in content:
-                    annotations = content.split("], [")
-                else:
-                    # Single annotation case
-                    annotations = [content]
-
-                frame_annotations = []
-
-                for annotation in annotations:
-                    # Clean up any remaining brackets
-                    annotation = annotation.strip("[]")
-
-                    # Parse the annotation values
-                    parts = annotation.split(",")
-
-                    # Ensure we have at least the minimum required fields (cls, x1, y1, x2, y2)
-                    if len(parts) < 5:
-                        continue
-
-                    try:
-                        # Parse values
-                        class_id = int(float(parts[0]))
-                        x1 = float(parts[1])
-                        y1 = float(parts[2])
-                        x2 = float(parts[3])
-                        y2 = float(parts[4])
-
-                        # Calculate width and height
-                        width = x2 - x1
-                        height = y2 - y1
-
-                        # Create class name based on class ID
-                        class_name = f"class_{class_id}"
-
-                        # Create QRect (ensure coordinates are valid)
-                        rect = QRect(int(x1), int(y1), int(width), int(height))
-
-                        # Get or create color for this class
-                        if class_name not in self.canvas.class_colors:
-                            self.canvas.class_colors[class_name] = QColor(
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                            )
-                        color = self.canvas.class_colors[class_name]
-
-                        # Create attributes dictionary
-                        attributes = {"Size": -1, "Quality": -1}
-
-                        # Create bounding box
-                        bbox_obj = BoundingBox(rect, class_name, attributes, color)
-                        frame_annotations.append(bbox_obj)
-
-                    except (ValueError, IndexError) as e:
-                        print(
-                            f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}"
-                        )
-
-                # Add to frame annotations
-                if frame_annotations:
-                    self.frame_annotations[frame_num] = frame_annotations
-
-                    # If this is the current frame, update canvas annotations
-                    if frame_num == self.current_frame:
-                        self.canvas.annotations = frame_annotations.copy()
-
-        except Exception as e:
-            raise Exception(f"Error parsing Raya YOLO text file: {str(e)}")
-
     #
     # Class handling methods
     #
@@ -3748,7 +3286,7 @@ class VideoAnnotationTool(QMainWindow):
                 QApplication.processEvents()
 
             # Calculate frame hash
-            frame_hash = self.calculate_frame_hash(frame)
+            frame_hash = calculate_frame_hash(frame)
             self.frame_hashes[frame_num] = frame_hash
 
             # Add to duplicate cache
@@ -3778,31 +3316,7 @@ class VideoAnnotationTool(QMainWindow):
             f"Found {duplicate_count} duplicate frames in {self.total_frames} total frames.",
         )
 
-    def calculate_frame_hash(self, frame):
-        """
-        Calculate a perceptual hash of a frame for duplicate detection.
 
-        Args:
-            frame (numpy.ndarray): The frame to hash
-
-        Returns:
-            str: A hash string representing the frame content
-        """
-        # Resize to a small size to focus on overall structure and ignore minor differences
-        small_frame = cv2.resize(frame, (32, 32))
-
-        # Convert to grayscale
-        gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-
-        # Calculate mean value
-        mean_val = gray.mean()
-
-        # Create binary hash (1 if pixel value is greater than mean, 0 otherwise)
-        binary_hash = (gray > mean_val).flatten()
-
-        # Convert binary array to hexadecimal string
-        hex_hash = "".join("1" if b else "0" for b in binary_hash)
-        return hex_hash
 
     def propagate_annotations_to_duplicate(self, frame_hash):
         """
@@ -4021,87 +3535,79 @@ class VideoAnnotationTool(QMainWindow):
             )
 
     def detect_similar_frames(self, reference_frame, similarity_threshold=0.9):
-        """
-        Detect frames that are similar to the reference frame.
+            """
+            Detect frames that are similar to the reference frame.
 
-        Args:
-            reference_frame (int): The reference frame number
-            similarity_threshold (float): Threshold for considering frames similar (0-1)
+            Args:
+                reference_frame (int): The reference frame number
+                similarity_threshold (float): Threshold for considering frames similar (0-1)
 
-        Returns:
-            list: List of frame numbers that are similar to the reference frame
-        """
-        if not self.cap or not self.cap.isOpened():
-            return []
+            Returns:
+                list: List of frame numbers that are similar to the reference frame
+            """
+            if not self.cap or not self.cap.isOpened():
+                return []
 
-        # Get reference frame image
-        current_pos = self.current_frame
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
-        ret, ref_frame = self.cap.read()
-        if not ret:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-            return []
-
-        # Convert to grayscale and resize for faster comparison
-        ref_gray = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
-        ref_small = cv2.resize(ref_gray, (64, 64))
-
-        # Create progress dialog
-        progress = QDialog(self)
-        progress.setWindowTitle("Finding Similar Frames")
-        progress.setFixedSize(300, 100)
-        layout = QVBoxLayout(progress)
-
-        label = QLabel("Scanning for similar frames...")
-        layout.addWidget(label)
-
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, self.total_frames)
-        layout.addWidget(progress_bar)
-
-        # Non-blocking progress dialog
-        progress.setModal(False)
-        progress.show()
-        QApplication.processEvents()
-
-        # Scan video
-        similar_frames = [reference_frame]  # Include reference frame in results
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-        for frame_num in range(self.total_frames):
-            # Skip reference frame
-            if frame_num == reference_frame:
-                continue
-
-            # Update progress
-            progress_bar.setValue(frame_num)
-            if frame_num % 10 == 0:  # Update UI every 10 frames
-                QApplication.processEvents()
-
-            # Read frame
-            ret, frame = self.cap.read()
+            # Get reference frame image
+            current_pos = self.current_frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
+            ret, ref_frame = self.cap.read()
             if not ret:
-                break
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                return []
 
-            # Convert to grayscale and resize
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            small = cv2.resize(gray, (64, 64))
+            # Create progress dialog
+            progress = QDialog(self)
+            progress.setWindowTitle("Finding Similar Frames")
+            progress.setFixedSize(300, 100)
+            layout = QVBoxLayout(progress)
 
-            mse = np.mean((ref_small.astype("float") - small.astype("float")) ** 2)
-            similarity = 1 - (mse / 255**2)  # Convert MSE to similarity score
+            label = QLabel("Scanning for similar frames...")
+            layout.addWidget(label)
 
-            # Add to similar frames if above threshold
-            if similarity >= similarity_threshold:
-                similar_frames.append(frame_num)
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, self.total_frames)
+            layout.addWidget(progress_bar)
 
-        # Restore position
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+            # Non-blocking progress dialog
+            progress.setModal(False)
+            progress.show()
+            QApplication.processEvents()
 
-        # Close progress dialog
-        progress.close()
+            # Scan video
+            similar_frames = [reference_frame]  # Include reference frame in results
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-        return similar_frames
+            for frame_num in range(self.total_frames):
+                # Skip reference frame
+                if frame_num == reference_frame:
+                    continue
 
+                # Update progress
+                progress_bar.setValue(frame_num)
+                if frame_num % 10 == 0:  # Update UI every 10 frames
+                    QApplication.processEvents()
+
+                # Read frame
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+
+                # Use mse_similarity from utils.im_tools
+                similarity = mse_similarity(ref_frame, frame)
+
+                # Add to similar frames if above threshold
+                if similarity >= similarity_threshold:
+                    similar_frames.append(frame_num)
+
+            # Restore position
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+
+            # Close progress dialog
+            progress.close()
+
+            return similar_frames
+    
     def propagate_to_similar_frames(self):
         """Propagate current frame annotations to similar frames."""
         if not self.canvas.annotations:
@@ -4267,8 +3773,7 @@ class VideoAnnotationTool(QMainWindow):
             ret, frame = self.cap.read()
             if ret:
                 # Create thumbnail
-                thumbnail = cv2.resize(frame, (160, 90))
-                thumbnail = cv2.cvtColor(thumbnail, cv2.COLOR_BGR2RGB)
+                thumbnail = create_thumbnail(frame, (160, 90))
 
                 # Convert to QImage and QPixmap
                 h, w, c = thumbnail.shape
@@ -4557,292 +4062,6 @@ class VideoAnnotationTool(QMainWindow):
         
         return success
 
-    def export_standard_annotations(self, filename, export_format, image_width, image_height):
-        """Export annotations using the standard export function."""
-        # Collect all annotations from all frames
-        all_annotations = []
-        for frame_num, annotations in self.frame_annotations.items():
-            for annotation in annotations:
-                # Create a copy of the annotation with frame information
-                annotation_copy = annotation
-                annotation_copy.frame = frame_num
-                all_annotations.append(annotation_copy)
-
-        # If no annotations in frame_annotations, use canvas annotations
-        if not all_annotations and self.canvas.annotations:
-            all_annotations = self.canvas.annotations
-
-        export_annotations(
-            filename, all_annotations, image_width, image_height, export_format
-        )
-
-    def export_image_dataset_coco(self, filename, image_width, image_height):
-        """Export annotations for an image dataset in COCO format."""
-        import json
-        from datetime import datetime
-        
-        # Initialize COCO format structure
-        coco_data = {
-            "info": {
-                "description": "VIAT Exported Annotations",
-                "url": "",
-                "version": "1.0",
-                "year": datetime.now().year,
-                "contributor": "VIAT",
-                "date_created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            "licenses": [
-                {
-                    "id": 1,
-                    "name": "Unknown",
-                    "url": "",
-                }
-            ],
-            "images": [],
-            "annotations": [],
-            "categories": []
-        }
-        
-        # Create category mapping
-        category_id_map = {}
-        next_category_id = 1
-        
-        # Add all categories from class colors
-        for class_name in self.canvas.class_colors.keys():
-            category_id_map[class_name] = next_category_id
-            coco_data["categories"].append({
-                "id": next_category_id,
-                "name": class_name,
-                "supercategory": "none"
-            })
-            next_category_id += 1
-        
-        # Add images and annotations
-        annotation_id = 1
-        
-        for image_id, image_path in enumerate(self.image_files, 1):
-            # Add image info
-            image_filename = os.path.basename(image_path)
-            coco_data["images"].append({
-                "id": image_id,
-                "license": 1,
-                "file_name": image_filename,
-                "height": image_height,
-                "width": image_width,
-                "date_captured": "",
-                "frame_id": image_id - 1  # Store frame number for compatibility
-            })
-            
-            # Add annotations for this image
-            frame_num = image_id - 1
-            if frame_num in self.frame_annotations:
-                for annotation in self.frame_annotations[frame_num]:
-                    # Get category id
-                    category_id = category_id_map.get(annotation.class_name, 1)
-                    
-                    # Get bounding box in COCO format [x, y, width, height]
-                    rect = annotation.rect
-                    bbox = [rect.x(), rect.y(), rect.width(), rect.height()]
-                    
-                    # Calculate area
-                    area = rect.width() * rect.height()
-                    
-                    # Create annotation entry
-                    coco_annotation = {
-                        "id": annotation_id,
-                        "image_id": image_id,
-                        "category_id": category_id,
-                        "bbox": bbox,
-                        "area": area,
-                        "segmentation": [],
-                        "iscrowd": 0
-                    }
-                    
-                    # Add attributes if available
-                    for attr_name, attr_value in annotation.attributes.items():
-                        coco_annotation[attr_name.lower()] = attr_value
-                    
-                    coco_data["annotations"].append(coco_annotation)
-                    annotation_id += 1
-        
-        # Write to file
-        with open(filename, 'w') as f:
-            json.dump(coco_data, f, indent=2)
-
-    def export_image_dataset_yolo(self, filename, image_width, image_height):
-        """Export annotations for an image dataset in YOLO format."""
-        # Create output directory for YOLO format (one file per image)
-        output_dir = os.path.splitext(filename)[0]
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        # Create classes.txt file
-        classes = list(self.canvas.class_colors.keys())
-        class_map = {class_name: i for i, class_name in enumerate(classes)}
-        
-        with open(os.path.join(output_dir, "classes.txt"), 'w') as f:
-            f.write("\n".join(classes))
-        
-        # Create a file for each image
-        for frame_num, image_path in enumerate(self.image_files):
-            image_filename = os.path.basename(image_path)
-            base_name = os.path.splitext(image_filename)[0]
-            yolo_file = os.path.join(output_dir, f"{base_name}.txt")
-            
-            with open(yolo_file, 'w') as f:
-                if frame_num in self.frame_annotations:
-                    for annotation in self.frame_annotations[frame_num]:
-                        # Get class id
-                        class_id = class_map.get(annotation.class_name, 0)
-                        
-                        # Convert bbox to YOLO format (normalized)
-                        rect = annotation.rect
-                        x_center = (rect.x() + rect.width() / 2) / image_width
-                        y_center = (rect.y() + rect.height() / 2) / image_height
-                        width = rect.width() / image_width
-                        height = rect.height() / image_height
-                        
-                        # Write to file
-                        f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
-        
-        # Create a list file with all image paths
-        with open(os.path.join(output_dir, "images.txt"), 'w') as f:
-            for image_path in self.image_files:
-                f.write(f"{image_path}\n")
-        
-        # Create a README file explaining the format
-        with open(os.path.join(output_dir, "README.txt"), 'w') as f:
-            f.write("YOLO Format Export from VIAT\n")
-            f.write("===========================\n\n")
-            f.write("This directory contains:\n")
-            f.write("- classes.txt: List of class names\n")
-            f.write("- images.txt: List of all image paths\n")
-            f.write("- One .txt file per image with annotations in YOLO format\n\n")
-            f.write("YOLO format: <class_id> <x_center> <y_center> <width> <height>\n")
-            f.write("All values are normalized to [0-1]\n")
-
-    def export_image_dataset_pascal_voc(self, output_dir):
-        """Export annotations for an image dataset in Pascal VOC format."""
-        import xml.dom.minidom as minidom
-        import xml.etree.ElementTree as ET
-        
-        # Create output directory if it doesn't exist
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        # Get image dimensions
-        image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
-        image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
-        
-        # Process each image
-        for frame_num, image_path in enumerate(self.image_files):
-            # Skip if no annotations for this frame
-            if frame_num not in self.frame_annotations or not self.frame_annotations[frame_num]:
-                continue
-            
-            # Create XML structure
-            annotation = ET.Element("annotation")
-            
-            # Add folder and filename
-            folder = ET.SubElement(annotation, "folder")
-            folder.text = os.path.basename(os.path.dirname(image_path))
-            
-            filename_elem = ET.SubElement(annotation, "filename")
-            filename_elem.text = os.path.basename(image_path)
-            
-            path_elem = ET.SubElement(annotation, "path")
-            path_elem.text = image_path
-            
-            # Add source information
-            source = ET.SubElement(annotation, "source")
-            database = ET.SubElement(source, "database")
-            database.text = "VIAT"
-            
-            # Add size information
-            size = ET.SubElement(annotation, "size")
-            width_elem = ET.SubElement(size, "width")
-            width_elem.text = str(image_width)
-            height_elem = ET.SubElement(size, "height")
-            height_elem.text = str(image_height)
-            depth = ET.SubElement(size, "depth")
-            depth.text = "3"  # Assuming RGB images
-            
-            # Add segmented flag
-            segmented = ET.SubElement(annotation, "segmented")
-            segmented.text = "0"
-            
-            # Add objects (annotations)
-            for ann_idx, annotation_obj in enumerate(self.frame_annotations[frame_num]):
-                obj = ET.SubElement(annotation, "object")
-                
-                # Add class name
-                name = ET.SubElement(obj, "name")
-                name.text = annotation_obj.class_name
-                
-                # Add pose
-                pose = ET.SubElement(obj, "pose")
-                pose.text = "Unspecified"
-                
-                # Add truncated flag
-                truncated = ET.SubElement(obj, "truncated")
-                truncated.text = "0"
-                
-                # Add difficult flag
-                difficult = ET.SubElement(obj, "difficult")
-                difficult.text = "0"
-                
-                # Add bounding box
-                rect = annotation_obj.rect
-                bndbox = ET.SubElement(obj, "bndbox")
-                
-                xmin = ET.SubElement(bndbox, "xmin")
-                xmin.text = str(rect.x())
-                
-                ymin = ET.SubElement(bndbox, "ymin")
-                ymin.text = str(rect.y())
-                
-                xmax = ET.SubElement(bndbox, "xmax")
-                xmax.text = str(rect.x() + rect.width())
-                
-                ymax = ET.SubElement(bndbox, "ymax")
-                ymax.text = str(rect.y() + rect.height())
-                
-                # Add attributes as custom elements
-                for attr_name, attr_value in annotation_obj.attributes.items():
-                    if attr_name in ["Size", "Quality"] and attr_value != -1:
-                        attr_elem = ET.SubElement(obj, "attribute")
-                        attr_name_elem = ET.SubElement(attr_elem, "name")
-                        attr_name_elem.text = attr_name
-                        attr_value_elem = ET.SubElement(attr_elem, "value")
-                        attr_value_elem.text = str(attr_value)
-            
-                # Create XML file
-                xml_str = ET.tostring(annotation, encoding='utf-8')
-                dom = minidom.parseString(xml_str)
-                pretty_xml = dom.toprettyxml(indent="  ")
-                
-                # Get output filename
-                base_name = os.path.splitext(os.path.basename(image_path))[0]
-                xml_filename = os.path.join(output_dir, f"{base_name}.xml")
-                
-                # Write to file
-                with open(xml_filename, 'w') as f:
-                    f.write(pretty_xml)
-            
-            # Create a README file explaining the format
-            with open(os.path.join(output_dir, "README.txt"), 'w') as f:
-                f.write("Pascal VOC Format Export from VIAT\n")
-                f.write("================================\n\n")
-                f.write("This directory contains:\n")
-                f.write("- One .xml file per image with annotations in Pascal VOC format\n\n")
-                f.write("Pascal VOC format includes:\n")
-                f.write("- Object class names\n")
-                f.write("- Bounding box coordinates (xmin, ymin, xmax, ymax)\n")
-                f.write("- Additional attributes like Size and Quality\n")
-
-
-    
-    
     def scan_images_for_duplicates(self):
         """Scan all images in the dataset to identify duplicates."""
         if not hasattr(self, "image_files") or not self.image_files:
@@ -4883,7 +4102,7 @@ class VideoAnnotationTool(QMainWindow):
                 continue
             
             # Calculate frame hash
-            frame_hash = self.calculate_frame_hash(frame)
+            frame_hash = calculate_frame_hash(frame)
             self.frame_hashes[frame_num] = frame_hash
             
             # Add to duplicate cache
@@ -5031,3 +4250,31 @@ class VideoAnnotationTool(QMainWindow):
                 else:
                     # Only one file found, import it directly
                     self.import_annotations(annotation_files[0])
+
+    def reset_media_state(self):
+        """Reset all state related to the current media (video or image dataset)"""
+        # Reset canvas
+        if hasattr(self, 'canvas'):
+            self.canvas.annotations = []
+            self.canvas.selected_annotation = None
+            self.canvas.update()
+        
+        # Reset annotation storage
+        self.frame_annotations = {}
+        self.current_frame = 0
+        
+        # Reset media-specific state
+        self.video_path = None
+        self.image_dataset_info = None
+        self.is_image_dataset = False
+        
+        # Reset frame analysis data
+        self.frame_hashes = {}
+        self.duplicate_frames_cache = {}
+        
+        # Update UI
+        if hasattr(self, 'annotation_dock'):
+            self.annotation_dock.update_annotation_list()
+        
+        # Reset status
+        self.statusBar.showMessage("Ready")
