@@ -441,7 +441,22 @@ class AnnotationDock(QDockWidget):
     def batch_edit_annotations(self):
         """Show dialog for batch editing annotations across frames."""
         # Create dialog
-        dialog = self.create_batch_edit_dialog()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Batch Operations")
+        dialog.setMinimumWidth(400)
+        layout = QVBoxLayout(dialog)
+
+        # Create operation type group
+        operation_group = QGroupBox("Operation Type")
+        operation_layout = QVBoxLayout(operation_group)
+        
+        edit_radio = QRadioButton("Edit Annotation Attributes")
+        delete_radio = QRadioButton("Delete Annotations")
+        edit_radio.setChecked(True)
+        
+        operation_layout.addWidget(edit_radio)
+        operation_layout.addWidget(delete_radio)
+        layout.addWidget(operation_group)
 
         # Add frame range selection
         range_group = QGroupBox("Frame Range")
@@ -459,70 +474,49 @@ class AnnotationDock(QDockWidget):
 
         range_layout.addRow("Start Frame:", start_spin)
         range_layout.addRow("End Frame:", end_spin)
-
-        # Add to dialog layout
-        dialog.layout().insertWidget(0, range_group)
+        layout.addWidget(range_group)
 
         # Add propagation options
-        prop_group = QGroupBox("Propagation Options")
+        prop_group = QGroupBox("Apply To")
         prop_layout = QVBoxLayout(prop_group)
 
-        all_frames_radio = QRadioButton("Apply to all frames in range")
+        all_frames_radio = QRadioButton("All frames in range")
         all_frames_radio.setChecked(True)
 
-        duplicate_frames_radio = QRadioButton("Apply only to duplicate frames")
+        duplicate_frames_radio = QRadioButton("Only duplicate frames")
         duplicate_frames_radio.setEnabled(self.main_window.duplicate_frames_enabled)
 
-        similar_frames_radio = QRadioButton("Apply to similar frames (experimental)")
+        similar_frames_radio = QRadioButton("Similar frames (experimental)")
         similar_frames_radio.setEnabled(False)  # Not implemented yet
 
         prop_layout.addWidget(all_frames_radio)
         prop_layout.addWidget(duplicate_frames_radio)
         prop_layout.addWidget(similar_frames_radio)
+        layout.addWidget(prop_group)
 
-        # Add to dialog layout
-        dialog.layout().insertWidget(1, prop_group)
+        # Class filter for delete operation
+        class_filter_group = QGroupBox("Filter by Class")
+        class_filter_layout = QVBoxLayout(class_filter_group)
+        
+        class_filter = QComboBox()
+        class_filter.addItem("All Classes")
+        
+        # Add all available classes
+        if hasattr(self.main_window.canvas, 'class_colors'):
+            for class_name in self.main_window.canvas.class_colors.keys():
+                class_filter.addItem(class_name)
+        
+        class_filter_layout.addWidget(class_filter)
+        layout.addWidget(class_filter_group)
+        
+        # Only show class filter for delete operation
+        class_filter_group.setVisible(False)
+        delete_radio.toggled.connect(class_filter_group.setVisible)
 
-        # Show dialog
-        if dialog.exec_() == QDialog.Accepted:
-            # Get frame range
-            start_frame = start_spin.value()
-            end_frame = end_spin.value()
-
-            # Get propagation mode
-            if duplicate_frames_radio.isChecked():
-                prop_mode = "duplicate"
-            elif similar_frames_radio.isChecked():
-                prop_mode = "similar"
-            else:
-                prop_mode = "all"
-
-            # Get attribute values from dialog
-            attribute_values = {}
-            for attr_name, widget in dialog.attribute_widgets.items():
-                if widget.isEnabled():  # Only get values from enabled widgets
-                    if isinstance(widget, QComboBox):
-                        attribute_values[attr_name] = widget.currentText() == "True"
-                    elif isinstance(widget, QSpinBox):
-                        attribute_values[attr_name] = widget.value()
-                    elif isinstance(widget, QDoubleSpinBox):
-                        attribute_values[attr_name] = widget.value()
-                    else:
-                        attribute_values[attr_name] = widget.text()
-
-            # Apply batch edit
-            self.apply_batch_edit(start_frame, end_frame, attribute_values, prop_mode)
-
-    def create_batch_edit_dialog(self):
-        """Create a dialog for batch editing annotation attributes"""
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Batch Edit Annotations")
-        dialog.setMinimumWidth(350)
-
-        layout = QVBoxLayout(dialog)
-        form_layout = QFormLayout()
-
+        # Create attribute editing section (only for edit operation)
+        attributes_group = QGroupBox("Edit Attributes")
+        attributes_layout = QFormLayout(attributes_group)
+        
         # Collect all unique attributes across all annotations in all frames
         all_attributes = set()
         attribute_types = {}  # Store attribute types
@@ -578,16 +572,15 @@ class AnnotationDock(QDockWidget):
                 input_widget = QLineEdit()
                 input_widget.setPlaceholderText("No Change (leave empty)")
 
-            form_layout.addRow(f"{attr_name}:", input_widget)
-            dialog.attribute_widgets[attr_name] = (input_widget, attr_type)
+            attributes_layout.addRow(f"{attr_name}:", input_widget)
+            dialog.attribute_widgets[attr_name] = input_widget
 
-        # Add form layout to main layout
-        layout.addLayout(form_layout)
-
-        # Option to apply to all frames - checked by default
-        dialog.apply_all_frames_checkbox = QCheckBox("Apply to all frames")
-        dialog.apply_all_frames_checkbox.setChecked(True)
-        layout.addWidget(dialog.apply_all_frames_checkbox)
+        layout.addWidget(attributes_group)
+        
+        # Only show attributes for edit operation
+        attributes_group.setVisible(True)
+        edit_radio.toggled.connect(attributes_group.setVisible)
+        delete_radio.toggled.connect(lambda checked: attributes_group.setVisible(not checked))
 
         # Add buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -595,7 +588,47 @@ class AnnotationDock(QDockWidget):
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
 
-        return dialog
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            # Get frame range
+            start_frame = start_spin.value()
+            end_frame = end_spin.value()
+
+            # Get propagation mode
+            if duplicate_frames_radio.isChecked():
+                prop_mode = "duplicate"
+            elif similar_frames_radio.isChecked():
+                prop_mode = "similar"
+            else:
+                prop_mode = "all"
+
+            # Determine operation type
+            if delete_radio.isChecked():
+                # Get class filter
+                class_name_filter = None
+                if class_filter.currentText() != "All Classes":
+                    class_name_filter = class_filter.currentText()
+                
+                # Apply batch delete
+                self.apply_batch_delete(start_frame, end_frame, class_name_filter, prop_mode)
+            else:
+                # Get attribute values from dialog
+                attribute_values = {}
+                for attr_name, widget in dialog.attribute_widgets.items():
+                    if isinstance(widget, QComboBox):
+                        if widget.currentText() != "No Change":
+                            attribute_values[attr_name] = widget.currentText() == "True"
+                    elif isinstance(widget, QSpinBox):
+                        if widget.text() != "No Change":
+                            attribute_values[attr_name] = widget.value()
+                    elif isinstance(widget, QDoubleSpinBox):
+                        if widget.text() != "No Change":
+                            attribute_values[attr_name] = widget.value()
+                    elif isinstance(widget, QLineEdit) and widget.text():
+                        attribute_values[attr_name] = widget.text()
+
+                # Apply batch edit
+                self.apply_batch_edit(start_frame, end_frame, attribute_values, prop_mode)
 
     def apply_batch_attributes_to_current_frame(self, attribute_values):
         """Apply attribute changes to all annotations in the current frame"""
@@ -716,6 +749,100 @@ class AnnotationDock(QDockWidget):
 
         self.main_window.statusBar.showMessage(
             f"Updated {update_count} annotations across {end_frame - start_frame + 1} frames",
+            5000,
+        )
+
+        # Mark project as modified
+        self.main_window.project_modified = True
+
+    def apply_batch_delete(self, start_frame, end_frame, class_name_filter=None, prop_mode="all"):
+        """
+        Apply batch delete to annotations across frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            class_name_filter (str): Only delete annotations of this class (None for all)
+            prop_mode (str): Propagation mode - "all", "duplicate", or "similar"
+        """
+        if start_frame > end_frame:
+            start_frame, end_frame = end_frame, start_frame
+
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Deleting Annotations")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(f"Deleting annotations in frames {start_frame}-{end_frame}...")
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Track processed frames for duplicate mode
+        processed_hashes = set()
+        delete_count = 0
+
+        # Apply deletes to each frame
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            # Skip frames without annotations
+            if frame_num not in self.main_window.frame_annotations:
+                continue
+
+            # For duplicate mode, check if this is a duplicate frame
+            if prop_mode == "duplicate":
+                if frame_num not in self.main_window.frame_hashes:
+                    continue
+
+                frame_hash = self.main_window.frame_hashes[frame_num]
+
+                # Skip if we've already processed a frame with this hash
+                if frame_hash in processed_hashes:
+                    continue
+
+                # Skip if this isn't a duplicate frame
+                if (
+                    frame_hash not in self.main_window.duplicate_frames_cache
+                    or len(self.main_window.duplicate_frames_cache[frame_hash]) <= 1
+                ):
+                    continue
+
+                processed_hashes.add(frame_hash)
+
+            # Delete matching annotations in this frame
+            annotations_to_keep = []
+            for annotation in self.main_window.frame_annotations[frame_num]:
+                if class_name_filter is None or annotation.class_name == class_name_filter:
+                    delete_count += 1
+                else:
+                    annotations_to_keep.append(annotation)
+        
+            # Update the frame annotations
+            self.main_window.frame_annotations[frame_num] = annotations_to_keep
+
+            # If this is the current frame, update the canvas
+            if frame_num == self.main_window.current_frame:
+                self.main_window.canvas.annotations = annotations_to_keep.copy()
+                self.main_window.canvas.update()
+                self.update_annotation_list()
+
+        # Close progress dialog
+        progress.close()
+
+        self.main_window.statusBar.showMessage(
+            f"Deleted {delete_count} annotations across {end_frame - start_frame + 1} frames",
             5000,
         )
 
