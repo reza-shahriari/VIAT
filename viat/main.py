@@ -919,14 +919,28 @@ class VideoAnnotationTool(QMainWindow):
 
     def update_frame_info(self):
         """Update frame information in the UI."""
-        if self.cap and self.cap.isOpened():
-            # Update frame label
+        if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+            # Update frame label for image datasets
+            total = len(self.image_files) if self.image_files else 0
+            self.frame_label.setText(f"{self.current_frame + 1}/{total}")
+            
+            # Update slider position (without triggering valueChanged)
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(self.current_frame)
+            self.frame_slider.blockSignals(False)
+            
+            # Show current image filename in status bar
+            if 0 <= self.current_frame < len(self.image_files):
+                self.statusBar.showMessage(f"Image: {os.path.basename(self.image_files[self.current_frame])}")
+        elif self.cap and self.cap.isOpened():
+            # Update frame label for videos
             self.frame_label.setText(f"{self.current_frame}/{self.total_frames}")
 
             # Update slider position (without triggering valueChanged)
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame)
             self.frame_slider.blockSignals(False)
+
 
     def update_frame_annotations(self):
         """Update annotations for the current frame."""
@@ -969,10 +983,14 @@ class VideoAnnotationTool(QMainWindow):
     def slider_changed(self, value):
         """Handle slider value changes."""
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
-            if 0 <= value < self.total_frames:
-                self.current_frame = value
-                self.load_current_image()
-                self.update_frame_info()
+            if 0 <= value < len(self.image_files):
+                # Only update if the value actually changed
+                if value != self.current_frame:
+                    self.current_frame = value
+                    self.load_current_image()
+                    self.update_frame_info()
+                    # Load annotations for the new frame
+                    self.load_current_frame_annotations()
         elif self.cap and self.cap.isOpened():
             # Calculate the frame number from slider value
             frame_number = int(value)
@@ -987,6 +1005,7 @@ class VideoAnnotationTool(QMainWindow):
 
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
+
 
     def prev_frame(self):
         """Go to the previous frame in the video or previous image in the dataset."""
@@ -2106,10 +2125,10 @@ class VideoAnnotationTool(QMainWindow):
         Args:
             filename (str, optional): Path to the annotation file. If None, a file dialog will be shown.
         """
-        if not self.cap:
+        if not (self.cap or (hasattr(self, "is_image_dataset") and self.is_image_dataset)):
             QMessageBox.warning(
-                self, "Import Annotations", "Please open a video first!"
-            )
+            self, "Import Annotations", "Please open a video or image dataset first!"
+        )
             return
 
         # If no filename provided, show file dialog to select one
@@ -3639,30 +3658,22 @@ class VideoAnnotationTool(QMainWindow):
             frame = cv2.imread(image_path)
 
             if frame is not None:
-                # Convert from BGR to RGB for display
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
 
                 # Set the frame to the canvas
                 self.canvas.set_frame(frame)
-                
-                # Check for duplicate frames and propagate annotations if enabled
-                if (
-                    self.duplicate_frames_enabled
-                    and self.current_frame in self.frame_hashes
-                ):
-                    current_hash = self.frame_hashes[self.current_frame]
-                    # If this is a duplicate frame, check if any other frame with this hash has annotations
-                    if (
-                        current_hash in self.duplicate_frames_cache
-                        and len(self.duplicate_frames_cache[current_hash]) > 1
-                    ):
-                        self.propagate_annotations_to_duplicate(current_hash)
 
                 # Load annotations for this frame if they exist
                 self.load_current_frame_annotations()
                 
-                # Update the status bar with the current image filename
-                self.statusBar.showMessage(f"Image: {os.path.basename(image_path)}")
+                # Update frame info and slider
+                self.update_frame_info()
+                
+                return True
+            else:
+                self.statusBar.showMessage(f"Error loading image: {os.path.basename(image_path)}")
+                return False
+
 
     def toggle_duplicate_frames_detection(self):
         """Toggle automatic duplicate frame detection and annotation propagation."""
@@ -4500,11 +4511,14 @@ class VideoAnnotationTool(QMainWindow):
         self.current_frame = min(current_frame, self.total_frames - 1)
         self.is_image_dataset = True
         
-        # Load the current image
-        self.load_current_image()
-        
         # Update UI
+        self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(self.total_frames - 1)
+        self.frame_slider.setValue(self.current_frame)
+        
+        
+        self.load_current_image()
+
         self.update_frame_info()
         
         # Update window title
