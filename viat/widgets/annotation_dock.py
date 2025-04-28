@@ -137,7 +137,14 @@ class AnnotationItemWidget(QWidget):
                 # Set validator based on min/max if available
                 if attr_min is not None and attr_max is not None:
                     if attr_type == "int":
-                        input_widget.setValidator(QIntValidator(attr_min, attr_max))
+                        if attr_min is not None and attr_max is not None:
+                            try:
+                                min_val = int(attr_min)
+                                max_val = int(attr_max)
+                                input_widget.setValidator(QIntValidator(min_val, max_val))
+                            except (ValueError, TypeError):
+                                # Handle case where conversion fails
+                                print(f"Warning: Could not convert min/max values to integers: {attr_min}, {attr_max}")
                     else:
                         input_widget.setValidator(
                             QDoubleValidator(attr_min, attr_max, 2)
@@ -284,13 +291,10 @@ class AnnotationDock(QDockWidget):
         # Clear the selector
         self.class_selector.clear()
         
-        # Debug print to check what's happening
-        print("Updating annotation dock class selector")
         
         if hasattr(self.main_window, 'canvas'):
             if hasattr(self.main_window.canvas, 'class_colors') and self.main_window.canvas.class_colors:
                 class_colors = self.main_window.canvas.class_colors
-                print(f"Class colors: {class_colors.keys()}")
                 
                 # Use a list to maintain order and prevent duplicates
                 class_list = list(dict.fromkeys(class_colors.keys()))
@@ -306,15 +310,12 @@ class AnnotationDock(QDockWidget):
                         index = self.class_selector.findText(current_class)
                         if index >= 0:
                             self.class_selector.setCurrentIndex(index)
-                            print(f"Selected current class: {current_class}")
-            else:
-                print("No class colors found in canvas")
+
 
 
     def on_class_selected(self, class_name):
         """Handle selection of a class"""
         if class_name and hasattr(self.main_window, "canvas"):
-            print(f"Class selected in annotation dock: {class_name}")
             # Block signals to prevent recursive calls
             self.main_window.canvas.blockSignals(True)
             self.main_window.canvas.set_current_class(class_name)

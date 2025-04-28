@@ -1047,10 +1047,6 @@ class VideoAnnotationTool(QMainWindow):
                 # Update UI
                 self.update_settings_menu_actions()
                 
-                # IMPORTANT: Force update of class lists in docks
-                print("Updating class lists after project load")
-                print(f"Available classes: {list(self.canvas.class_colors.keys())}")
-                
                 # Update class dock
                 if hasattr(self, "class_dock"):
                     self.class_dock.update_class_list()
@@ -2165,163 +2161,136 @@ class VideoAnnotationTool(QMainWindow):
         
         # Schedule the refresh after a short delay
         QTimer.singleShot(100, do_refresh)
-
+   
     def edit_selected_class(self):
-        """Edit the selected class with custom attributes."""
-        item = self.class_dock.classes_list.currentItem()
-        if not item:
+        """Edit the selected class"""
+        # Get the selected class
+        selected_class = None
+        if hasattr(self, "class_dock") and self.class_dock.classes_list.currentItem():
+            selected_class = self.class_dock.classes_list.currentItem().text()
+        elif hasattr(self.canvas, "current_class"):
+            selected_class = self.canvas.current_class
+        
+        if not selected_class:
+            QMessageBox.warning(self, "No Class Selected", "Please select a class to edit.")
             return
-
-        class_name = item.text()
-        old_name = class_name  # Store the original class name
-        current_color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-
-        # Get current attributes configuration
-        attributes = getattr(self.canvas, "class_attributes", {}).get(class_name, {})
-
+        
+        # Get current color and attributes
+        current_color = self.canvas.class_colors.get(selected_class, QColor(255, 0, 0))
+        current_attributes = self.canvas.class_attributes.get(selected_class, {})
+        
         # Create dialog
-        dialog = self.create_class_dialog(class_name, current_color, attributes)
-
-        # Show dialog
+        dialog = self.create_class_dialog(selected_class, current_color, current_attributes)
+        
         if dialog.exec_() == QDialog.Accepted:
             new_class_name = dialog.name_edit.text().strip()
-
-            if not new_class_name:
-                QMessageBox.warning(self, "Edit Class", "Class name cannot be empty!")
-                return
-
-            if (
-                new_class_name != old_name
-                and new_class_name in self.canvas.class_colors
-            ):
-                # Ask if user wants to merge classes
-                reply = QMessageBox.question(
-                    self,
-                    "Merge Classes",
-                    f"Class '{new_class_name}' already exists. Do you want to convert all '{old_name}' annotations to '{new_class_name}'?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                    QMessageBox.No,
-                )
-
-                if reply == QMessageBox.Cancel:
-                    return
-                elif reply == QMessageBox.Yes:
-                    # Get color from existing class
-                    color = self.canvas.class_colors[new_class_name]
-                    # Convert all annotations of old class to new class
-                    self.convert_class(old_name, new_class_name)
-                    # Remove old class
-                    del self.canvas.class_colors[old_name]
-                    if (
-                        hasattr(self.canvas, "class_attributes")
-                        and old_name in self.canvas.class_attributes
-                    ):
-                        del self.canvas.class_attributes[old_name]
-                    # Update UI
-                    self.toolbar.update_class_selector()
-                    self.class_dock.update_class_list()
-                    self.update_annotation_list()
-                    self.canvas.update()
-                    return
-                else:
-                    # User chose No, so don't proceed with the rename
-                    return
-
-            # Get color from dialog
-            color = dialog.color
-
-            # Process attributes
-            attributes_config = {}
-            for (
-                _,
-                name_edit,
-                type_combo,
-                default_edit,
-                min_edit,
-                max_edit,
-            ) in dialog.attribute_widgets:
+            new_color = dialog.color  # This is the color selected in the dialog
+            print("new_color:",new_color.rgb())
+            print("old_color :",current_color.rgb())
+            # Get attributes from dialog
+            new_attributes = {}
+            for widget, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
                 attr_name = name_edit.text().strip()
-                if attr_name:
-                    attr_type = type_combo.currentText()
-
-                    # Parse default value based on type
-                    default_value = default_edit.text()
-                    if attr_type == "int":
-                        try:
-                            default_value = int(default_value)
-                        except ValueError:
-                            default_value = 0
-                    elif attr_type == "float":
-                        try:
-                            default_value = float(default_value)
-                        except ValueError:
-                            default_value = 0.0
-                    elif attr_type == "boolean":
-                        default_value = default_value.lower() in ["true", "1", "yes"]
-
-                    # Parse min/max for numeric types
-                    attr_config = {"type": attr_type, "default": default_value}
-
-                    if attr_type in ["int", "float"]:
-                        try:
-                            attr_config["min"] = (
-                                int(min_edit.text())
-                                if attr_type == "int"
-                                else float(min_edit.text())
-                            )
-                        except ValueError:
-                            attr_config["min"] = 0
-
-                        try:
-                            attr_config["max"] = (
-                                int(max_edit.text())
-                                if attr_type == "int"
-                                else float(max_edit.text())
-                            )
-                        except ValueError:
-                            attr_config["max"] = 100
-
-                    attributes_config[attr_name] = attr_config
-
-            # Update class
-            if not hasattr(self.canvas, "class_attributes"):
-                self.canvas.class_attributes = {}
-
-            # Update class name in annotations and class attributes
-            if old_name != new_class_name:
+                if not attr_name:
+                    continue
+                    
+                attr_type = type_combo.currentText()
+                attr_default = default_edit.text()
+                
+                # Create attribute config
+                attr_config = {"type": attr_type, "default": attr_default}
+                
+                # Add min/max for numeric types
+                if attr_type in ["int", "float"]:
+                    attr_config["min"] = min_edit.text()
+                    attr_config["max"] = max_edit.text()
+                    
+                new_attributes[attr_name] = attr_config
+            
+            # Skip if no changes
+            if (selected_class == new_class_name and 
+                current_color.name() == new_color.name() and 
+                current_attributes == new_attributes):
+                return
+            
+            # Handle class name change
+            if selected_class != new_class_name:
+                # Update class name in all annotations
+                for frame_num, annotations in self.frame_annotations.items():
+                    for annotation in annotations:
+                        if annotation.class_name == selected_class:
+                            annotation.class_name = new_class_name
+                
                 # Update class colors dictionary
-                self.canvas.class_colors[new_class_name] = color
-                del self.canvas.class_colors[old_name]
-
+                if selected_class in self.canvas.class_colors:
+                    self.canvas.class_colors[new_class_name] = self.canvas.class_colors.pop(selected_class)
+                
                 # Update class attributes dictionary
-                self.canvas.class_attributes[new_class_name] = attributes_config
-                if old_name in self.canvas.class_attributes:
-                    del self.canvas.class_attributes[old_name]
-
-                # Update annotations
-                for annotation in self.canvas.annotations:
-                    if annotation.class_name == old_name:
-                        annotation.class_name = new_class_name
-                        annotation.color = color
-
-                        # Update attributes based on new configuration
-                        self.update_annotation_attributes(annotation, attributes_config)
-            else:
-                # Just update the color and attributes
-                self.canvas.class_colors[class_name] = color
-                self.canvas.class_attributes[class_name] = attributes_config
-
-                # Update annotations with new color and attributes
-                for annotation in self.canvas.annotations:
-                    if annotation.class_name == class_name:
-                        annotation.color = color
-                        self.update_annotation_attributes(annotation, attributes_config)
-
-            # Update UI
-            self.toolbar.update_class_selector()
-            self.class_dock.update_class_list()
-            self.update_annotation_list()
+                if hasattr(self.canvas, "class_attributes") and selected_class in self.canvas.class_attributes:
+                    self.canvas.class_attributes[new_class_name] = self.canvas.class_attributes.pop(selected_class)
+                
+                # Update current class if needed
+                if self.canvas.current_class == selected_class:
+                    self.canvas.current_class = new_class_name
+            
+            self.canvas.class_colors[new_class_name] = new_color
+            
+            # Update all annotations with this class to use the new color
+            for frame_num, annotations in self.frame_annotations.items():
+                for annotation in annotations:
+                    if annotation.class_name == new_class_name:
+                        annotation.color = new_color
+            
+            # Update class attributes
+            if hasattr(self.canvas, "class_attributes"):
+                self.canvas.class_attributes[new_class_name] = new_attributes
+            
+            # Update UI components
+            if hasattr(self, "class_dock"):
+                self.class_dock.update_class_list()
+            
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.update_class_selector()
+            
+            if hasattr(self, "class_selector"):
+                self.class_selector.blockSignals(True)
+                self.class_selector.clear()
+                self.class_selector.addItems(sorted(self.canvas.class_colors.keys()))
+                if new_class_name in self.canvas.class_colors:
+                    self.class_selector.setCurrentText(new_class_name)
+                self.class_selector.blockSignals(False)
+            
+            # Update canvas to show new colors
             self.canvas.update()
+            
+            # Mark project as modified
+            self.project_modified = True
+
+
+    def refresh_class_ui(self):
+        """Refresh all UI components that display class information"""
+        # Update class dock
+        if hasattr(self, "class_dock"):
+            self.class_dock.update_class_list()
+        
+        # Update annotation dock
+        if hasattr(self, "annotation_dock"):
+            self.annotation_dock.update_class_selector()
+        
+        # Update toolbar class selector
+        if hasattr(self, "class_selector"):
+            self.class_selector.blockSignals(True)
+            current_text = self.class_selector.currentText()
+            self.class_selector.clear()
+            self.class_selector.addItems(sorted(self.canvas.class_colors.keys()))
+            if current_text in self.canvas.class_colors:
+                self.class_selector.setCurrentText(current_text)
+            elif self.canvas.current_class in self.canvas.class_colors:
+                self.class_selector.setCurrentText(self.canvas.current_class)
+            self.class_selector.blockSignals(False)
+        
+        # Update canvas
+        self.canvas.update()
 
     def create_class_dialog(self, class_name=None, color=None, attributes=None):
         """Create a dialog for adding or editing classes with custom attributes."""
@@ -2355,7 +2324,9 @@ class VideoAnnotationTool(QMainWindow):
             nonlocal color
             new_color = QColorDialog.getColor(color, dialog, "Select Color")
             if new_color.isValid():
+                print(f"Color changed from {color.name()} to {new_color.name()}")
                 color = new_color
+                dialog.color = new_color  # Make sure this is set
                 color_button.setStyleSheet(f"background-color: {color.name()}")
 
         color_button.clicked.connect(choose_color)

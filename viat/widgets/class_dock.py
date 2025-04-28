@@ -77,13 +77,10 @@ class ClassDock(QDockWidget):
         # Clear the list
         self.classes_list.clear()
         
-        # Debug print to check what's happening
-        print("Updating class list in ClassDock")
         
         if hasattr(self.main_window, 'canvas'):
             if hasattr(self.main_window.canvas, 'class_colors'):
                 class_colors = self.main_window.canvas.class_colors
-                print(f"Found {len(class_colors)} classes: {list(class_colors.keys())}")
                 
                 # Use a set to track added classes to prevent duplicates
                 added_classes = set()
