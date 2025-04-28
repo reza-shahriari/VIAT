@@ -16,7 +16,7 @@ class ClassDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Classes", parent)
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-
+        self.old_selected_class = None
         self.main_window = parent
         self.init_ui()
 
@@ -107,6 +107,9 @@ class ClassDock(QDockWidget):
     def on_class_selected(self, item):
         """Handle selection of a class"""
         class_name = item.text()
+        
+
+
 
         # Update attribute info
         self.update_attribute_info(class_name)

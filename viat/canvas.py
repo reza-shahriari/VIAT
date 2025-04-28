@@ -82,6 +82,8 @@ class VideoCanvas(QWidget):
         # Add zoom properties
         self.zoom_level = 1.0
         self.pan_offset = QPoint(0, 0)
+        self.panning = False
+        self.pan_start_pos = None
 
         # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.StrongFocus)
@@ -108,6 +110,11 @@ class VideoCanvas(QWidget):
 
         # Convert to QPixmap for display
         self.pixmap = QPixmap.fromImage(q_img)
+        
+        # Reset panning when a new frame is loaded
+        if self.zoom_level == 1.0:
+            self.reset_pan()
+            
         self.update()
 
     def set_current_class(self, class_name):
@@ -524,7 +531,12 @@ class VideoCanvas(QWidget):
         """Handle mouse press events"""
         if not self.pixmap:
             return
-
+        # Check for panning - either middle button or Ctrl+left button
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier):
+            self.panning = True
+            self.pan_start_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            return
         if event.button() == Qt.LeftButton:
             if (
                 self.main_window
@@ -649,7 +661,14 @@ class VideoCanvas(QWidget):
         """Handle mouse move events"""
         if not self.pixmap:
             return
-
+        # Handle panning
+        if self.panning and self.pan_start_pos:
+            # Calculate the delta movement
+            delta = event.pos() - self.pan_start_pos
+            self.pan_offset += delta
+            self.pan_start_pos = event.pos()
+            self.update()
+            return
         # If we're moving an edge
         if self.edge_moving and self.selected_annotation:
             # Get the current display rect
@@ -780,7 +799,12 @@ class VideoCanvas(QWidget):
         """Handle mouse release events"""
         if not self.pixmap:
             return
-
+        if self.panning and (event.button() == Qt.MiddleButton or 
+                         (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier)):
+            self.panning = False
+            self.pan_start_pos = None
+            self.setCursor(Qt.ArrowCursor)
+            return
         if event.button() == Qt.LeftButton:
             # If we were moving an edge
             if self.edge_moving:
@@ -933,7 +957,15 @@ class VideoCanvas(QWidget):
 
     def keyPressEvent(self, event):
         """Handle keyboard events"""
-        # Delete key to remove selected annotation
+        # Reset zoom and pan with 'R' key
+        if event.key() == Qt.Key_R:
+            self.zoom_level = 1.0
+            self.reset_pan()
+            self.update()
+            # Update main window zoom level if available
+            if self.main_window and hasattr(self.main_window, "zoom_level"):
+                self.main_window.zoom_level = self.zoom_level
+
         if event.key() == Qt.Key_Delete and self.selected_annotation:
             if self.main_window:
                 self.main_window.delete_selected_annotation()
@@ -1049,3 +1081,8 @@ class VideoCanvas(QWidget):
             self.current_point = None
             self.two_click_first_point = None
             self.update()
+
+    def reset_pan(self):
+        """Reset the pan offset to center the image"""
+        self.pan_offset = QPoint(0, 0)
+        self.update()

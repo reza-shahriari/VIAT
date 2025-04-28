@@ -14,6 +14,8 @@ from PyQt5.QtGui import QIcon
 def main():
     app = QApplication(sys.argv)
     window = VideoAnnotationTool()
+    window.change_style("DarkModern")
+
     icon_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Icon", "Icon.png"
     )

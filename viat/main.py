@@ -2163,7 +2163,7 @@ class VideoAnnotationTool(QMainWindow):
         QTimer.singleShot(100, do_refresh)
    
     def edit_selected_class(self):
-        """Edit the selected class"""
+        """Edit the selected class with option to convert to another class."""
         # Get the selected class
         selected_class = None
         if hasattr(self, "class_dock") and self.class_dock.classes_list.currentItem():
@@ -2182,14 +2182,44 @@ class VideoAnnotationTool(QMainWindow):
         # Create dialog
         dialog = self.create_class_dialog(selected_class, current_color, current_attributes)
         
+        # Add conversion option
+        conversion_group = QGroupBox("Convert Class")
+        conversion_layout = QVBoxLayout(conversion_group)
+        
+        convert_check = QCheckBox("Convert to another existing class")
+        convert_check.setChecked(False)
+        
+        target_class_combo = QComboBox()
+        target_class_combo.addItems([c for c in self.canvas.class_colors.keys() if c != selected_class])
+        target_class_combo.setEnabled(False)
+        
+        attribute_handling_combo = QComboBox()
+        attribute_handling_combo.addItems(["Keep original attributes", "Use target class attributes", "Merge attributes"])
+        attribute_handling_combo.setEnabled(False)
+        
+        # Connect checkbox to enable/disable conversion options
+        def toggle_conversion_options(checked):
+            target_class_combo.setEnabled(checked)
+            attribute_handling_combo.setEnabled(checked)
+        
+        convert_check.toggled.connect(toggle_conversion_options)
+        
+        conversion_layout.addWidget(convert_check)
+        conversion_layout.addWidget(QLabel("Target class:"))
+        conversion_layout.addWidget(target_class_combo)
+        conversion_layout.addWidget(QLabel("Attribute handling:"))
+        conversion_layout.addWidget(attribute_handling_combo)
+        
+        # Add conversion group to dialog layout
+        dialog.layout().insertWidget(dialog.layout().count() - 1, conversion_group)
+        
         if dialog.exec_() == QDialog.Accepted:
             new_class_name = dialog.name_edit.text().strip()
-            new_color = dialog.color  # This is the color selected in the dialog
-            print("new_color:",new_color.rgb())
-            print("old_color :",current_color.rgb())
+            new_color = dialog.color
+            
             # Get attributes from dialog
             new_attributes = {}
-            for widget, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
+            for _, name_edit, type_combo, default_edit, min_edit, max_edit in dialog.attribute_widgets:
                 attr_name = name_edit.text().strip()
                 if not attr_name:
                     continue
@@ -2207,6 +2237,58 @@ class VideoAnnotationTool(QMainWindow):
                     
                 new_attributes[attr_name] = attr_config
             
+            # Check if we're converting to another class
+            if convert_check.isChecked() and target_class_combo.currentText():
+                target_class = target_class_combo.currentText()
+                attribute_handling = attribute_handling_combo.currentText()
+                
+                # Confirm conversion
+                reply = QMessageBox.question(
+                    self,
+                    "Convert Class",
+                    f"Are you sure you want to convert all '{selected_class}' annotations to '{target_class}'?\n\n"
+                    f"The '{selected_class}' class will be deleted after conversion.\n"
+                    f"This action cannot be undone.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # Handle attributes based on user selection
+                    if attribute_handling == "Keep original attributes":
+                        # Keep original attributes for each annotation
+                        self.convert_class_with_attributes(selected_class, target_class, keep_original=True)
+                    elif attribute_handling == "Use target class attributes":
+                        # Use target class attribute defaults
+                        self.convert_class_with_attributes(selected_class, target_class, keep_original=False)
+                    else:  # "Merge attributes"
+                        # Show attribute mapping dialog
+                        self.convert_class_with_attribute_mapping(selected_class, target_class)
+                    
+                    # Delete the original class
+                    if selected_class in self.canvas.class_colors:
+                        del self.canvas.class_colors[selected_class]
+                    if hasattr(self.canvas, "class_attributes") and selected_class in self.canvas.class_attributes:
+                        del self.canvas.class_attributes[selected_class]
+                    
+                    # If the current class was the one deleted, set it to the target class
+                    if self.canvas.current_class == selected_class:
+                        self.canvas.current_class = target_class
+                    
+                    # Update UI
+                    self.refresh_class_ui()
+                    
+                    # Mark project as modified
+                    self.project_modified = True
+                    
+                    # Show success message
+                    self.statusBar.showMessage(
+                        f"Converted all '{selected_class}' annotations to '{target_class}' and deleted '{selected_class}' class",
+                        5000
+                    )
+                    return
+            
+            # Handle regular class editing (no conversion)
             # Skip if no changes
             if (selected_class == new_class_name and 
                 current_color.name() == new_color.name() and 
@@ -2233,6 +2315,7 @@ class VideoAnnotationTool(QMainWindow):
                 if self.canvas.current_class == selected_class:
                     self.canvas.current_class = new_class_name
             
+            # Update color
             self.canvas.class_colors[new_class_name] = new_color
             
             # Update all annotations with this class to use the new color
@@ -2245,26 +2328,154 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self.canvas, "class_attributes"):
                 self.canvas.class_attributes[new_class_name] = new_attributes
             
-            # Update UI components
-            if hasattr(self, "class_dock"):
-                self.class_dock.update_class_list()
-            
-            if hasattr(self, "annotation_dock"):
-                self.annotation_dock.update_class_selector()
-            
-            if hasattr(self, "class_selector"):
-                self.class_selector.blockSignals(True)
-                self.class_selector.clear()
-                self.class_selector.addItems(sorted(self.canvas.class_colors.keys()))
-                if new_class_name in self.canvas.class_colors:
-                    self.class_selector.setCurrentText(new_class_name)
-                self.class_selector.blockSignals(False)
-            
-            # Update canvas to show new colors
-            self.canvas.update()
+            # Update UI
+            self.refresh_class_ui()
             
             # Mark project as modified
             self.project_modified = True
+
+    def convert_class_with_attributes(self, old_class, new_class, keep_original=False):
+        """
+        Convert all annotations from one class to another with attribute handling.
+        
+        Args:
+            old_class (str): The original class name
+            new_class (str): The target class name
+            keep_original (bool): Whether to keep original attributes or use target class defaults
+        """
+        # Get target class attribute configuration
+        target_attributes = self.canvas.class_attributes.get(new_class, {})
+        
+        # Update annotations in current frame
+        for annotation in self.canvas.annotations:
+            if annotation.class_name == old_class:
+                annotation.class_name = new_class
+                annotation.color = self.canvas.class_colors[new_class]
+                
+                if not keep_original:
+                    # Use target class attribute defaults
+                    self.update_annotation_attributes(annotation, target_attributes)
+
+        # Update annotations in all frames
+        for frame_num, annotations in self.frame_annotations.items():
+            for annotation in annotations:
+                if annotation.class_name == old_class:
+                    annotation.class_name = new_class
+                    annotation.color = self.canvas.class_colors[new_class]
+                    
+                    if not keep_original:
+                        # Use target class attribute defaults
+                        self.update_annotation_attributes(annotation, target_attributes)
+
+        self.statusBar.showMessage(
+            f"Converted all '{old_class}' annotations to '{new_class}'"
+        )
+
+    def convert_class_with_attribute_mapping(self, old_class, new_class):
+        """
+        Convert class with custom attribute mapping.
+        
+        Args:
+            old_class (str): The original class name
+            new_class (str): The target class name
+        """
+        # Get attribute configurations for both classes
+        old_attributes = self.canvas.class_attributes.get(old_class, {})
+        new_attributes = self.canvas.class_attributes.get(new_class, {})
+        
+        # Create mapping dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Map Attributes: {old_class} → {new_class}")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Add explanation
+        layout.addWidget(QLabel(f"Map attributes from '{old_class}' to '{new_class}':"))
+        
+        # Create mapping widgets
+        mapping_widgets = {}
+        
+        form_layout = QFormLayout()
+        for old_attr_name in old_attributes:
+            combo = QComboBox()
+            combo.addItem("(Discard)")
+            combo.addItems(list(new_attributes.keys()))
+            
+            # Try to find matching attribute by name
+            if old_attr_name in new_attributes:
+                combo.setCurrentText(old_attr_name)
+            
+            form_layout.addRow(f"{old_attr_name}:", combo)
+            mapping_widgets[old_attr_name] = combo
+        
+        layout.addLayout(form_layout)
+        
+        # Add buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            # Create attribute mapping
+            attr_mapping = {}
+            for old_attr, combo in mapping_widgets.items():
+                if combo.currentText() != "(Discard)":
+                    attr_mapping[old_attr] = combo.currentText()
+            
+            # Apply conversion with mapping
+            self.apply_class_conversion_with_mapping(old_class, new_class, attr_mapping)
+
+    def apply_class_conversion_with_mapping(self, old_class, new_class, attr_mapping):
+        """
+        Apply class conversion with custom attribute mapping.
+        
+        Args:
+            old_class (str): The original class name
+            new_class (str): The target class name
+            attr_mapping (dict): Mapping from old attributes to new attributes
+        """
+        # Update annotations in current frame
+        for annotation in self.canvas.annotations:
+            if annotation.class_name == old_class:
+                # Save old attributes
+                old_attrs = annotation.attributes.copy()
+                
+                # Change class
+                annotation.class_name = new_class
+                annotation.color = self.canvas.class_colors[new_class]
+                
+                # Reset attributes to target class defaults
+                self.update_annotation_attributes(annotation, self.canvas.class_attributes.get(new_class, {}))
+                
+                # Apply attribute mapping
+                for old_attr, new_attr in attr_mapping.items():
+                    if old_attr in old_attrs and new_attr in annotation.attributes:
+                        annotation.attributes[new_attr] = old_attrs[old_attr]
+
+        # Update annotations in all frames
+        for frame_num, annotations in self.frame_annotations.items():
+            for annotation in annotations:
+                if annotation.class_name == old_class:
+                    # Save old attributes
+                    old_attrs = annotation.attributes.copy()
+                    
+                    # Change class
+                    annotation.class_name = new_class
+                    annotation.color = self.canvas.class_colors[new_class]
+                    
+                    # Reset attributes to target class defaults
+                    self.update_annotation_attributes(annotation, self.canvas.class_attributes.get(new_class, {}))
+                    
+                    # Apply attribute mapping
+                    for old_attr, new_attr in attr_mapping.items():
+                        if old_attr in old_attrs and new_attr in annotation.attributes:
+                            annotation.attributes[new_attr] = old_attrs[old_attr]
+
+        self.statusBar.showMessage(
+            f"Converted all '{old_class}' annotations to '{new_class}' with attribute mapping"
+        )
 
 
     def refresh_class_ui(self):

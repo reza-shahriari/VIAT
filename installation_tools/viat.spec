@@ -18,6 +18,8 @@ a = Analysis(
         'cv2',
         'numpy',
         'xml.etree.ElementTree',
+        'xml',
+        'xml.dom',
         'json',
         'qtawesome',
         'qtawesome.iconic_font',
