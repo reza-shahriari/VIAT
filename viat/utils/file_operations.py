@@ -1196,10 +1196,164 @@ def import_pascal_voc_annotations(
 
     return annotations
 
+def import_raya_annotations(filename, bbox_class, class_colors=None):
+    """
+    Import annotations from Raya text format.
 
-def import_raya_yolo_annotations(
-    filename, image_width, image_height, bbox_class, class_colors=None
-):
+    Format: [class,x,y,width,height,size,quality,Difficult(optional)];
+    If no detection: []
+
+    Args:
+        filename (str): Path to the Raya text file
+        bbox_class (class): Class to use for bounding box objects
+        class_colors (dict, optional): Dictionary mapping class names to colors
+
+    Returns:
+        dict: Dictionary mapping frame numbers to lists of annotation objects
+    """
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+    import random
+
+    if class_colors is None:
+        class_colors = {}
+    
+    # Ensure "Quad" class has a color
+    if "Quad" not in class_colors:
+        class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
+    
+    frame_annotations = {}
+    
+    # Track unique class numbers to determine if we have a single class
+    unique_class_nums = set()
+    
+    try:
+        # First pass: scan the file to identify all unique class numbers
+        with open(filename, "r") as f:
+            lines = f.readlines()
+            
+        for line in lines:
+            line = line.strip()
+            # Skip empty frames or frames with no detections
+            if not line or line == "[]":
+                continue
+            if not ("[" in line and "]" in line):
+                continue
+            
+            start_idx = line.find("[")
+            end_idx = line.rfind("]")
+            if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
+                continue
+                
+            content = line[start_idx + 1 : end_idx]
+            annotations = content.split(";")
+
+            for annotation in annotations:
+                if not annotation.strip():
+                    continue
+                # Parse the annotation values
+                parts = annotation.split(",")
+                
+                # Ensure we have at least the minimum required fields
+                if len(parts) < 6:
+                    continue
+                    
+                try:
+                    # Remove any remaining brackets
+                    parts = [p.strip("[]") for p in parts]
+                    class_num = int(parts[0])
+                    unique_class_nums.add(class_num)
+                except (ValueError, IndexError):
+                    continue
+        
+        # Determine if we have a single class
+        single_class_file = len(unique_class_nums) == 1
+        
+        # Second pass: actually import the annotations
+        for frame_num, line in enumerate(lines):
+            frame_annots = []
+            line = line.strip()
+            # Skip empty frames or frames with no detections
+            if not line or line == "[]":
+                continue
+            if not ("[" in line and "]" in line):
+                continue
+            
+            start_idx = line.find("[")
+            end_idx = line.rfind("]")
+            if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
+                continue
+                
+            content = line[start_idx + 1 : end_idx]
+            annotations = content.split(";")
+
+            for annotation in annotations:
+                if not annotation.strip():
+                    continue
+                # Parse the annotation values
+                parts = annotation.split(",")
+
+                # Ensure we have at least the minimum required fields
+                if len(parts) < 6:
+                    continue
+                try:
+                    # Remove any remaining brackets
+                    parts = [p.strip("[]") for p in parts]
+
+                    class_num = int(parts[0]) 
+                    x = float(parts[1])
+                    y = float(parts[2])
+                    width = float(parts[3])
+                    height = float(parts[4])
+                    size = float(parts[5])
+                    quality = float(parts[6]) if len(parts) > 6 else 100.0
+                    Difficult = float(parts[7]) if len(parts) > 7 else 0.0
+
+                    # Create class name based on class ID and whether this is a single-class file
+                    if single_class_file:
+                        class_name = "Quad"  # Use Quad for single-class files
+                    else:
+                        class_name = "Quad" if class_num == 0 else f"class_{class_num}"
+                        
+                    # Create QRect
+                    rect = QRect(int(x), int(y), int(width), int(height))
+            
+                    # Get or create color for this class
+                    if class_name not in class_colors:
+                        class_colors[class_name] = QColor(
+                            random.randint(0, 255),
+                            random.randint(0, 255),
+                            random.randint(0, 255),
+                        )
+                    color = class_colors[class_name]
+
+                    # Create attributes dictionary
+                    attributes = {
+                        "Size": int(size),
+                        "Quality": int(quality),
+                    }
+                    if Difficult != 0.0:
+                        attributes["Difficult"] = int(Difficult)
+                    # Create bounding box
+                    bbox_obj = bbox_class(rect, class_name, attributes, color)
+                    frame_annots.append(bbox_obj)
+                except (ValueError, IndexError) as e:
+                    print(
+                        f"Error parsing Raya annotation: {annotation}. Error: {e}"
+                    )
+                    
+            if frame_annots:
+                frame_annotations[frame_num] = frame_annots
+                
+        return frame_annotations
+        
+    except Exception as e:
+        print(f"Error parsing Raya text file: {str(e)}")
+        raise Exception(f"Error parsing Raya text file: {str(e)}")
+
+
+
+def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class, class_colors=None):
     """
     Import annotations from Raya YOLO format.
 
@@ -1225,6 +1379,10 @@ def import_raya_yolo_annotations(
     """
     if class_colors is None:
         class_colors = {}
+        
+    # Ensure "Quad" class has a color
+    if "Quad" not in class_colors:
+        class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
 
     frame_annotations = {}
 
@@ -1278,32 +1436,24 @@ def import_raya_yolo_annotations(
                     width = x2 - x1
                     height = y2 - y1
 
-                    # Create class name based on class ID
-                    class_name = f"class_{class_id}"
+                    # Create class name - always use "Quad" for consistency
+                    class_name = "Quad"
 
                     # Create QRect (ensure coordinates are valid)
+                    if width <= 0 or height <= 0:
+                        continue
+                        
                     rect = QRect(int(x1), int(y1), int(width), int(height))
-
-                    # Get or create color for this class
-                    if class_name not in class_colors:
-                        class_colors[class_name] = QColor(
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                        )
-                    color = class_colors[class_name]
 
                     # Create attributes dictionary
                     attributes = {"Size": -1, "Quality": -1}
 
                     # Create bounding box
-                    bbox_obj = bbox_class(rect, class_name, attributes, color)
+                    bbox_obj = bbox_class(rect, class_name, attributes, class_colors[class_name])
                     frame_annotations_list.append(bbox_obj)
 
                 except (ValueError, IndexError) as e:
-                    print(
-                        f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}"
-                    )
+                    print(f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}")
 
             # Add to frame annotations
             if frame_annotations_list:
@@ -1313,7 +1463,6 @@ def import_raya_yolo_annotations(
         raise Exception(f"Error parsing Raya YOLO text file: {str(e)}")
 
     return frame_annotations
-
 
 def import_annotations(
     filename, bbox_class, image_width=640, image_height=480, class_colors=None
@@ -1405,472 +1554,6 @@ def import_annotations(
 
     return format_type, annotations, frame_annotations
 
-def import_raya_annotations(filename, bbox_class):
-    """
-    Import annotations from Raya text format.
-
-    Format: [class,x,y,width,height,size,quality,Difficult(optional)];
-    If no detection: []
-
-    Args:
-        filename (str): Path to the Raya text file
-        bbox_class (class): Class to use for bounding box objects
-
-    Returns:
-        dict: Dictionary mapping frame numbers to lists of annotation objects
-    """
-    frame_annotations = {}
-    
-    try:
-        with open(filename, "r") as f:
-            lines = f.readlines()
-
-        # Process each line (each line represents a frame)
-        for frame_num, line in enumerate(lines):
-            line = line.strip()
-            
-            # Skip empty frames or frames with no detections
-            if not line or line == "[]":
-                continue
-                
-            # More flexible parsing - look for any content between brackets
-            import re
-            # Find all patterns like [x,y,z,...] in the line
-            bracket_contents = re.findall(r'\[(.*?)\]', line)
-            
-            if not bracket_contents:
-                continue
-                
-            frame_annots = []
-            
-            for content in bracket_contents:
-                # Skip empty brackets
-                if not content.strip():
-                    continue
-                    
-                # Parse the annotation values
-                parts = content.split(',')
-                
-                # Ensure we have at least the minimum required fields
-                if len(parts) < 5:  # Need at least class,x,y,width,height
-                    continue
-                    
-                try:
-                    # Parse values - be more flexible with indices
-                    # Assuming format is [class,x,y,width,height,size,quality,Difficult]
-                    class_id = int(float(parts[0])) if parts[0].strip() else 0
-                    x = float(parts[1]) if len(parts) > 1 else 0
-                    y = float(parts[2]) if len(parts) > 2 else 0
-                    width = float(parts[3]) if len(parts) > 3 else 0
-                    height = float(parts[4]) if len(parts) > 4 else 0
-                    size = float(parts[5]) if len(parts) > 5 else -1
-                    quality = float(parts[6]) if len(parts) > 6 else 100.0
-                    Difficult = float(parts[7]) if len(parts) > 7 else 0.0
-                    
-                    # Always use "Quad" as the class name for Raya format
-                    class_name = "Quad"
-                    
-                    # Create QRect - ensure values are valid
-                    if width <= 0 or height <= 0:
-                        continue
-                        
-                    rect = QRect(int(x), int(y), int(width), int(height))
-                    
-                    # Create attributes dictionary
-                    attributes = {
-                        "Size": int(size),
-                        "Quality": int(quality),
-                    }
-                    
-                    if Difficult != 0.0:
-                        attributes["Difficult"] = int(Difficult)
-                        
-                    # Create bounding box with red color for Quad class
-                    bbox_obj = bbox_class(rect, class_name, attributes, QColor(255, 0, 0))
-                    frame_annots.append(bbox_obj)
-                    
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing Raya annotation: {content}. Error: {e}")
-                    continue
-            
-            # Add to frame annotations if we found any valid annotations
-            if frame_annots:
-                frame_annotations[frame_num] = frame_annots
-                
-        return frame_annotations
-        
-    except Exception as e:
-        print(f"Error parsing Raya text file: {str(e)}")
-        raise Exception(f"Error parsing Raya text file: {str(e)}")
-
-def import_annotations(filename, BoundingBox, image_width, image_height, class_colors):
-    """
-    Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
-    
-    Args:
-        filename (str): Path to the annotation file
-        BoundingBox: BoundingBox class for creating annotations
-        image_width (int): Default image width for scaling
-        image_height (int): Default image height for scaling
-        class_colors (dict): Dictionary of class colors
-        
-    Returns:
-        tuple: (format_type, annotations, frame_annotations)
-    """
-    from PyQt5.QtCore import QRect
-    from PyQt5.QtGui import QColor
-    import os
-    import json
-    import xml.etree.ElementTree as ET
-    import random
-    
-    # Initialize return values
-    format_type = "unknown"
-    annotations = []
-    frame_annotations = {}
-    
-    # Determine format based on file extension and content
-    file_ext = os.path.splitext(filename)[1].lower()
-    
-    if file_ext == '.json':
-        # Try to parse as JSON
-        with open(filename, 'r') as f:
-            data = json.load(f)
-        
-        # Check if it's a VIAT project file (skip if it is)
-        if "viat_project_identifier" in data:
-            return "VIAT Project", [], {}
-        
-        # Check if it's COCO format
-        if 'images' in data and 'annotations' in data and 'categories' in data:
-            format_type = "COCO JSON"
-            
-            # Create mapping from image ID to frame number
-            image_id_to_frame = {}
-            image_id_to_size = {}
-            image_id_to_filename = {}
-            for i, img in enumerate(data['images']):
-                image_id_to_frame[img['id']] = i
-                image_id_to_filename[img['id']] = img.get('file_name', '')
-                
-                # Store image dimensions for scaling
-                if 'width' in img and 'height' in img:
-                    image_width = img['width']
-                    image_height = img['height']
-            
-            # Create mapping from category ID to class name
-            category_id_to_name = {}
-            for cat in data['categories']:
-                category_id_to_name[cat['id']] = cat['name']
-                
-                # Add class color if not exists
-                if cat['name'] not in class_colors:
-                    class_colors[cat['name']] = QColor(
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                        random.randint(0, 255)
-                    )
-            
-            # Process annotations
-            for ann in data['annotations']:
-                image_id = ann['image_id']
-                category_id = ann['category_id']
-                bbox = ann['bbox']  # [x, y, width, height]
-                
-                # Skip if missing required data
-                if image_id not in image_id_to_frame or category_id not in category_id_to_name:
-                    continue
-                
-                # Get frame number and class name
-                frame_num = image_id_to_frame[image_id]
-                class_name = category_id_to_name[category_id]
-                
-                # Create bounding box
-                rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                color = class_colors[class_name]
-                
-                # Extract additional attributes if available
-                attributes = {"Size": -1, "Quality": -1}
-                for key, value in ann.items():
-                    if key not in ['id', 'image_id', 'category_id', 'bbox', 'area', 'segmentation', 'iscrowd']:
-                        attributes[key.capitalize()] = value
-                
-                # Create annotation object
-                annotation = BoundingBox(rect, class_name, attributes, color)
-                
-                # Add to frame annotations
-                if frame_num not in frame_annotations:
-                    frame_annotations[frame_num] = []
-                frame_annotations[frame_num].append(annotation)
-                
-                # Add to current frame annotations if this is the first frame
-                if frame_num == 0:
-                    annotations.append(annotation)
-    
-    elif file_ext == '.xml':
-        # Try to parse as Pascal VOC XML
-        format_type = "Pascal VOC XML"
-        
-        try:
-            tree = ET.parse(filename)
-            root = tree.getroot()
-            
-            # Get image filename
-            image_filename = root.find('filename').text if root.find('filename') is not None else ""
-            
-            # Get image dimensions
-            size_elem = root.find('size')
-            if size_elem is not None:
-                width_elem = size_elem.find('width')
-                height_elem = size_elem.find('height')
-                if width_elem is not None and height_elem is not None:
-                    image_width = int(width_elem.text)
-                    image_height = int(height_elem.text)
-            
-            # Process object elements
-            for obj in root.findall('object'):
-                name_elem = obj.find('name')
-                if name_elem is None:
-                    continue
-                
-                class_name = name_elem.text
-                
-                # Add class color if not exists
-                if class_name not in class_colors:
-                    class_colors[class_name] = QColor(
-                        random.randint(0, 255),
-                        random.randint(0, 255),
-                        random.randint(0, 255)
-                    )
-                
-                # Get bounding box
-                bbox = obj.find('bndbox')
-                if bbox is None:
-                    continue
-                
-                xmin = int(float(bbox.find('xmin').text))
-                ymin = int(float(bbox.find('ymin').text))
-                xmax = int(float(bbox.find('xmax').text))
-                ymax = int(float(bbox.find('ymax').text))
-                
-                # Create rectangle
-                rect = QRect(xmin, ymin, xmax - xmin, ymax - ymin)
-                
-                # Extract additional attributes if available
-                attributes = {"Size": -1, "Quality": -1}
-                for attr in obj.findall('./attribute'):
-                    name = attr.find('name')
-                    value = attr.find('value')
-                    if name is not None and value is not None:
-                        try:
-                            # Try to convert to int or float if possible
-                            val_text = value.text
-                            try:
-                                val = int(val_text)
-                            except ValueError:
-                                try:
-                                    val = float(val_text)
-                                except ValueError:
-                                    val = val_text
-                            attributes[name.text] = val
-                        except:
-                            pass
-                
-                # Create annotation
-                annotation = BoundingBox(rect, class_name, attributes, class_colors[class_name])
-                
-                # Add to annotations
-                annotations.append(annotation)
-                
-                # Add to frame annotations (assuming frame 0)
-                if 0 not in frame_annotations:
-                    frame_annotations[0] = []
-                frame_annotations[0].append(annotation)
-        except Exception as e:
-            print(f"Error parsing XML file: {str(e)}")
-    
-    elif file_ext == '.txt':
-        # Check if it's YOLO format or Raya format
-        with open(filename, 'r') as f:
-            first_line = f.readline().strip()
-        
-        if os.path.basename(filename) == 'classes.txt' or len(first_line.split()) == 5:
-            # YOLO format
-            format_type = "YOLO TXT"
-            
-            # If this is a classes.txt file, we need to find the label files
-            if os.path.basename(filename) == 'classes.txt':
-                # Read class names
-                with open(filename, 'r') as f:
-                    class_names = [line.strip() for line in f.readlines()]
-                
-                # Add class colors if not exist
-                for class_name in class_names:
-                    if class_name not in class_colors:
-                        class_colors[class_name] = QColor(
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                            random.randint(0, 255)
-                        )
-                
-                # Look for label files in the same directory
-                labels_dir = os.path.dirname(filename)
-                for label_file in os.listdir(labels_dir):
-                    if label_file.endswith('.txt') and label_file != 'classes.txt':
-                        try:
-                            # Parse annotations
-                            with open(os.path.join(labels_dir, label_file), 'r') as f:
-                                lines = f.readlines()
-                            
-                            # Get frame number from filename
-                            frame_num = int(os.path.splitext(label_file)[0])
-                            
-                            frame_anns = []
-                            for line in lines:
-                                parts = line.strip().split()
-                                if len(parts) >= 5:
-                                    class_idx = int(parts[0])
-                                    x_center = float(parts[1])
-                                    y_center = float(parts[2])
-                                    width = float(parts[3])
-                                    height = float(parts[4])
-                                    
-                                    # Convert to pixel coordinates
-                                    x = int((x_center - width/2) * image_width)
-                                    y = int((y_center - height/2) * image_height)
-                                    w = int(width * image_width)
-                                    h = int(height * image_height)
-                                    
-                                    # Get class name
-                                    if class_idx < len(class_names):
-                                        class_name = class_names[class_idx]
-                                    else:
-                                        class_name = f"class_{class_idx}"
-                                    
-                                    # Create bounding box
-                                    rect = QRect(x, y, w, h)
-                                    annotation = BoundingBox(rect, class_name, {"Size": -1, "Quality": -1}, class_colors[class_name])
-                                    
-                                    frame_anns.append(annotation)
-                            
-                            # Add to frame annotations
-                            if frame_anns:
-                                frame_annotations[frame_num] = frame_anns
-                                
-                                # Add to current frame annotations if this is the first frame
-                                if frame_num == 0:
-                                    annotations.extend(frame_anns)
-                        except Exception as e:
-                            print(f"Error parsing YOLO file {label_file}: {str(e)}")
-            else:
-                # This is a single YOLO format file
-                # We need class names - try to find classes.txt
-                classes_file = os.path.join(os.path.dirname(filename), 'classes.txt')
-                class_names = []
-                
-                if os.path.exists(classes_file):
-                    with open(classes_file, 'r') as f:
-                        class_names = [line.strip() for line in f.readlines()]
-                
-                # Parse annotations
-                with open(filename, 'r') as f:
-                    lines = f.readlines()
-                
-                for line in lines:
-                    parts = line.strip().split()
-                    if len(parts) >= 5:
-                        class_idx = int(parts[0])
-                        x_center = float(parts[1])
-                        y_center = float(parts[2])
-                        width = float(parts[3])
-                        height = float(parts[4])
-                        
-                        # Convert to pixel coordinates
-                        x = int((x_center - width/2) * image_width)
-                        y = int((y_center - height/2) * image_height)
-                        w = int(width * image_width)
-                        h = int(height * image_height)
-                        
-                        # Get class name
-                        if class_idx < len(class_names):
-                            class_name = class_names[class_idx]
-                        else:
-                            class_name = f"class_{class_idx}"
-                        
-                        # Add class color if not exists
-                        if class_name not in class_colors:
-                            class_colors[class_name] = QColor(
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                                random.randint(0, 255)
-                            )
-                        
-                        # Create bounding box
-                        rect = QRect(x, y, w, h)
-                        annotation = BoundingBox(rect, class_name, {"Size": -1, "Quality": -1}, class_colors[class_name])
-                        
-                        annotations.append(annotation)
-                
-                # Add to frame annotations (assuming frame 0)
-                if annotations:
-                    frame_annotations[0] = annotations
-        else:
-            # Assume Raya format
-            format_type = "Raya TXT"
-            
-            # Parse annotations
-            with open(filename, 'r') as f:
-                lines = f.readlines()
-            
-            for line in lines:
-                parts = line.strip().split(',')
-                if len(parts) >= 6:
-                    try:
-                        frame_num = int(parts[0])
-                        class_name = parts[1]
-                        x = int(float(parts[2]))
-                        y = int(float(parts[3]))
-                        w = int(float(parts[4]))
-                        h = int(float(parts[5]))
-                        
-                        # Add class color if not exists
-                        if class_name not in class_colors:
-                            class_colors[class_name] = QColor(
-                                random.randint(0, 255),
-                                random.randint(0, 255),
-                                random.randint(0, 255)
-                            )
-                        
-                        # Create bounding box
-                        rect = QRect(x, y, w, h)
-                        
-                        # Parse additional attributes if available
-                        attributes = {"Size": -1, "Quality": -1}
-                        if len(parts) > 6:
-                            try:
-                                attributes["Size"] = int(parts[6])
-                            except:
-                                pass
-                        if len(parts) > 7:
-                            try:
-                                attributes["Quality"] = int(parts[7])
-                            except:
-                                pass
-                        
-                        annotation = BoundingBox(rect, class_name, attributes, class_colors[class_name])
-                        
-                        # Add to frame annotations
-                        if frame_num not in frame_annotations:
-                            frame_annotations[frame_num] = []
-                        frame_annotations[frame_num].append(annotation)
-                        
-                        # Add to current frame annotations if this is the first frame
-                        if frame_num == 0:
-                            annotations.append(annotation)
-                    except Exception as e:
-                        print(f"Error parsing line in Raya format: {line} - {str(e)}")
-    
-    return format_type, annotations, frame_annotations
 
 def export_image_dataset_coco(
     filename, image_files, frame_annotations, class_colors, image_width, image_height
