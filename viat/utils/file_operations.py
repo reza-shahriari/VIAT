@@ -936,7 +936,7 @@ def export_standard_annotations(
 def import_coco_annotations(filename, bbox_class):
     """
     Import annotations from a COCO JSON file.
-
+    
     Args:
         filename (str): Path to the COCO JSON file
         bbox_class (class): Class to use for bounding box objects
@@ -1537,12 +1537,17 @@ def import_annotations(filename, BoundingBox, image_width, image_height, class_c
         with open(filename, 'r') as f:
             data = json.load(f)
         
+        # Check if it's a VIAT project file (skip if it is)
+        if "viat_project_identifier" in data:
+            return "VIAT Project", [], {}
+        
         # Check if it's COCO format
         if 'images' in data and 'annotations' in data and 'categories' in data:
             format_type = "COCO JSON"
             
             # Create mapping from image ID to frame number
             image_id_to_frame = {}
+            image_id_to_size = {}
             image_id_to_filename = {}
             for i, img in enumerate(data['images']):
                 image_id_to_frame[img['id']] = i

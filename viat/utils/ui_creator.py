@@ -93,7 +93,7 @@ class UICreator:
         # Import Annotations action
         import_action = QAction("Import Annotations", self.main_window)
         import_action.setShortcut("Ctrl+I")
-        import_action.triggered.connect(self.main_window.import_annotations)
+        import_action.triggered.connect(lambda: self.main_window.import_annotations(None))
         file_menu.addAction(import_action)
 
         # Export Annotations action

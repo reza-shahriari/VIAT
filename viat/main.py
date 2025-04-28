@@ -1885,13 +1885,26 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "class_selector") and self.class_selector.count() > 0:
                 self.class_selector.setCurrentText(first_class)
 
-    def import_annotations(self, filename):
+    def import_annotations(self, filename=None):
         """
         Import annotations from a file.
 
         Args:
-            filename (str): Path to the annotation file
+            filename (str, optional): Path to the annotation file. If None, a file dialog will be shown.
         """
+        # If no filename is provided, show a file dialog
+        if filename is None:
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Annotations",
+                "",
+                "All Files (*);;JSON Files (*.json);;Text Files (*.txt);;XML Files (*.xml)",
+            )
+            
+            # If user cancels the dialog, return
+            if not filename:
+                return
+
         # Check if it's a VIAT project file
         try:
             with open(filename, "r") as f:
@@ -1918,10 +1931,10 @@ class VideoAnnotationTool(QMainWindow):
 
         try:
             # Import annotations
-            from utils.file_operations import import_annotations
-
-            format_type, annotations, imported_frame_annotations = import_annotations(
-                filename, BoundingBox, image_width, image_height, self.class_colors
+            from utils.file_operations import import_annotations as import_annotations_func
+            
+            format_type, annotations, imported_frame_annotations = import_annotations_func(
+                filename, BoundingBox, image_width, image_height, self.canvas.class_colors
             )
 
             # Update frame annotations
