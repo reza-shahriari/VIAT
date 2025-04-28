@@ -4,136 +4,200 @@ import cv2
 import numpy as np
 from PyQt5.QtCore import QRect
 from PyQt5.QtGui import QColor
+import datetime
 
-def save_project(filename, annotations, class_colors, video_path=None, current_frame=0, 
-                frame_annotations=None, class_attributes=None, current_style=None,
-                auto_show_attribute_dialog=True, use_previous_attributes=True,
-                duplicate_frames_enabled=False, frame_hashes=None, duplicate_frames_cache=None):
-    """Save project to a JSON file."""
-    # Convert annotations to dictionaries
-    annotations_dict = [ann.to_dict() for ann in annotations]
-    
+def save_project(
+    filename,
+    annotations,
+    class_colors,
+    video_path=None,
+    current_frame=0,
+    frame_annotations=None,
+    class_attributes=None,
+    current_style=None,
+    auto_show_attribute_dialog=True,
+    use_previous_attributes=True,
+    duplicate_frames_enabled=False,
+    frame_hashes=None,
+    duplicate_frames_cache=None,
+    image_dataset_info=None,
+):
+    """
+    Save project to a JSON file.
+
+    Args:
+        filename (str): Path to save the project file
+        annotations (list): List of annotation objects
+        class_colors (dict): Dictionary mapping class names to colors
+        video_path (str, optional): Path to the video file
+        current_frame (int, optional): Current frame number
+        frame_annotations (dict, optional): Dictionary mapping frame numbers to annotations
+        class_attributes (dict, optional): Dictionary of class attribute configurations
+        current_style (str, optional): Current UI style
+        auto_show_attribute_dialog (bool, optional): Whether to show attribute dialog for new annotations
+        use_previous_attributes (bool, optional): Whether to use previous annotation attributes as default
+        duplicate_frames_enabled (bool, optional): Whether duplicate frame detection is enabled
+        frame_hashes (dict, optional): Dictionary mapping frame numbers to hash values
+        duplicate_frames_cache (dict, optional): Dictionary mapping hash values to lists of frame numbers
+        image_dataset_info (dict, optional): Information about image dataset if applicable
+    """
+    # Convert annotations to serializable format
+    serialized_annotations = []
+    for annotation in annotations:
+        serialized_annotations.append(annotation.to_dict())
+
     # Convert class colors to serializable format
-    colors_dict = {}
+    serialized_colors = {}
     for class_name, color in class_colors.items():
-        colors_dict[class_name] = {
-            "r": color.red(),
-            "g": color.green(),
-            "b": color.blue(),
-            "a": color.alpha()
-        }
-    
-    # Convert frame annotations to dictionaries
-    frame_annotations_dict = {}
+        serialized_colors[class_name] = [color.red(), color.green(), color.blue()]
+
+    # Convert frame annotations to serializable format
+    serialized_frame_annotations = {}
     if frame_annotations:
-        for frame_num, anns in frame_annotations.items():
-            frame_annotations_dict[str(frame_num)] = [ann.to_dict() for ann in anns]
-    
-    # Convert frame hashes to string keys for JSON serialization
-    frame_hashes_dict = {}
-    if frame_hashes:
-        for frame_num, hash_value in frame_hashes.items():
-            frame_hashes_dict[str(frame_num)] = hash_value
-    
-    # Convert duplicate frames cache to serializable format
-    duplicate_frames_dict = {}
-    if duplicate_frames_cache:
-        for hash_value, frame_list in duplicate_frames_cache.items():
-            duplicate_frames_dict[hash_value] = frame_list
-    
-    # Create project data
+        for frame_num, frame_anns in frame_annotations.items():
+            serialized_frame_annotations[str(frame_num)] = [
+                ann.to_dict() for ann in frame_anns
+            ]
+
+    # Create project data dictionary
     project_data = {
-        "viat_project_identifier": "VIAT_PROJECT_FILE_V1",
-        "annotations": annotations_dict,
-        "class_colors": colors_dict,
+        "viat_project_identifier": "VIAT_PROJECT_FILE",
+        "version": "1.0",
+        "annotations": serialized_annotations,
+        "class_colors": serialized_colors,
         "video_path": video_path,
         "current_frame": current_frame,
-        "frame_annotations": frame_annotations_dict,
+        "frame_annotations": serialized_frame_annotations,
         "class_attributes": class_attributes,
         "current_style": current_style,
         "auto_show_attribute_dialog": auto_show_attribute_dialog,
         "use_previous_attributes": use_previous_attributes,
         "duplicate_frames_enabled": duplicate_frames_enabled,
-        "frame_hashes": frame_hashes_dict,
-        "duplicate_frames_cache": duplicate_frames_dict
+        "timestamp": datetime.datetime.now().isoformat(),
     }
-    
+
+    # Add frame hashes if available
+    if frame_hashes:
+        # Convert frame numbers from int to str for JSON serialization
+        serialized_frame_hashes = {str(k): v for k, v in frame_hashes.items()}
+        project_data["frame_hashes"] = serialized_frame_hashes
+
+    # Add duplicate frames cache if available
+    if duplicate_frames_cache:
+        project_data["duplicate_frames_cache"] = duplicate_frames_cache
+        
+    # Add image dataset info if available
+    if image_dataset_info:
+        project_data["image_dataset_info"] = image_dataset_info
+
     # Save to file
     with open(filename, "w") as f:
         json.dump(project_data, f, indent=2)
 
+    # Update recent projects list
+    update_recent_projects(filename)
+
+
 def load_project(filename, bbox_class):
-    """Load project from a JSON file."""
+    """
+    Load project from a JSON file.
+
+    Args:
+        filename (str): Path to the project file
+        bbox_class (class): Class to use for bounding box objects
+
+    Returns:
+        tuple: (annotations, class_colors, video_path, current_frame, frame_annotations,
+                class_attributes, current_style, auto_show_attribute_dialog, use_previous_attributes,
+                duplicate_frames_enabled, frame_hashes, duplicate_frames_cache, image_dataset_info)
+    """
     with open(filename, "r") as f:
         project_data = json.load(f)
-    
+
+    # Check if this is a valid VIAT project file
+    if "viat_project_identifier" not in project_data:
+        raise ValueError("Not a valid VIAT project file")
+
     # Load annotations
     annotations = []
-    for ann_dict in project_data.get("annotations", []):
-        annotations.append(bbox_class.from_dict(ann_dict))
-    
+    for ann_data in project_data.get("annotations", []):
+        annotation = bbox_class.from_dict(ann_data)
+        annotations.append(annotation)
+
     # Load class colors
     class_colors = {}
-    for class_name, color_dict in project_data.get("class_colors", {}).items():
-        class_colors[class_name] = QColor(
-            color_dict.get("r", 0),
-            color_dict.get("g", 0),
-            color_dict.get("b", 0),
-            color_dict.get("a", 255)
-        )
-    
+    for class_name, color_values in project_data.get("class_colors", {}).items():
+        class_colors[class_name] = QColor(*color_values)
+
     # Load video path
     video_path = project_data.get("video_path")
-    
+
     # Load current frame
     current_frame = project_data.get("current_frame", 0)
-    
+
     # Load frame annotations
     frame_annotations = {}
-    for frame_num, anns_dict in project_data.get("frame_annotations", {}).items():
-        frame_annotations[int(frame_num)] = [bbox_class.from_dict(ann) for ann in anns_dict]
-    
+    for frame_num, frame_anns in project_data.get("frame_annotations", {}).items():
+        frame_annotations[int(frame_num)] = [
+            bbox_class.from_dict(ann_data) for ann_data in frame_anns]
     # Load class attributes
     class_attributes = project_data.get("class_attributes", {})
-    
-    # Load style
-    current_style = project_data.get("current_style", "Default")
-    
-    # Load annotation dialog settings
+
+    # Load UI style
+    current_style = project_data.get("current_style", "DarkModern")
+
+    # Load annotation settings
     auto_show_attribute_dialog = project_data.get("auto_show_attribute_dialog", True)
     use_previous_attributes = project_data.get("use_previous_attributes", True)
-    
+
     # Load duplicate frame detection settings
     duplicate_frames_enabled = project_data.get("duplicate_frames_enabled", False)
-    
+
     # Load frame hashes
     frame_hashes = {}
     for frame_num, hash_value in project_data.get("frame_hashes", {}).items():
         frame_hashes[int(frame_num)] = hash_value
-    
+
     # Load duplicate frames cache
     duplicate_frames_cache = project_data.get("duplicate_frames_cache", {})
     
-    return (annotations, class_colors, video_path, current_frame, 
-            frame_annotations, class_attributes, current_style,
-            auto_show_attribute_dialog, use_previous_attributes,
-            duplicate_frames_enabled, frame_hashes, duplicate_frames_cache)
+    # Load image dataset info
+    image_dataset_info = project_data.get("image_dataset_info", None)
+
+    # Update recent projects list
+    update_recent_projects(filename)
+
+    return (
+        annotations,
+        class_colors,
+        video_path,
+        current_frame,
+        frame_annotations,
+        class_attributes,
+        current_style,
+        auto_show_attribute_dialog,
+        use_previous_attributes,
+        duplicate_frames_enabled,
+        frame_hashes,
+        duplicate_frames_cache,
+        image_dataset_info,
+    )
 
 def get_recent_projects():
     """
     Get list of recent projects.
-    
+
     Returns:
         list: List of recent project file paths
     """
     config_dir = get_config_directory()
     recent_projects_file = os.path.join(config_dir, "recent_projects.json")
-    
+
     if os.path.exists(recent_projects_file):
         try:
-            with open(recent_projects_file, 'r') as f:
+            with open(recent_projects_file, "r") as f:
                 recent_projects = json.load(f)
-            
+
             # Filter out projects that no longer exist
             recent_projects = [p for p in recent_projects if os.path.exists(p)]
             return recent_projects
@@ -142,46 +206,48 @@ def get_recent_projects():
     else:
         return []
 
+
 def update_recent_projects(project_file, max_projects=10):
     """
     Update the list of recent projects.
-    
+
     Args:
         project_file (str): Path to the project file to add
         max_projects (int): Maximum number of recent projects to keep
     """
     config_dir = get_config_directory()
     recent_projects_file = os.path.join(config_dir, "recent_projects.json")
-    
+
     # Create config directory if it doesn't exist
     if not os.path.exists(config_dir):
         os.makedirs(config_dir)
-    
+
     # Load existing recent projects
     recent_projects = []
     if os.path.exists(recent_projects_file):
         try:
-            with open(recent_projects_file, 'r') as f:
+            with open(recent_projects_file, "r") as f:
                 recent_projects = json.load(f)
         except Exception:
             recent_projects = []
-    
+
     # Add current project to the top of the list
     if project_file in recent_projects:
         recent_projects.remove(project_file)
     recent_projects.insert(0, project_file)
-    
+
     # Limit to max_projects
     recent_projects = recent_projects[:max_projects]
-    
+
     # Save updated list
-    with open(recent_projects_file, 'w') as f:
+    with open(recent_projects_file, "w") as f:
         json.dump(recent_projects, f)
+
 
 def get_last_project():
     """
     Get the most recently used project.
-    
+
     Returns:
         str: Path to the most recent project file, or None if no recent projects
     """
@@ -190,57 +256,63 @@ def get_last_project():
         return recent_projects[0]
     return None
 
+
 def get_config_directory():
     """
     Get the configuration directory for the application.
-    
+
     Returns:
         str: Path to the configuration directory
     """
     # Use platform-specific config directory
-    if os.name == 'nt':  # Windows
-        config_dir = os.path.join(os.environ['APPDATA'], 'VideoAnnotationTool')
+    if os.name == "nt":  # Windows
+        config_dir = os.path.join(os.environ["APPDATA"], "VideoAnnotationTool")
     else:  # macOS, Linux, etc.
-        config_dir = os.path.join(os.path.expanduser('~'), '.config', 'VideoAnnotationTool')
-    
+        config_dir = os.path.join(
+            os.path.expanduser("~"), ".config", "VideoAnnotationTool"
+        )
+
     return config_dir
+
 
 def save_last_state(state_data):
     """
     Save the last application state.
-    
+
     Args:
         state_data (dict): Dictionary containing application state data
     """
     config_dir = get_config_directory()
     state_file = os.path.join(config_dir, "last_state.json")
-    
+
     # Create config directory if it doesn't exist
     if not os.path.exists(config_dir):
         os.makedirs(config_dir)
-    
+
     # Save state data
-    with open(state_file, 'w') as f:
+    with open(state_file, "w") as f:
         json.dump(state_data, f, indent=2)
+
 
 def load_last_state():
     """
     Load the last application state.
-    
+
     Returns:
         dict: Dictionary containing application state data, or None if no state file
     """
     config_dir = get_config_directory()
     state_file = os.path.join(config_dir, "last_state.json")
-    
+
     if os.path.exists(state_file):
         try:
-            with open(state_file, 'r') as f:
+            with open(state_file, "r") as f:
                 return json.load(f)
         except Exception:
             return None
     else:
         return None
+
 
 def export_annotations(
     filename, annotations, image_width, image_height, format_type="coco"
@@ -509,14 +581,12 @@ def export_raya_annotations(filename, annotations):
                 Difficult = annotation.attributes.get("Difficult", -1)
 
                 # Format the annotation with a semicolon after each one
-                if Difficult==-1:
+                if Difficult == -1:
                     frame_str += (
                         f"[{class_id},{x},{y},{width},{height},{size},{quality}];"
                     )
                 else:
-                    frame_str += (
-                        f"[{class_id},{x},{y},{width},{height},{size},{quality},{Difficult}];"
-                    )
+                    frame_str += f"[{class_id},{x},{y},{width},{height},{size},{quality},{Difficult}];"
 
             lines[frame_num] = frame_str
 

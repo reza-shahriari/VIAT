@@ -1,10 +1,18 @@
-from PyQt5.QtWidgets import QToolBar, QLabel, QComboBox, QPushButton, QSlider, QAction,QToolButton
+from PyQt5.QtWidgets import (
+    QToolBar,
+    QLabel,
+    QComboBox,
+    QPushButton,
+    QSlider,
+    QAction,
+    QToolButton,
+)
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
 
 class AnnotationToolbar(QToolBar):
-    def __init__(self, main_window,icon_provider):
+    def __init__(self, main_window, icon_provider):
         super().__init__("Annotation Toolbar")
         self.main_window = main_window
         self.icon_provider = icon_provider
@@ -62,7 +70,7 @@ class AnnotationToolbar(QToolBar):
         self.add_button.setToolTip("Add Annotation (A)")
         self.add_button.clicked.connect(self.add_class)
         self.addWidget(self.add_button)
-        
+
         # Edit button
 
         self.edit_button = QToolButton()
@@ -181,5 +189,5 @@ class AnnotationToolbar(QToolBar):
     def refresh_icons(self):
         """Refresh all icons in the toolbar to match the current theme."""
         for action in self.actions():
-            if hasattr(action, 'icon_name') and action.icon_name:
+            if hasattr(action, "icon_name") and action.icon_name:
                 action.setIcon(self.icon_provider.get_icon(action.icon_name))

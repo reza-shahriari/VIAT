@@ -8,7 +8,6 @@ import os
 class StyleManager:
     """Manages application styles and themes using both palette and stylesheets."""
 
-
     @staticmethod
     def set_fusion_style():
         """Set the Fusion style."""
@@ -55,13 +54,19 @@ class StyleManager:
         dark_palette.setColor(QPalette.Mid, QColor(60, 60, 60))
         dark_palette.setColor(QPalette.Dark, QColor(30, 30, 30))
         dark_palette.setColor(QPalette.Shadow, QColor(20, 20, 20))
-        
+
         # Set disabled colors explicitly
-        dark_palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor(127, 127, 127))
+        dark_palette.setColor(
+            QPalette.Disabled, QPalette.WindowText, QColor(127, 127, 127)
+        )
         dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
-        dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+        dark_palette.setColor(
+            QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127)
+        )
         dark_palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor(80, 80, 80))
-        dark_palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor(127, 127, 127))
+        dark_palette.setColor(
+            QPalette.Disabled, QPalette.HighlightedText, QColor(127, 127, 127)
+        )
 
         QApplication.setPalette(dark_palette)
 
@@ -220,7 +225,7 @@ class StyleManager:
             border: 1px solid #555555;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
 
@@ -244,13 +249,21 @@ class StyleManager:
         light_palette.setColor(QPalette.Link, QColor(0, 100, 200))
         light_palette.setColor(QPalette.Highlight, QColor(0, 120, 215))
         light_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
-        
+
         # Set disabled colors explicitly
-        light_palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor(120, 120, 120))
+        light_palette.setColor(
+            QPalette.Disabled, QPalette.WindowText, QColor(120, 120, 120)
+        )
         light_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(120, 120, 120))
-        light_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(120, 120, 120))
-        light_palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor(200, 200, 200))
-        light_palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor(120, 120, 120))
+        light_palette.setColor(
+            QPalette.Disabled, QPalette.ButtonText, QColor(120, 120, 120)
+        )
+        light_palette.setColor(
+            QPalette.Disabled, QPalette.Highlight, QColor(200, 200, 200)
+        )
+        light_palette.setColor(
+            QPalette.Disabled, QPalette.HighlightedText, QColor(120, 120, 120)
+        )
 
         QApplication.setPalette(light_palette)
 
@@ -415,7 +428,7 @@ class StyleManager:
             border: 1px solid #c0c0c0;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
 
@@ -441,7 +454,7 @@ class StyleManager:
         blue_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
 
         QApplication.setPalette(blue_palette)
-        
+
         # Apply comprehensive stylesheet for blue theme
         stylesheet = """
         /* Global styles */
@@ -566,7 +579,7 @@ class StyleManager:
             border: 1px solid #a0c0e0;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
 
@@ -592,7 +605,7 @@ class StyleManager:
         green_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
 
         QApplication.setPalette(green_palette)
-        
+
         # Apply comprehensive stylesheet for green theme
         stylesheet = """
         /* Global styles */
@@ -689,7 +702,7 @@ class StyleManager:
             border: 1px solid #a0d8b8;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
 
@@ -700,18 +713,28 @@ class StyleManager:
 
         # Sunset palette with warm oranges and purples
         sunset_palette = QPalette()
-        sunset_palette.setColor(QPalette.Window, QColor(45, 20, 44))  # Deep purple background
-        sunset_palette.setColor(QPalette.WindowText, QColor(255, 222, 173))  # Warm text color
-        sunset_palette.setColor(QPalette.Base, QColor(66, 30, 66))  # Slightly lighter purple
+        sunset_palette.setColor(
+            QPalette.Window, QColor(45, 20, 44)
+        )  # Deep purple background
+        sunset_palette.setColor(
+            QPalette.WindowText, QColor(255, 222, 173)
+        )  # Warm text color
+        sunset_palette.setColor(
+            QPalette.Base, QColor(66, 30, 66)
+        )  # Slightly lighter purple
         sunset_palette.setColor(QPalette.AlternateBase, QColor(55, 25, 55))
         sunset_palette.setColor(QPalette.ToolTipBase, QColor(45, 20, 44))
         sunset_palette.setColor(QPalette.ToolTipText, QColor(255, 222, 173))
         sunset_palette.setColor(QPalette.Text, QColor(255, 222, 173))  # Warm text
         sunset_palette.setColor(QPalette.Button, QColor(66, 30, 66))
         sunset_palette.setColor(QPalette.ButtonText, QColor(255, 222, 173))
-        sunset_palette.setColor(QPalette.BrightText, QColor(255, 132, 0))  # Bright orange
+        sunset_palette.setColor(
+            QPalette.BrightText, QColor(255, 132, 0)
+        )  # Bright orange
         sunset_palette.setColor(QPalette.Link, QColor(255, 165, 0))  # Orange
-        sunset_palette.setColor(QPalette.Highlight, QColor(255, 140, 0))  # Dark orange highlight
+        sunset_palette.setColor(
+            QPalette.Highlight, QColor(255, 140, 0)
+        )  # Dark orange highlight
         sunset_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
         sunset_palette.setColor(QPalette.Light, QColor(90, 45, 90))
         sunset_palette.setColor(QPalette.Midlight, QColor(80, 40, 80))
@@ -720,7 +743,7 @@ class StyleManager:
         sunset_palette.setColor(QPalette.Shadow, QColor(30, 15, 30))
 
         QApplication.setPalette(sunset_palette)
-        
+
         # Apply comprehensive stylesheet for sunset theme
         stylesheet = """
         /* Global styles */
@@ -844,10 +867,10 @@ class StyleManager:
             border: 1px solid #5a2d5a;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
-    
+
     @staticmethod
     def set_darkmodern_style():
         """Set a refined modern dark theme with subtle accents and improved readability."""
@@ -855,46 +878,72 @@ class StyleManager:
 
         # Modern dark palette with carefully selected colors
         dark_modern = QPalette()
-        
+
         # Main colors - using a slightly blue-tinted dark gray for sophistication
-        dark_modern.setColor(QPalette.Window, QColor(22, 25, 29))  # Slightly blue-tinted dark background
-        dark_modern.setColor(QPalette.WindowText, QColor(237, 240, 242))  # Off-white text for reduced eye strain
-        dark_modern.setColor(QPalette.Base, QColor(15, 17, 20))  # Darker area for content
-        dark_modern.setColor(QPalette.AlternateBase, QColor(30, 33, 39))  # Slightly lighter for alternating rows
-        
+        dark_modern.setColor(
+            QPalette.Window, QColor(22, 25, 29)
+        )  # Slightly blue-tinted dark background
+        dark_modern.setColor(
+            QPalette.WindowText, QColor(237, 240, 242)
+        )  # Off-white text for reduced eye strain
+        dark_modern.setColor(
+            QPalette.Base, QColor(15, 17, 20)
+        )  # Darker area for content
+        dark_modern.setColor(
+            QPalette.AlternateBase, QColor(30, 33, 39)
+        )  # Slightly lighter for alternating rows
+
         # Interactive elements
-        dark_modern.setColor(QPalette.Button, QColor(44, 49, 58))  # Slightly blue-tinted buttons
-        dark_modern.setColor(QPalette.ButtonText, QColor(237, 240, 242))  # Off-white button text
-        dark_modern.setColor(QPalette.BrightText, QColor(255, 128, 128))  # Soft red for attention
-        
+        dark_modern.setColor(
+            QPalette.Button, QColor(44, 49, 58)
+        )  # Slightly blue-tinted buttons
+        dark_modern.setColor(
+            QPalette.ButtonText, QColor(237, 240, 242)
+        )  # Off-white button text
+        dark_modern.setColor(
+            QPalette.BrightText, QColor(255, 128, 128)
+        )  # Soft red for attention
+
         # Accent colors - using a teal/cyan accent for modern feel
         dark_modern.setColor(QPalette.Link, QColor(102, 195, 204))  # Teal links
         dark_modern.setColor(QPalette.Highlight, QColor(61, 174, 183))  # Teal highlight
-        dark_modern.setColor(QPalette.HighlightedText, QColor(255, 255, 255))  # Pure white on highlight
-        
+        dark_modern.setColor(
+            QPalette.HighlightedText, QColor(255, 255, 255)
+        )  # Pure white on highlight
+
         # Tooltip
-        dark_modern.setColor(QPalette.ToolTipBase, QColor(44, 49, 58))  # Dark tooltip background
-        dark_modern.setColor(QPalette.ToolTipText, QColor(237, 240, 242))  # Light tooltip text
-        
+        dark_modern.setColor(
+            QPalette.ToolTipBase, QColor(44, 49, 58)
+        )  # Dark tooltip background
+        dark_modern.setColor(
+            QPalette.ToolTipText, QColor(237, 240, 242)
+        )  # Light tooltip text
+
         # Text
         dark_modern.setColor(QPalette.Text, QColor(237, 240, 242))  # Off-white text
-        
+
         # Gradients and shadows for depth
         dark_modern.setColor(QPalette.Light, QColor(55, 60, 70))
         dark_modern.setColor(QPalette.Midlight, QColor(45, 50, 60))
         dark_modern.setColor(QPalette.Mid, QColor(35, 40, 50))
         dark_modern.setColor(QPalette.Dark, QColor(18, 20, 24))
         dark_modern.setColor(QPalette.Shadow, QColor(10, 11, 13))
-        
+
         # Disabled state - subtle but still visible
-        dark_modern.setColor(QPalette.Disabled, QPalette.WindowText, QColor(128, 131, 136))
+        dark_modern.setColor(
+            QPalette.Disabled, QPalette.WindowText, QColor(128, 131, 136)
+        )
         dark_modern.setColor(QPalette.Disabled, QPalette.Text, QColor(128, 131, 136))
-        dark_modern.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(128, 131, 136))
+        dark_modern.setColor(
+            QPalette.Disabled, QPalette.ButtonText, QColor(128, 131, 136)
+        )
         dark_modern.setColor(QPalette.Disabled, QPalette.Highlight, QColor(40, 45, 52))
-        dark_modern.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor(128, 131, 136))
+        dark_modern.setColor(
+            QPalette.Disabled, QPalette.HighlightedText, QColor(128, 131, 136)
+        )
 
         QApplication.setPalette(dark_modern)
-        
+
         # Apply comprehensive stylesheet for dark modern theme
         stylesheet = """
         /* Global styles */
@@ -1066,15 +1115,23 @@ class StyleManager:
             color: #ffffff;
         }
         """
-        
+
         QApplication.instance().setStyleSheet(stylesheet)
         return True
 
     @classmethod
     def get_available_styles(cls):
         """Get a list of all available styles."""
-        return [ "Fusion", "Windows", "Dark", 
-                "Light", "Blue", "Green", "Sunset", "DarkModern"]
+        return [
+            "Fusion",
+            "Windows",
+            "Dark",
+            "Light",
+            "Blue",
+            "Green",
+            "Sunset",
+            "DarkModern",
+        ]
 
     @classmethod
     def apply_style(cls, style_name):
@@ -1083,7 +1140,7 @@ class StyleManager:
         app = QApplication.instance()
         if app:
             app.setStyleSheet("")
-            
+
         style_method = getattr(cls, f"set_{style_name.lower()}_style", None)
 
         if style_method is None:

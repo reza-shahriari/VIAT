@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 
-
 class ClassDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Classes", parent)
@@ -74,14 +73,14 @@ class ClassDock(QDockWidget):
     def on_class_selected(self, item):
         """Handle selection of a class"""
         class_name = item.text()
-        
+
         # Update attribute info
         self.update_attribute_info(class_name)
-        
+
         # Set as current class in canvas
         if hasattr(self.main_window, "canvas"):
             self.main_window.canvas.set_current_class(class_name)
-            
+
         # Update class selector in toolbar if it exists
         if hasattr(self.main_window, "class_selector"):
             self.main_window.class_selector.setCurrentText(class_name)
@@ -91,28 +90,28 @@ class ClassDock(QDockWidget):
         if not hasattr(self.main_window.canvas, "class_attributes"):
             self.attribute_info.setText("No attribute information available")
             return
-            
+
         attributes = self.main_window.canvas.class_attributes.get(class_name, {})
-        
+
         if not attributes:
             self.attribute_info.setText("No attributes defined for this class")
             return
-            
+
         info_text = ""
         for attr_name, attr_config in attributes.items():
             attr_type = attr_config.get("type", "string")
             default_val = attr_config.get("default", "")
-            
+
             info_text += f"<b>{attr_name}</b> ({attr_type})<br>"
             info_text += f"Default: {default_val}<br>"
-            
+
             if attr_type in ["int", "float"]:
                 min_val = attr_config.get("min", "")
                 max_val = attr_config.get("max", "")
                 info_text += f"Range: {min_val} to {max_val}<br>"
-                
+
             info_text += "<br>"
-            
+
         self.attribute_info.setHtml(info_text)
 
     def add_class(self):

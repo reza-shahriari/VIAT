@@ -22,8 +22,9 @@ from PyQt5.QtCore import Qt, QRect, QPoint
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
 import sys
 import os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-  
+
 from .annotation import BoundingBox
 import random
 
@@ -54,7 +55,7 @@ class VideoCanvas(QWidget):
         self.start_point = None
         self.current_point = None
         self.selected_annotation = None
-        self.current_class = "Quad" 
+        self.current_class = "Quad"
         self.class_colors = {
             "Quad": QColor(0, 255, 255),
         }
@@ -165,31 +166,33 @@ class VideoCanvas(QWidget):
                 font = painter.font()
                 font.setPointSize(8)
                 painter.setFont(font)
-                
+
                 # Standard text height for all labels
                 text_height = 16
-                
+
                 # Determine if we should draw the class label above or below the box
                 # Check if there's more space above than below
                 space_above = display_rect.top()
                 space_below = self.height() - display_rect.bottom()
                 draw_above = space_above >= space_below
-                
+
                 # Calculate class label width and position
-                text_width = min(max(60, display_rect.width()), 120)  # Min 60px, max 120px
-                
+                text_width = min(
+                    max(60, display_rect.width()), 120
+                )  # Min 60px, max 120px
+
                 # Position the class label centered horizontally with the box
                 text_x = display_rect.left() + (display_rect.width() - text_width) / 2
-                
+
                 if draw_above:
                     # Draw above the box with a small gap
                     text_y = max(0, display_rect.top() - text_height - 2)
                 else:
                     # Draw below the box with a small gap
                     text_y = min(self.height() - text_height, display_rect.bottom() + 2)
-                    
+
                 text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
-                
+
                 # Draw class label with semi-transparent background
                 painter.fillRect(
                     text_rect,
@@ -200,40 +203,40 @@ class VideoCanvas(QWidget):
                         180,
                     ),
                 )
-                
+
                 painter.setPen(QPen(QColor(0, 0, 0)))
                 painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
-                
+
                 # Draw attributes to the right of the box if there's space, otherwise to the left
                 if annotation.attributes:
                     attr_text = ""
                     for key, value in annotation.attributes.items():
                         attr_text += f"{key}:{value} "
                     attr_text = attr_text.strip()
-                    
+
                     if attr_text:
                         attr_width = min(80, max(60, len(attr_text) * 6))
-                        
+
                         # Check if there's enough space to the right
                         space_right = self.width() - display_rect.right()
-                        
+
                         if space_right >= attr_width + 5:
                             # Draw to the right
                             attr_x = display_rect.right() + 5
                         else:
                             # Draw to the left
                             attr_x = max(0, display_rect.left() - attr_width - 5)
-                        
+
                         # Vertically center with the box
                         attr_y = display_rect.center().y() - text_height // 2
-                        
+
                         attr_rect = QRect(
                             int(attr_x),
                             int(attr_y),
                             attr_width,
                             text_height,
                         )
-                        
+
                         painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
                         painter.setPen(QPen(QColor(255, 255, 255)))
                         painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
@@ -319,7 +322,6 @@ class VideoCanvas(QWidget):
                         handle_size,
                     )
                 )
-
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
@@ -524,7 +526,11 @@ class VideoCanvas(QWidget):
             return
 
         if event.button() == Qt.LeftButton:
-            if self.main_window and hasattr(self.main_window, "is_playing") and self.main_window.is_playing:
+            if (
+                self.main_window
+                and hasattr(self.main_window, "is_playing")
+                and self.main_window.is_playing
+            ):
                 self.main_window.play_pause_video()
             # Convert to image coordinates
             img_pos = self.display_to_image_pos(event.pos())
@@ -546,16 +552,22 @@ class VideoCanvas(QWidget):
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
                     color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
-                    
+
                     # Get default attributes
                     default_attributes = {"Size": -1, "Quality": -1}
-                    
+
                     # Check if we should use attributes from previous annotations
-                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
-                        prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
+                    if self.main_window and hasattr(
+                        self.main_window, "get_previous_annotation_attributes"
+                    ):
+                        prev_attributes = (
+                            self.main_window.get_previous_annotation_attributes(
+                                self.current_class
+                            )
+                        )
                         if prev_attributes:
                             default_attributes = prev_attributes
-                    
+
                     bbox = BoundingBox(
                         rect, self.current_class, default_attributes, color
                     )
@@ -565,7 +577,11 @@ class VideoCanvas(QWidget):
                     self.selected_annotation = bbox
 
                     # Show attribute dialog if enabled
-                    if self.main_window and hasattr(self.main_window, "auto_show_attribute_dialog") and self.main_window.auto_show_attribute_dialog:
+                    if (
+                        self.main_window
+                        and hasattr(self.main_window, "auto_show_attribute_dialog")
+                        and self.main_window.auto_show_attribute_dialog
+                    ):
                         self.main_window.edit_annotation(bbox, focus_first_field=True)
 
                     # Update the annotation list in the main window
@@ -585,24 +601,27 @@ class VideoCanvas(QWidget):
                 self.current_point = None
                 self.update()
                 return
-                
+
             # Check if we're in two-click mode and need to set the first point
-            if self.annotation_method == "TwoClick" and self.two_click_first_point is None:
+            if (
+                self.annotation_method == "TwoClick"
+                and self.two_click_first_point is None
+            ):
                 self.two_click_first_point = img_pos
                 self.setCursor(Qt.CrossCursor)
                 self.update()
                 return
-                
+
             # Check if we're clicking on an existing annotation
             annotation = self.find_annotation_at_pos(event.pos())
             if annotation:
                 # Select the annotation
                 self.selected_annotation = annotation
-                
+
                 # Check if we're clicking on an edge
                 display_rect = self.image_to_display_rect(annotation.rect)
                 edge = self.detect_edge(display_rect, event.pos())
-                
+
                 if edge != EDGE_NONE:
                     # Start edge movement
                     self.edge_moving = True
@@ -613,10 +632,10 @@ class VideoCanvas(QWidget):
                     # Start dragging the annotation
                     self.drag_start_pos = img_pos
                     self.original_rect = QRect(annotation.rect)
-                    
+
                 self.update()
                 return
-            
+
             # If we're not interacting with an existing annotation and in Drag mode, start drawing a new one
             if self.annotation_method == "Drag":
                 self.is_drawing = True
@@ -625,7 +644,6 @@ class VideoCanvas(QWidget):
                 self.selected_annotation = None
                 self.update()
                 return
-
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
@@ -809,16 +827,22 @@ class VideoCanvas(QWidget):
                 if rect.width() > 5 and rect.height() > 5:
                     # Create a new bounding box annotation
                     color = self.class_colors.get(self.current_class, QColor(255, 0, 0))
-                    
+
                     # Get default attributes
                     default_attributes = {"Size": -1, "Quality": -1}
-                    
+
                     # Check if we should use attributes from previous annotations
-                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
-                        prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
+                    if self.main_window and hasattr(
+                        self.main_window, "get_previous_annotation_attributes"
+                    ):
+                        prev_attributes = (
+                            self.main_window.get_previous_annotation_attributes(
+                                self.current_class
+                            )
+                        )
                         if prev_attributes:
                             default_attributes = prev_attributes
-                    
+
                     bbox = BoundingBox(
                         rect, self.current_class, default_attributes, color
                     )
@@ -828,9 +852,13 @@ class VideoCanvas(QWidget):
                     self.selected_annotation = bbox
 
                     # Show attribute dialog if enabled
-                    if self.main_window and hasattr(self.main_window, "auto_show_attribute_dialog") and self.main_window.auto_show_attribute_dialog:
+                    if (
+                        self.main_window
+                        and hasattr(self.main_window, "auto_show_attribute_dialog")
+                        and self.main_window.auto_show_attribute_dialog
+                    ):
                         self.main_window.edit_annotation(bbox, focus_first_field=True)
-                    
+
                     # Update the annotation list in the main window
                     if self.main_window:
                         self.main_window.update_annotation_list()
@@ -923,29 +951,45 @@ class VideoCanvas(QWidget):
         elif self.selected_annotation:
             # Move annotation with WASD keys
             if event.key() == Qt.Key_W:  # Move up
-                self.selected_annotation.rect.moveTop(self.selected_annotation.rect.top() - 1)
+                self.selected_annotation.rect.moveTop(
+                    self.selected_annotation.rect.top() - 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_A:  # Move left
-                self.selected_annotation.rect.moveLeft(self.selected_annotation.rect.left() - 1)
+                self.selected_annotation.rect.moveLeft(
+                    self.selected_annotation.rect.left() - 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_S:  # Move down
-                self.selected_annotation.rect.moveTop(self.selected_annotation.rect.top() + 1)
+                self.selected_annotation.rect.moveTop(
+                    self.selected_annotation.rect.top() + 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_D:  # Move right
-                self.selected_annotation.rect.moveLeft(self.selected_annotation.rect.left() + 1)
+                self.selected_annotation.rect.moveLeft(
+                    self.selected_annotation.rect.left() + 1
+                )
                 self.update_annotation_after_edit()
             # Resize annotation with 8456 keys (numpad or regular)
             elif event.key() == Qt.Key_8:  # Move top edge up
-                self.selected_annotation.rect.setTop(self.selected_annotation.rect.top() - 1)
+                self.selected_annotation.rect.setTop(
+                    self.selected_annotation.rect.top() - 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_4:  # Move left edge left
-                self.selected_annotation.rect.setLeft(self.selected_annotation.rect.left() - 1)
+                self.selected_annotation.rect.setLeft(
+                    self.selected_annotation.rect.left() - 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_5:  # Move bottom edge down
-                self.selected_annotation.rect.setBottom(self.selected_annotation.rect.bottom() - 1)
+                self.selected_annotation.rect.setBottom(
+                    self.selected_annotation.rect.bottom() - 1
+                )
                 self.update_annotation_after_edit()
             elif event.key() == Qt.Key_6:  # Move right edge right
-                self.selected_annotation.rect.setRight(self.selected_annotation.rect.right() - 1)
+                self.selected_annotation.rect.setRight(
+                    self.selected_annotation.rect.right() - 1
+                )
                 self.update_annotation_after_edit()
             else:
                 super().keyPressEvent(event)
@@ -956,19 +1000,18 @@ class VideoCanvas(QWidget):
         """Update UI after annotation has been edited"""
         # Normalize the rectangle to ensure it has positive width and height
         self.selected_annotation.rect = self.selected_annotation.rect.normalized()
-        
+
         # Update the canvas
         self.update()
-        
+
         # Update the annotation list in the main window
         if self.main_window:
             self.main_window.update_annotation_list()
             # Save annotations to current frame
             if hasattr(self.main_window, "frame_annotations"):
-                self.main_window.frame_annotations[
-                    self.main_window.current_frame
-                ] = self.annotations.copy()
-
+                self.main_window.frame_annotations[self.main_window.current_frame] = (
+                    self.annotations.copy()
+                )
 
     def set_zoom(self, zoom_level):
         """Set the zoom level and update the display"""

@@ -25,14 +25,13 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QRadioButton,
     QProgressBar,
-    QApplication
+    QApplication,
 )
 from PyQt5.QtCore import Qt, QRect
-from PyQt5.QtGui import QColor,QIntValidator,QDoubleValidator
+from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator
 
 
 from PyQt5.QtCore import Qt, QRect
-
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -41,6 +40,7 @@ class SelectAllLineEdit(QLineEdit):
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         self.selectAll()
+
 
 class AnnotationItemWidget(QWidget):
     def __init__(self, annotation, parent=None):
@@ -68,22 +68,26 @@ class AnnotationItemWidget(QWidget):
 
         # Get class attribute configuration if available
         class_attributes = {}
-        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window.canvas, "class_attributes"):
-            class_attributes = self.parent_dock.main_window.canvas.class_attributes.get(self.annotation.class_name, {})
+        if hasattr(self.parent_dock, "main_window") and hasattr(
+            self.parent_dock.main_window.canvas, "class_attributes"
+        ):
+            class_attributes = self.parent_dock.main_window.canvas.class_attributes.get(
+                self.annotation.class_name, {}
+            )
 
         # First, collect all attribute names from both class definition and annotation
         all_attributes = set(self.annotation.attributes.keys())
-        
+
         # Add all attributes defined for this class
         if class_attributes:
             all_attributes.update(class_attributes.keys())
-        
+
         # Add all attributes from the annotation and class definition
         row = 0
         for attr_name in sorted(all_attributes):
             # Get current attribute value (default to None if not present)
             attr_value = self.annotation.attributes.get(attr_name, None)
-            
+
             # If attribute doesn't exist in annotation but exists in class definition,
             # initialize it with the default value from class definition
             if attr_value is None and attr_name in class_attributes:
@@ -91,18 +95,18 @@ class AnnotationItemWidget(QWidget):
                 attr_value = attr_config.get("default", None)
                 # Add the attribute to the annotation
                 self.annotation.attributes[attr_name] = attr_value
-            
+
             # Skip if we still don't have a value
             if attr_value is None:
                 continue
-                
+
             attr_label = QLabel(f"{attr_name}:")
-            
+
             # Get attribute type from class configuration or infer from value
             attr_type = "string"
             attr_min = None
             attr_max = None
-            
+
             if attr_name in class_attributes:
                 attr_config = class_attributes[attr_name]
                 attr_type = attr_config.get("type", "string")
@@ -114,43 +118,51 @@ class AnnotationItemWidget(QWidget):
                 attr_type = "float"
             elif isinstance(attr_value, bool):
                 attr_type = "boolean"
-            
+
             # Create appropriate input widget based on type
             if attr_type == "boolean":
                 input_widget = QComboBox()
                 input_widget.addItems(["False", "True"])
                 input_widget.setCurrentText(str(bool(attr_value)))
                 input_widget.currentTextChanged.connect(
-                    lambda value, name=attr_name: self.update_boolean_attribute(name, value)
+                    lambda value, name=attr_name: self.update_boolean_attribute(
+                        name, value
+                    )
                 )
             elif attr_type in ["int", "float"]:
                 input_widget = SelectAllLineEdit()
                 input_widget.setText(str(attr_value))
                 input_widget.setPlaceholderText("0")
-                
+
                 # Set validator based on min/max if available
                 if attr_min is not None and attr_max is not None:
                     if attr_type == "int":
                         input_widget.setValidator(QIntValidator(attr_min, attr_max))
                     else:
-                        input_widget.setValidator(QDoubleValidator(attr_min, attr_max, 2))
-                
+                        input_widget.setValidator(
+                            QDoubleValidator(attr_min, attr_max, 2)
+                        )
+
                 input_widget.textChanged.connect(
-                    lambda text, name=attr_name, type=attr_type: self.update_numeric_attribute(name, text, type)
+                    lambda text, name=attr_name, type=attr_type: self.update_numeric_attribute(
+                        name, text, type
+                    )
                 )
             else:  # string or default
                 input_widget = SelectAllLineEdit()
                 input_widget.setText(str(attr_value))
                 input_widget.textChanged.connect(
-                    lambda text, name=attr_name: self.update_string_attribute(name, text)
+                    lambda text, name=attr_name: self.update_string_attribute(
+                        name, text
+                    )
                 )
-            
+
             attributes_layout.addWidget(attr_label, row, 0)
             attributes_layout.addWidget(input_widget, row, 1)
-            
+
             # Store reference to input widget
             self.attribute_inputs[attr_name] = input_widget
-            
+
             row += 1
 
         layout.addLayout(attributes_layout)
@@ -167,40 +179,48 @@ class AnnotationItemWidget(QWidget):
             # Handle empty text
             self.annotation.attributes[name] = 0
             return
-            
+
         try:
             if attr_type == "int":
                 value = int(text)
             else:  # float
                 value = float(text)
-            
+
             self.annotation.attributes[name] = value
-            
+
             # Update canvas if needed
-            if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+            if hasattr(self.parent_dock, "main_window") and hasattr(
+                self.parent_dock.main_window, "canvas"
+            ):
                 self.parent_dock.main_window.canvas.update()
         except ValueError:
             # Invalid numeric input, revert to previous value
             if name in self.attribute_inputs:
                 current_value = self.annotation.attributes.get(name, 0)
                 self.attribute_inputs[name].setText(str(current_value))
-    
+
     def update_boolean_attribute(self, name, value):
         """Update a boolean attribute value"""
         bool_value = value == "True"
         self.annotation.attributes[name] = bool_value
-        
+
         # Update canvas if needed
-        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+        if hasattr(self.parent_dock, "main_window") and hasattr(
+            self.parent_dock.main_window, "canvas"
+        ):
             self.parent_dock.main_window.canvas.update()
-    
+
     def update_string_attribute(self, name, text):
         """Update a string attribute value"""
         self.annotation.attributes[name] = text
-        
+
         # Update canvas if needed
-        if hasattr(self.parent_dock, "main_window") and hasattr(self.parent_dock.main_window, "canvas"):
+        if hasattr(self.parent_dock, "main_window") and hasattr(
+            self.parent_dock.main_window, "canvas"
+        ):
             self.parent_dock.main_window.canvas.update()
+
+
 class AnnotationDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("Annotations", parent)
@@ -333,51 +353,53 @@ class AnnotationDock(QDockWidget):
         """Show dialog for batch editing annotations across frames."""
         # Create dialog
         dialog = self.create_batch_edit_dialog()
-        
+
         # Add frame range selection
         range_group = QGroupBox("Frame Range")
         range_layout = QFormLayout(range_group)
-        
+
         start_spin = QSpinBox()
         start_spin.setRange(0, self.main_window.total_frames - 1)
         start_spin.setValue(self.main_window.current_frame)
-        
+
         end_spin = QSpinBox()
         end_spin.setRange(0, self.main_window.total_frames - 1)
-        end_spin.setValue(min(self.main_window.current_frame + 10, self.main_window.total_frames - 1))
-        
+        end_spin.setValue(
+            min(self.main_window.current_frame + 10, self.main_window.total_frames - 1)
+        )
+
         range_layout.addRow("Start Frame:", start_spin)
         range_layout.addRow("End Frame:", end_spin)
-        
+
         # Add to dialog layout
         dialog.layout().insertWidget(0, range_group)
-        
+
         # Add propagation options
         prop_group = QGroupBox("Propagation Options")
         prop_layout = QVBoxLayout(prop_group)
-        
+
         all_frames_radio = QRadioButton("Apply to all frames in range")
         all_frames_radio.setChecked(True)
-        
+
         duplicate_frames_radio = QRadioButton("Apply only to duplicate frames")
         duplicate_frames_radio.setEnabled(self.main_window.duplicate_frames_enabled)
-        
+
         similar_frames_radio = QRadioButton("Apply to similar frames (experimental)")
         similar_frames_radio.setEnabled(False)  # Not implemented yet
-        
+
         prop_layout.addWidget(all_frames_radio)
         prop_layout.addWidget(duplicate_frames_radio)
         prop_layout.addWidget(similar_frames_radio)
-        
+
         # Add to dialog layout
         dialog.layout().insertWidget(1, prop_group)
-        
+
         # Show dialog
         if dialog.exec_() == QDialog.Accepted:
             # Get frame range
             start_frame = start_spin.value()
             end_frame = end_spin.value()
-            
+
             # Get propagation mode
             if duplicate_frames_radio.isChecked():
                 prop_mode = "duplicate"
@@ -385,7 +407,7 @@ class AnnotationDock(QDockWidget):
                 prop_mode = "similar"
             else:
                 prop_mode = "all"
-            
+
             # Get attribute values from dialog
             attribute_values = {}
             for attr_name, widget in dialog.attribute_widgets.items():
@@ -398,7 +420,7 @@ class AnnotationDock(QDockWidget):
                         attribute_values[attr_name] = widget.value()
                     else:
                         attribute_values[attr_name] = widget.text()
-            
+
             # Apply batch edit
             self.apply_batch_edit(start_frame, end_frame, attribute_values, prop_mode)
 
@@ -519,10 +541,12 @@ class AnnotationDock(QDockWidget):
                 current_frame
             ].copy()
 
-    def apply_batch_edit(self, start_frame, end_frame, attribute_values, prop_mode="all"):
+    def apply_batch_edit(
+        self, start_frame, end_frame, attribute_values, prop_mode="all"
+    ):
         """
         Apply batch edit to annotations across frames.
-        
+
         Args:
             start_frame (int): Start frame number
             end_frame (int): End frame number
@@ -531,77 +555,80 @@ class AnnotationDock(QDockWidget):
         """
         if start_frame > end_frame:
             start_frame, end_frame = end_frame, start_frame
-        
+
         # Create progress dialog
         progress = QDialog(self)
         progress.setWindowTitle("Applying Batch Edit")
         progress.setFixedSize(300, 100)
         progress_layout = QVBoxLayout(progress)
-        
+
         label = QLabel(f"Updating annotations in frames {start_frame}-{end_frame}...")
         progress_layout.addWidget(label)
-        
+
         progress_bar = QProgressBar()
         progress_bar.setRange(start_frame, end_frame)
         progress_layout.addWidget(progress_bar)
-        
+
         # Non-blocking progress dialog
         progress.setModal(False)
         progress.show()
         QApplication.processEvents()
-        
+
         # Track processed frames for duplicate mode
         processed_hashes = set()
         update_count = 0
-        
+
         # Apply edits to each frame
         for frame_num in range(start_frame, end_frame + 1):
             # Update progress
             progress_bar.setValue(frame_num)
             if frame_num % 5 == 0:  # Update UI every 5 frames
                 QApplication.processEvents()
-            
+
             # Skip frames without annotations
             if frame_num not in self.main_window.frame_annotations:
                 continue
-            
+
             # For duplicate mode, check if this is a duplicate frame
             if prop_mode == "duplicate":
                 if frame_num not in self.main_window.frame_hashes:
                     continue
-                    
+
                 frame_hash = self.main_window.frame_hashes[frame_num]
-                
+
                 # Skip if we've already processed a frame with this hash
                 if frame_hash in processed_hashes:
                     continue
-                    
+
                 # Skip if this isn't a duplicate frame
-                if frame_hash not in self.main_window.duplicate_frames_cache or \
-                len(self.main_window.duplicate_frames_cache[frame_hash]) <= 1:
+                if (
+                    frame_hash not in self.main_window.duplicate_frames_cache
+                    or len(self.main_window.duplicate_frames_cache[frame_hash]) <= 1
+                ):
                     continue
-                    
+
                 processed_hashes.add(frame_hash)
-            
+
             # Update annotations in this frame
             for annotation in self.main_window.frame_annotations[frame_num]:
                 # Update attributes
                 for attr_name, attr_value in attribute_values.items():
                     annotation.attributes[attr_name] = attr_value
-                
+
                 update_count += 1
-            
+
             # If this is the current frame, update the canvas
             if frame_num == self.main_window.current_frame:
                 self.main_window.canvas.update()
                 self.update_annotation_list()
-        
+
         # Close progress dialog
         progress.close()
-        
+
         self.main_window.statusBar.showMessage(
-            f"Updated {update_count} annotations across {end_frame - start_frame + 1} frames", 5000
+            f"Updated {update_count} annotations across {end_frame - start_frame + 1} frames",
+            5000,
         )
-        
+
         # Mark project as modified
         self.main_window.project_modified = True
