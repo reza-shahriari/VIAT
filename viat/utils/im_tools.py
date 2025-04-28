@@ -17,7 +17,7 @@ def calculate_frame_hash(frame):
     else:
         gray = frame
     # Resize to 8x8
-    small = cv2.resize(gray, (8, 8), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(gray, (250,250), interpolation=cv2.INTER_AREA)
     avg = small.mean()
     hash_bits = (small > avg).flatten()
     # Convert bits to hex string

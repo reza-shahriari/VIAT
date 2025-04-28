@@ -549,12 +549,41 @@ class VideoCanvas(QWidget):
             if not img_pos:
                 return
 
+            # First, check if we're clicking on an existing annotation
+            annotation = self.find_annotation_at_pos(event.pos())
+            
+            # If we found an annotation, handle selection and dragging
+            if annotation:
+                # Select the annotation
+                self.selected_annotation = annotation
+                
+                # Check if we're clicking on an edge
+                display_rect = self.image_to_display_rect(annotation.rect)
+                edge = self.detect_edge(display_rect, event.pos())
+                
+                if edge != EDGE_NONE:
+                    # Start edge movement
+                    self.edge_moving = True
+                    self.active_edge = edge
+                    self.edge_start_pos = event.pos()
+                    self.original_rect = QRect(annotation.rect)
+                else:
+                    # Start dragging the annotation
+                    self.drag_start_pos = img_pos
+                    self.original_rect = QRect(annotation.rect)
+                
+                # Reset two-click state if we're selecting an annotation
+                self.two_click_first_point = None
+                self.update()
+                return
+
+            # If we're not clicking on an existing annotation, proceed with two-click logic
             # Check if we're in two-click mode and already have the first point
             if (
                 self.annotation_method == "TwoClick"
                 and self.two_click_first_point is not None
             ):
-                # Second click - create the bounding box regardless of what's under the cursor
+                # Second click - create the bounding box
                 self.current_point = img_pos
 
                 # Create a rectangle from the two points
@@ -621,30 +650,6 @@ class VideoCanvas(QWidget):
             ):
                 self.two_click_first_point = img_pos
                 self.setCursor(Qt.CrossCursor)
-                self.update()
-                return
-
-            # Check if we're clicking on an existing annotation
-            annotation = self.find_annotation_at_pos(event.pos())
-            if annotation:
-                # Select the annotation
-                self.selected_annotation = annotation
-
-                # Check if we're clicking on an edge
-                display_rect = self.image_to_display_rect(annotation.rect)
-                edge = self.detect_edge(display_rect, event.pos())
-
-                if edge != EDGE_NONE:
-                    # Start edge movement
-                    self.edge_moving = True
-                    self.active_edge = edge
-                    self.edge_start_pos = event.pos()
-                    self.original_rect = QRect(annotation.rect)
-                else:
-                    # Start dragging the annotation
-                    self.drag_start_pos = img_pos
-                    self.original_rect = QRect(annotation.rect)
-
                 self.update()
                 return
 
