@@ -27,11 +27,11 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QApplication,
 )
-from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtCore import Qt, QRect,QTimer
 from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator
 
 
-from PyQt5.QtCore import Qt, QRect
+
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -236,7 +236,8 @@ class AnnotationDock(QDockWidget):
         # Class selector
         class_label = QLabel("Class:")
         self.class_selector = QComboBox()
-        self.update_class_selector()
+        # Defer the update to ensure canvas is ready
+        QTimer.singleShot(100, self.update_class_selector)
         self.class_selector.currentTextChanged.connect(self.on_class_selected)
 
         # Annotation list
@@ -275,6 +276,104 @@ class AnnotationDock(QDockWidget):
         # Set the widget as the dock's widget
         self.setWidget(widget)
 
+    def update_class_selector(self):
+        """Update the class selector with available classes"""
+        # Store the current selection before clearing
+        current_text = self.class_selector.currentText()
+        
+        # Clear the selector
+        self.class_selector.clear()
+        
+        # Debug print to check what's happening
+        print("Updating annotation dock class selector")
+        
+        if hasattr(self.main_window, 'canvas'):
+            if hasattr(self.main_window.canvas, 'class_colors') and self.main_window.canvas.class_colors:
+                class_colors = self.main_window.canvas.class_colors
+                print(f"Class colors: {class_colors.keys()}")
+                
+                # Use a list to maintain order and prevent duplicates
+                class_list = list(dict.fromkeys(class_colors.keys()))
+                self.class_selector.addItems(class_list)
+                
+                # Restore previous selection if it exists
+                if current_text and self.class_selector.findText(current_text) >= 0:
+                    self.class_selector.setCurrentText(current_text)
+                # Otherwise select the current class if it exists
+                elif hasattr(self.main_window.canvas, 'current_class'):
+                    current_class = self.main_window.canvas.current_class
+                    if current_class:
+                        index = self.class_selector.findText(current_class)
+                        if index >= 0:
+                            self.class_selector.setCurrentIndex(index)
+                            print(f"Selected current class: {current_class}")
+            else:
+                print("No class colors found in canvas")
+
+
+    def on_class_selected(self, class_name):
+        """Handle selection of a class"""
+        if class_name and hasattr(self.main_window, "canvas"):
+            print(f"Class selected in annotation dock: {class_name}")
+            # Block signals to prevent recursive calls
+            self.main_window.canvas.blockSignals(True)
+            self.main_window.canvas.set_current_class(class_name)
+            self.main_window.canvas.blockSignals(False)
+            
+            # Update the canvas
+            self.main_window.canvas.update()
+            
+            # Update class selector in class dock if it exists
+            if hasattr(self.main_window, "class_dock") and hasattr(self.main_window.class_dock, "classes_list"):
+                items = self.main_window.class_dock.classes_list.findItems(class_name, Qt.MatchExactly)
+                if items:
+                    self.main_window.class_dock.classes_list.setCurrentItem(items[0])
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        # Class selector
+        class_label = QLabel("Class:")
+        self.class_selector = QComboBox()
+        self.update_class_selector()
+        self.class_selector.currentTextChanged.connect(self.on_class_selected)
+
+        # Annotation list
+        annotations_label = QLabel("Annotations:")
+        self.annotations_list = QListWidget()
+        self.annotations_list.setSelectionMode(QListWidget.SingleSelection)
+        self.annotations_list.itemClicked.connect(self.on_annotation_selected)
+        self.annotations_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.annotations_list.customContextMenuRequested.connect(self.show_context_menu)
+
+        # Set a reasonable height for list items to accommodate the custom widgets
+        self.annotations_list.setStyleSheet("QListWidget::item { min-height: 80px; }")
+
+        # Annotation controls
+        controls_layout = QHBoxLayout()
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self.add_annotation)
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(self.delete_selected_annotation)
+
+        # Add batch edit button
+        batch_edit_btn = QPushButton("Batch Edit")
+        batch_edit_btn.clicked.connect(self.batch_edit_annotations)
+        controls_layout.addWidget(batch_edit_btn)
+
+        controls_layout.addWidget(add_btn)
+        controls_layout.addWidget(delete_btn)
+
+        # Add widgets to layout
+        layout.addWidget(class_label)
+        layout.addWidget(self.class_selector)
+        layout.addWidget(annotations_label)
+        layout.addWidget(self.annotations_list)
+        layout.addLayout(controls_layout)
+
+        # Set the widget as the dock's widget
+        self.setWidget(widget)
+        self.update_annotation_list()
+
     def update_annotation_list(self):
         """Update the annotation list with current frame's annotations."""
         self.annotations_list.clear()
@@ -302,17 +401,6 @@ class AnnotationDock(QDockWidget):
             annotation = widget.annotation
             # Select this annotation on the canvas
             self.main_window.canvas.select_annotation(annotation)
-
-    def update_class_selector(self):
-        """Update the class selector with available classes"""
-        self.class_selector.clear()
-        if hasattr(self.main_window, "canvas"):
-            self.class_selector.addItems(self.main_window.canvas.class_colors.keys())
-
-    def on_class_selected(self, class_name):
-        """Handle selection of a class"""
-        if class_name and hasattr(self.main_window, "canvas"):
-            self.main_window.canvas.set_current_class(class_name)
 
     def add_annotation(self):
         """Add a new annotation with the current class"""

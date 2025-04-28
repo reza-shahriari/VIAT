@@ -124,7 +124,7 @@ class VideoAnnotationTool(QMainWindow):
         self.frame_hashes = {}  # Maps frame number to its hash
         self.styles = {}
         self.icon_provider = IconProvider()
-
+        self._class_refresh_scheduled = False
         for style_name in StyleManager.get_available_styles():
             method_name = f"set_{style_name.lower().replace(' ', '_')}_style"
             if hasattr(StyleManager, method_name):
@@ -1046,9 +1046,25 @@ class VideoAnnotationTool(QMainWindow):
 
                 # Update UI
                 self.update_settings_menu_actions()
+                
+                # IMPORTANT: Force update of class lists in docks
+                print("Updating class lists after project load")
+                print(f"Available classes: {list(self.canvas.class_colors.keys())}")
+                
+                # Update class dock
+                if hasattr(self, "class_dock"):
+                    self.class_dock.update_class_list()
+                    
+                # Update annotation dock
+                if hasattr(self, "annotation_dock"):
+                    self.annotation_dock.update_class_selector()
+                
+                # Update toolbar class selector
+                if hasattr(self, "toolbar") and hasattr(self.toolbar, "update_class_selector"):
+                    self.toolbar.update_class_selector()
+                
+                # Update annotation list
                 self.update_annotation_list()
-                self.toolbar.update_class_selector()
-                self.class_dock.update_class_list()
 
                 self.project_file = filename
                 self.project_modified = False
@@ -2051,15 +2067,21 @@ class VideoAnnotationTool(QMainWindow):
             if not hasattr(self.canvas, "class_attributes"):
                 self.canvas.class_attributes = {}
             self.canvas.class_attributes[class_name] = attributes_config
-
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.update_class_selector()
             # Update UI
             self.toolbar.update_class_selector()
             self.class_dock.update_class_list()
+            self.refresh_class_lists()
 
             # Set as current class
             self.canvas.set_current_class(class_name)
-            self.class_selector.setCurrentText(class_name)
-
+            
+            # Update the class selector in the toolbar directly
+            if hasattr(self, "class_selector"):
+                self.class_selector.blockSignals(True)
+                self.class_selector.setCurrentText(class_name)
+                self.class_selector.blockSignals(False)
     def update_annotation_attributes(self, annotation, attributes_config):
         """Update annotation attributes based on class attribute configuration."""
         # Create a new attributes dictionary with defaults from the configuration
@@ -2119,6 +2141,30 @@ class VideoAnnotationTool(QMainWindow):
 
         # Update the annotation's attributes
         annotation.attributes = new_attributes
+   
+    def refresh_class_lists(self):
+        """Refresh class lists in all docks with debouncing"""
+        # If a refresh is already scheduled, don't schedule another one
+        if self._class_refresh_scheduled:
+            return
+            
+        # Set the flag to indicate a refresh is scheduled
+        self._class_refresh_scheduled = True
+        
+        # Define the actual refresh function
+        def do_refresh():
+            print("Refreshing class lists")
+            if hasattr(self, "class_dock"):
+                self.class_dock.update_class_list()
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.update_class_selector()
+            if hasattr(self, "toolbar") and hasattr(self.toolbar, "update_class_selector"):
+                self.toolbar.update_class_selector()
+            # Reset the flag
+            self._class_refresh_scheduled = False
+        
+        # Schedule the refresh after a short delay
+        QTimer.singleShot(100, do_refresh)
 
     def edit_selected_class(self):
         """Edit the selected class with custom attributes."""

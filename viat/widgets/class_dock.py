@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QTextEdit,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt,QTimer
 
 
 class ClassDock(QDockWidget):
@@ -30,6 +30,9 @@ class ClassDock(QDockWidget):
         self.classes_list.itemClicked.connect(self.on_class_selected)
         self.classes_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.classes_list.customContextMenuRequested.connect(self.show_context_menu)
+        
+        # Make sure the list widget has a minimum height to be visible
+        self.classes_list.setMinimumHeight(100)
 
         # Class controls
         controls_layout = QHBoxLayout()
@@ -60,15 +63,49 @@ class ClassDock(QDockWidget):
         # Set the widget as the dock's widget
         self.setWidget(widget)
 
-        # Update the class list
-        self.update_class_list()
+        # Update the class list - defer this to ensure canvas is ready
+        QTimer.singleShot(100, self.update_class_list)
+
 
     def update_class_list(self):
         """Update the class list with available classes"""
+        # Store the currently selected class name before clearing
+        current_selected = None
+        if self.classes_list.currentItem():
+            current_selected = self.classes_list.currentItem().text()
+        
+        # Clear the list
         self.classes_list.clear()
-        if hasattr(self.main_window, "canvas"):
-            for class_name in self.main_window.canvas.class_colors.keys():
-                self.classes_list.addItem(class_name)
+        
+        # Debug print to check what's happening
+        print("Updating class list in ClassDock")
+        
+        if hasattr(self.main_window, 'canvas'):
+            if hasattr(self.main_window.canvas, 'class_colors'):
+                class_colors = self.main_window.canvas.class_colors
+                print(f"Found {len(class_colors)} classes: {list(class_colors.keys())}")
+                
+                # Use a set to track added classes to prevent duplicates
+                added_classes = set()
+                
+                for class_name in class_colors.keys():
+                    if class_name not in added_classes:
+                        self.classes_list.addItem(class_name)
+                        added_classes.add(class_name)
+                
+                # Restore selection or select current class
+                if current_selected and self.classes_list.findItems(current_selected, Qt.MatchExactly):
+                    items = self.classes_list.findItems(current_selected, Qt.MatchExactly)
+                    self.classes_list.setCurrentItem(items[0])
+                elif hasattr(self.main_window.canvas, 'current_class'):
+                    current_class = self.main_window.canvas.current_class
+                    if current_class:
+                        items = self.classes_list.findItems(current_class, Qt.MatchExactly)
+                        if items:
+                            self.classes_list.setCurrentItem(items[0])
+
+
+
 
     def on_class_selected(self, item):
         """Handle selection of a class"""
@@ -80,10 +117,21 @@ class ClassDock(QDockWidget):
         # Set as current class in canvas
         if hasattr(self.main_window, "canvas"):
             self.main_window.canvas.set_current_class(class_name)
+            # Force update of the canvas
+            self.main_window.canvas.update()
 
         # Update class selector in toolbar if it exists
         if hasattr(self.main_window, "class_selector"):
+            # Block signals temporarily to prevent recursive calls
+            self.main_window.class_selector.blockSignals(True)
             self.main_window.class_selector.setCurrentText(class_name)
+            self.main_window.class_selector.blockSignals(False)
+            
+        # Mark the project as modified
+        if hasattr(self.main_window, "project_modified"):
+            self.main_window.project_modified = True
+
+
 
     def update_attribute_info(self, class_name):
         """Update the attribute info text edit with class attribute details"""

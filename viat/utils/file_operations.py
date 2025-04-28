@@ -1532,7 +1532,7 @@ def import_annotations(
         frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
 
     elif format_type == "Raya":
-        frame_annotations = import_raya_annotations(filename, bbox_class)
+        frame_annotations = import_raya_annotations(filename, bbox_class,class_colors)
         # Raya format already uses "Quad" class by default
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
