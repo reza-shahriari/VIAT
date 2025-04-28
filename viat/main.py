@@ -46,6 +46,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .canvas import VideoCanvas
 from .annotation import BoundingBox
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
+from utils.dataset_manager import import_dataset_dialog, load_dataset
+from utils.dataset_manager import export_dataset_dialog, export_dataset
+
+
 import numpy as np
 import json
 from utils import (
@@ -349,7 +353,7 @@ class VideoAnnotationTool(QMainWindow):
         add_class_action = QAction("Add Class", self)
         add_class_action.triggered.connect(self.add_class)
         edit_menu.addAction(add_class_action)
-
+    
     def create_tools_menu(self, menubar):
         """Create the Tools menu and its actions."""
         tools_menu = menubar.addMenu("Tools")
@@ -369,6 +373,15 @@ class VideoAnnotationTool(QMainWindow):
         smart_edge_action.setShortcut("Ctrl+E")
         smart_edge_action.triggered.connect(self.toggle_smart_edge)
         tools_menu.addAction(smart_edge_action)
+
+        # Add separator
+        tools_menu.addSeparator()
+
+        # Create Dataset action (for image datasets)
+        create_dataset_action = QAction("Create Dataset...", self)
+        create_dataset_action.setToolTip("Create a new dataset from the current annotations")
+        create_dataset_action.triggered.connect(self.create_dataset)
+        tools_menu.addAction(create_dataset_action)
 
         # Add separator
         tools_menu.addSeparator()
@@ -3084,63 +3097,126 @@ class VideoAnnotationTool(QMainWindow):
                 action.setChecked(self.use_previous_attributes)
 
     def open_image_folder(self):
-        """Open a folder of images as a dataset."""
+        """Open a folder of images."""
         folder_path = QFileDialog.getExistingDirectory(
             self, "Open Image Folder", "", QFileDialog.ShowDirsOnly
         )
 
         if not folder_path:
             return
+            
+        # Import the dataset manager
+        from utils.dataset_manager import detect_folder_type
+        
+        # Detect if this is a simple folder or a dataset
+        folder_type = detect_folder_type(folder_path)
+        
+        if folder_type == "dataset":
+            # Handle as a dataset
+            self.open_image_dataset(folder_path)
+        else:
+            # Handle as a simple image folder
+            self.open_simple_image_folder(folder_path)
 
-        # Ask if user wants to scan subfolders
-        reply = QMessageBox.question(
-            self,
-            "Scan Subfolders",
-            "Do you want to include images from subfolders?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        recursive = reply == QMessageBox.Yes
-        
-        # Find image files
+    def open_simple_image_folder(self, folder_path):
+        """Open a simple folder of images."""
+        # Reset existing state
+        self.reset_media_state()
+
+        # Get all image files in the folder
         image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
         image_files = []
-        
-        if recursive:
-            for root, _, files in os.walk(folder_path):
-                for file in files:
-                    if any(file.lower().endswith(ext) for ext in image_extensions):
-                        image_files.append(os.path.join(root, file))
-        else:
-            for file in os.listdir(folder_path):
-                if any(file.lower().endswith(ext) for ext in image_extensions):
-                    image_files.append(os.path.join(folder_path, file))
+
+        for file in os.listdir(folder_path):
+            if any(file.lower().endswith(ext) for ext in image_extensions):
+                image_files.append(os.path.join(folder_path, file))
 
         if not image_files:
             QMessageBox.warning(
-                self,
-                "Open Image Folder",
-                "No image files found in the selected folder!",
+                self, "Open Image Folder", "No image files found in the selected folder!"
             )
             return
 
-        # Sort the image files to ensure consistent ordering
+        # Sort image files for consistent ordering
         image_files.sort()
 
-        # Store the image files and set up the "video" interface
+        # Set up the image dataset interface
+        self.image_files = image_files
+        self.total_frames = len(image_files)
+        self.current_frame = 0
+        self.is_image_dataset = True
+
+        # Load the first image
+        self.load_current_image()
+
+        # Update UI
+        self.frame_slider.setMaximum(self.total_frames - 1)
+        self.update_frame_info()
+
+        # Update window title
+        folder_name = os.path.basename(folder_path)
+        self.setWindowTitle(f"Video Annotation Tool - Image Folder: {folder_name}")
+
+        # Enable play button for image datasets
+        if hasattr(self, "play_button"):
+            self.play_button.setEnabled(True)
+            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
+
+        # Set up auto-save for this dataset
+        self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
+
+        # Start auto-save timer
+        if self.autosave_enabled and not self.autosave_timer.isActive():
+            self.autosave_timer.start(self.autosave_interval)
+
+        # Check for annotation files
+        self.check_for_image_annotation_files(folder_path, folder_name)
+
+    def open_image_dataset(self, folder_path=None):
+        """Open an image dataset with advanced options."""
+        if folder_path is None:
+            folder_path = QFileDialog.getExistingDirectory(
+                self, "Open Image Dataset", "", QFileDialog.ShowDirsOnly
+            )
+
+        if not folder_path:
+            return
+       
+        # Show import dialog
+        config = import_dataset_dialog(self, folder_path)
+        
+        if not config:
+            return  # User cancelled
+        
+        # Reset existing state
+        self.reset_media_state()
+        
+        # Load the dataset
+        image_files, success_message = load_dataset(
+            self, 
+            config, 
+            self.frame_annotations, 
+            self.canvas.class_colors,
+            BoundingBox
+        )
+        
+        if not image_files:
+            QMessageBox.warning(
+                self,
+                "Open Image Dataset",
+                "No image files found in the selected dataset!"
+            )
+            return
+        
+        # Set up the image dataset interface
         self.image_files = image_files
         self.total_frames = len(image_files)
         self.current_frame = 0
         self.is_image_dataset = True
         
-        # Clear any existing annotations
-        self.frame_annotations = {}
-        self.canvas.annotations = []
-
         # Load the first image
         self.load_current_image()
-
+        
         # Update UI
         self.frame_slider.setMaximum(self.total_frames - 1)
         self.update_frame_info()
@@ -3155,34 +3231,19 @@ class VideoAnnotationTool(QMainWindow):
             self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
         
         # Set up auto-save for this dataset
-        folder_name = os.path.basename(folder_path)
         self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
         
         # Start auto-save timer
         if self.autosave_enabled and not self.autosave_timer.isActive():
             self.autosave_timer.start(self.autosave_interval)
         
-        # Check if we need to scan for duplicate frames
-        if self.duplicate_frames_enabled:
-            # Ask if user wants to scan for duplicates
-            reply = QMessageBox.question(
-                self,
-                "Duplicate Image Detection",
-                "Would you like to scan this dataset for duplicate images?\n"
-                "(This will help automatically propagate annotations)",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-
-            if reply == QMessageBox.Yes:
-                QTimer.singleShot(500, self.scan_images_for_duplicates)
+        # Update UI
+        self.update_annotation_list()
+        self.toolbar.update_class_selector()
+        self.class_dock.update_class_list()
         
-        # Check for existing annotation files
-        self.check_for_image_annotation_files(folder_path, folder_name)
-        
-        self.statusBar.showMessage(
-            f"Loaded {len(image_files)} images from {folder_name}"
-        )
+        # Show success message
+        self.statusBar.showMessage(success_message)
 
     def load_current_image(self):
         """Load the current image from the image dataset."""
@@ -4278,3 +4339,67 @@ class VideoAnnotationTool(QMainWindow):
         
         # Reset status
         self.statusBar.showMessage("Ready")
+
+
+    def export_image_dataset(self):
+        """Export the current image dataset with advanced options."""
+        if not hasattr(self, "is_image_dataset") or not self.is_image_dataset:
+            QMessageBox.warning(
+                self,
+                "Export Image Dataset",
+                "Please open an image dataset first!"
+            )
+            return
+        
+        # Import the dataset manager
+        
+        # Show export dialog
+        config = export_dataset_dialog(self, self.image_files, self.frame_annotations)
+        
+        if not config:
+            return  # User cancelled
+        
+        # Export the dataset
+        result = export_dataset(
+            self,
+            config,
+            self.image_files,
+            self.frame_annotations,
+            self.canvas.class_colors
+        )
+        
+        if result:
+            self.statusBar.showMessage(result, 5000)
+
+    def create_dataset(self):
+        """Create a new dataset from the current annotations."""
+        if not hasattr(self, "is_image_dataset") or not self.is_image_dataset or not self.image_files:
+            QMessageBox.warning(
+                self, "Create Dataset", "This feature is only available for image datasets."
+            )
+            return
+        
+        # Check if we have any annotations
+        has_annotations = any(self.frame_annotations.values())
+        if not has_annotations:
+            QMessageBox.warning(
+                self, "Create Dataset", "No annotations to export!"
+            )
+            return
+        
+        # Import the dataset manager
+        from utils.dataset_manager import create_dataset_dialog, create_dataset
+        
+        # Show dialog to configure dataset
+        config = create_dataset_dialog(self, self.image_files, self.frame_annotations, self.canvas.class_colors)
+        
+        if config:
+            # Create the dataset
+            success = create_dataset(self, config, self.image_files, self.frame_annotations, self.canvas.class_colors)
+            
+            if success:
+                QMessageBox.information(
+                    self,
+                    "Dataset Created",
+                    f"Dataset created successfully in {config['output_dir']}"
+                )

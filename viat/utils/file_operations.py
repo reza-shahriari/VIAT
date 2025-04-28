@@ -1503,74 +1503,617 @@ def import_raya_annotations(filename, bbox_class):
         print(f"Error parsing Raya text file: {str(e)}")
         raise Exception(f"Error parsing Raya text file: {str(e)}")
 
-def import_annotations(
-    filename, bbox_class, image_width=640, image_height=480, class_colors=None
-):
+def import_annotations(filename, BoundingBox, image_width, image_height, class_colors):
     """
     Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
-    The format is automatically detected based on file extension and content.
-
+    
     Args:
         filename (str): Path to the annotation file
-        bbox_class (class): Class to use for bounding box objects
-        image_width (int, optional): Width of the image/video frame
-        image_height (int, optional): Height of the image/video frame
-        class_colors (dict, optional): Dictionary mapping class names to colors
-
+        BoundingBox: BoundingBox class for creating annotations
+        image_width (int): Default image width for scaling
+        image_height (int): Default image height for scaling
+        class_colors (dict): Dictionary of class colors
+        
     Returns:
         tuple: (format_type, annotations, frame_annotations)
-            - format_type (str): Detected format type
-            - annotations (list): List of annotations for current frame (if applicable)
-            - frame_annotations (dict): Dictionary mapping frame numbers to lists of annotations
     """
-    if class_colors is None:
-        class_colors = {}
-
-    # Detect format based on file extension and content
-    format_type = detect_annotation_format(filename)
-
-    if not format_type:
-        raise ValueError(
-            "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, Raya, or Raya YOLO format."
-        )
-
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+    import os
+    import json
+    import xml.etree.ElementTree as ET
+    import random
+    
     # Initialize return values
+    format_type = "unknown"
     annotations = []
     frame_annotations = {}
-
-    # Import annotations based on format
-    if format_type == "COCO":
-        coco_annotations = import_coco_annotations(filename, bbox_class)
-        for ann in coco_annotations:
-            frame_num = getattr(ann, "frame", 0)
-            if frame_num not in frame_annotations:
-                frame_annotations[frame_num] = []
-            frame_annotations[frame_num].append(ann)
-            if frame_num == 0:  # Assume current frame is 0 for simplicity
-                annotations.append(ann)
-
-    elif format_type == "YOLO":
-        annotations = import_yolo_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        frame_annotations[0] = annotations  # Assume frame 0 for YOLO
-
-    elif format_type == "Pascal VOC":
-        annotations = import_pascal_voc_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
-
-    elif format_type == "Raya":
-        frame_annotations = import_raya_annotations(filename, bbox_class)
-        if 0 in frame_annotations:
-            annotations = frame_annotations[0]
-
-    elif format_type == "RayaYOLO":
-        frame_annotations = import_raya_yolo_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        if 0 in frame_annotations:
-            annotations = frame_annotations[0]
-
+    
+    # Determine format based on file extension and content
+    file_ext = os.path.splitext(filename)[1].lower()
+    
+    if file_ext == '.json':
+        # Try to parse as JSON
+        with open(filename, 'r') as f:
+            data = json.load(f)
+        
+        # Check if it's COCO format
+        if 'images' in data and 'annotations' in data and 'categories' in data:
+            format_type = "COCO JSON"
+            
+            # Create mapping from image ID to frame number
+            image_id_to_frame = {}
+            image_id_to_filename = {}
+            for i, img in enumerate(data['images']):
+                image_id_to_frame[img['id']] = i
+                image_id_to_filename[img['id']] = img.get('file_name', '')
+                
+                # Store image dimensions for scaling
+                if 'width' in img and 'height' in img:
+                    image_width = img['width']
+                    image_height = img['height']
+            
+            # Create mapping from category ID to class name
+            category_id_to_name = {}
+            for cat in data['categories']:
+                category_id_to_name[cat['id']] = cat['name']
+                
+                # Add class color if not exists
+                if cat['name'] not in class_colors:
+                    class_colors[cat['name']] = QColor(
+                        random.randint(0, 255),
+                        random.randint(0, 255),
+                        random.randint(0, 255)
+                    )
+            
+            # Process annotations
+            for ann in data['annotations']:
+                image_id = ann['image_id']
+                category_id = ann['category_id']
+                bbox = ann['bbox']  # [x, y, width, height]
+                
+                # Skip if missing required data
+                if image_id not in image_id_to_frame or category_id not in category_id_to_name:
+                    continue
+                
+                # Get frame number and class name
+                frame_num = image_id_to_frame[image_id]
+                class_name = category_id_to_name[category_id]
+                
+                # Create bounding box
+                rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+                color = class_colors[class_name]
+                
+                # Extract additional attributes if available
+                attributes = {"Size": -1, "Quality": -1}
+                for key, value in ann.items():
+                    if key not in ['id', 'image_id', 'category_id', 'bbox', 'area', 'segmentation', 'iscrowd']:
+                        attributes[key.capitalize()] = value
+                
+                # Create annotation object
+                annotation = BoundingBox(rect, class_name, attributes, color)
+                
+                # Add to frame annotations
+                if frame_num not in frame_annotations:
+                    frame_annotations[frame_num] = []
+                frame_annotations[frame_num].append(annotation)
+                
+                # Add to current frame annotations if this is the first frame
+                if frame_num == 0:
+                    annotations.append(annotation)
+    
+    elif file_ext == '.xml':
+        # Try to parse as Pascal VOC XML
+        format_type = "Pascal VOC XML"
+        
+        try:
+            tree = ET.parse(filename)
+            root = tree.getroot()
+            
+            # Get image filename
+            image_filename = root.find('filename').text if root.find('filename') is not None else ""
+            
+            # Get image dimensions
+            size_elem = root.find('size')
+            if size_elem is not None:
+                width_elem = size_elem.find('width')
+                height_elem = size_elem.find('height')
+                if width_elem is not None and height_elem is not None:
+                    image_width = int(width_elem.text)
+                    image_height = int(height_elem.text)
+            
+            # Process object elements
+            for obj in root.findall('object'):
+                name_elem = obj.find('name')
+                if name_elem is None:
+                    continue
+                
+                class_name = name_elem.text
+                
+                # Add class color if not exists
+                if class_name not in class_colors:
+                    class_colors[class_name] = QColor(
+                        random.randint(0, 255),
+                        random.randint(0, 255),
+                        random.randint(0, 255)
+                    )
+                
+                # Get bounding box
+                bbox = obj.find('bndbox')
+                if bbox is None:
+                    continue
+                
+                xmin = int(float(bbox.find('xmin').text))
+                ymin = int(float(bbox.find('ymin').text))
+                xmax = int(float(bbox.find('xmax').text))
+                ymax = int(float(bbox.find('ymax').text))
+                
+                # Create rectangle
+                rect = QRect(xmin, ymin, xmax - xmin, ymax - ymin)
+                
+                # Extract additional attributes if available
+                attributes = {"Size": -1, "Quality": -1}
+                for attr in obj.findall('./attribute'):
+                    name = attr.find('name')
+                    value = attr.find('value')
+                    if name is not None and value is not None:
+                        try:
+                            # Try to convert to int or float if possible
+                            val_text = value.text
+                            try:
+                                val = int(val_text)
+                            except ValueError:
+                                try:
+                                    val = float(val_text)
+                                except ValueError:
+                                    val = val_text
+                            attributes[name.text] = val
+                        except:
+                            pass
+                
+                # Create annotation
+                annotation = BoundingBox(rect, class_name, attributes, class_colors[class_name])
+                
+                # Add to annotations
+                annotations.append(annotation)
+                
+                # Add to frame annotations (assuming frame 0)
+                if 0 not in frame_annotations:
+                    frame_annotations[0] = []
+                frame_annotations[0].append(annotation)
+        except Exception as e:
+            print(f"Error parsing XML file: {str(e)}")
+    
+    elif file_ext == '.txt':
+        # Check if it's YOLO format or Raya format
+        with open(filename, 'r') as f:
+            first_line = f.readline().strip()
+        
+        if os.path.basename(filename) == 'classes.txt' or len(first_line.split()) == 5:
+            # YOLO format
+            format_type = "YOLO TXT"
+            
+            # If this is a classes.txt file, we need to find the label files
+            if os.path.basename(filename) == 'classes.txt':
+                # Read class names
+                with open(filename, 'r') as f:
+                    class_names = [line.strip() for line in f.readlines()]
+                
+                # Add class colors if not exist
+                for class_name in class_names:
+                    if class_name not in class_colors:
+                        class_colors[class_name] = QColor(
+                            random.randint(0, 255),
+                            random.randint(0, 255),
+                            random.randint(0, 255)
+                        )
+                
+                # Look for label files in the same directory
+                labels_dir = os.path.dirname(filename)
+                for label_file in os.listdir(labels_dir):
+                    if label_file.endswith('.txt') and label_file != 'classes.txt':
+                        try:
+                            # Parse annotations
+                            with open(os.path.join(labels_dir, label_file), 'r') as f:
+                                lines = f.readlines()
+                            
+                            # Get frame number from filename
+                            frame_num = int(os.path.splitext(label_file)[0])
+                            
+                            frame_anns = []
+                            for line in lines:
+                                parts = line.strip().split()
+                                if len(parts) >= 5:
+                                    class_idx = int(parts[0])
+                                    x_center = float(parts[1])
+                                    y_center = float(parts[2])
+                                    width = float(parts[3])
+                                    height = float(parts[4])
+                                    
+                                    # Convert to pixel coordinates
+                                    x = int((x_center - width/2) * image_width)
+                                    y = int((y_center - height/2) * image_height)
+                                    w = int(width * image_width)
+                                    h = int(height * image_height)
+                                    
+                                    # Get class name
+                                    if class_idx < len(class_names):
+                                        class_name = class_names[class_idx]
+                                    else:
+                                        class_name = f"class_{class_idx}"
+                                    
+                                    # Create bounding box
+                                    rect = QRect(x, y, w, h)
+                                    annotation = BoundingBox(rect, class_name, {"Size": -1, "Quality": -1}, class_colors[class_name])
+                                    
+                                    frame_anns.append(annotation)
+                            
+                            # Add to frame annotations
+                            if frame_anns:
+                                frame_annotations[frame_num] = frame_anns
+                                
+                                # Add to current frame annotations if this is the first frame
+                                if frame_num == 0:
+                                    annotations.extend(frame_anns)
+                        except Exception as e:
+                            print(f"Error parsing YOLO file {label_file}: {str(e)}")
+            else:
+                # This is a single YOLO format file
+                # We need class names - try to find classes.txt
+                classes_file = os.path.join(os.path.dirname(filename), 'classes.txt')
+                class_names = []
+                
+                if os.path.exists(classes_file):
+                    with open(classes_file, 'r') as f:
+                        class_names = [line.strip() for line in f.readlines()]
+                
+                # Parse annotations
+                with open(filename, 'r') as f:
+                    lines = f.readlines()
+                
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        class_idx = int(parts[0])
+                        x_center = float(parts[1])
+                        y_center = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+                        
+                        # Convert to pixel coordinates
+                        x = int((x_center - width/2) * image_width)
+                        y = int((y_center - height/2) * image_height)
+                        w = int(width * image_width)
+                        h = int(height * image_height)
+                        
+                        # Get class name
+                        if class_idx < len(class_names):
+                            class_name = class_names[class_idx]
+                        else:
+                            class_name = f"class_{class_idx}"
+                        
+                        # Add class color if not exists
+                        if class_name not in class_colors:
+                            class_colors[class_name] = QColor(
+                                random.randint(0, 255),
+                                random.randint(0, 255),
+                                random.randint(0, 255)
+                            )
+                        
+                        # Create bounding box
+                        rect = QRect(x, y, w, h)
+                        annotation = BoundingBox(rect, class_name, {"Size": -1, "Quality": -1}, class_colors[class_name])
+                        
+                        annotations.append(annotation)
+                
+                # Add to frame annotations (assuming frame 0)
+                if annotations:
+                    frame_annotations[0] = annotations
+        else:
+            # Assume Raya format
+            format_type = "Raya TXT"
+            
+            # Parse annotations
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            
+            for line in lines:
+                parts = line.strip().split(',')
+                if len(parts) >= 6:
+                    try:
+                        frame_num = int(parts[0])
+                        class_name = parts[1]
+                        x = int(float(parts[2]))
+                        y = int(float(parts[3]))
+                        w = int(float(parts[4]))
+                        h = int(float(parts[5]))
+                        
+                        # Add class color if not exists
+                        if class_name not in class_colors:
+                            class_colors[class_name] = QColor(
+                                random.randint(0, 255),
+                                random.randint(0, 255),
+                                random.randint(0, 255)
+                            )
+                        
+                        # Create bounding box
+                        rect = QRect(x, y, w, h)
+                        
+                        # Parse additional attributes if available
+                        attributes = {"Size": -1, "Quality": -1}
+                        if len(parts) > 6:
+                            try:
+                                attributes["Size"] = int(parts[6])
+                            except:
+                                pass
+                        if len(parts) > 7:
+                            try:
+                                attributes["Quality"] = int(parts[7])
+                            except:
+                                pass
+                        
+                        annotation = BoundingBox(rect, class_name, attributes, class_colors[class_name])
+                        
+                        # Add to frame annotations
+                        if frame_num not in frame_annotations:
+                            frame_annotations[frame_num] = []
+                        frame_annotations[frame_num].append(annotation)
+                        
+                        # Add to current frame annotations if this is the first frame
+                        if frame_num == 0:
+                            annotations.append(annotation)
+                    except Exception as e:
+                        print(f"Error parsing line in Raya format: {line} - {str(e)}")
+    
     return format_type, annotations, frame_annotations
+
+def export_image_dataset_coco(
+    filename, image_files, frame_annotations, class_colors, image_width, image_height
+):
+    """
+    Export annotations for an image dataset in COCO format.
+
+    Args:
+        filename (str): Path to save the COCO JSON file
+        image_files (list): List of image file paths
+        frame_annotations (dict): Dictionary of annotations by frame
+        class_colors (dict): Dictionary mapping class names to QColor (for class order)
+        image_width (int): Width of the images
+        image_height (int): Height of the images
+    """
+    import json
+    from datetime import datetime
+    import os
+    import cv2
+
+    # Initialize COCO format structure
+    coco_data = {
+        "info": {
+            "description": "VIAT Exported Annotations",
+            "url": "",
+            "version": "1.0",
+            "year": datetime.now().year,
+            "contributor": "VIAT",
+            "date_created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        "licenses": [
+            {
+                "id": 1,
+                "name": "Unknown",
+                "url": "",
+            }
+        ],
+        "images": [],
+        "annotations": [],
+        "categories": [],
+    }
+
+    # Create category mapping
+    class_list = list(class_colors.keys())
+    category_id_map = {class_name: idx + 1 for idx, class_name in enumerate(class_list)}
+    for class_name, cat_id in category_id_map.items():
+        coco_data["categories"].append(
+            {"id": cat_id, "name": class_name, "supercategory": "none"}
+        )
+
+    # Add images and annotations
+    annotation_id = 1
+
+    for image_id, image_path in enumerate(image_files, 1):
+        # Try to get actual image dimensions
+        try:
+            img = cv2.imread(image_path)
+            if img is not None:
+                img_height, img_width = img.shape[:2]
+            else:
+                img_height, img_width = image_height, image_width
+        except:
+            img_height, img_width = image_height, image_width
+            
+        # Add image info
+        image_filename = os.path.basename(image_path)
+        coco_data["images"].append(
+            {
+                "id": image_id,
+                "license": 1,
+                "file_name": image_filename,
+                "height": img_height,
+                "width": img_width,
+                "date_captured": "",
+                "frame_id": image_id - 1,  # Store frame number for compatibility
+            }
+        )
+
+        # Add annotations for this image
+        frame_num = image_id - 1
+        if frame_num in frame_annotations:
+            for annotation in frame_annotations[frame_num]:
+                # Get category id
+                category_id = category_id_map.get(annotation.class_name, 1)
+
+                # Get bounding box in COCO format [x, y, width, height]
+                rect = annotation.rect
+                bbox = [rect.x(), rect.y(), rect.width(), rect.height()]
+
+                # Calculate area
+                area = rect.width() * rect.height()
+
+                # Create annotation entry
+                coco_annotation = {
+                    "id": annotation_id,
+                    "image_id": image_id,
+                    "category_id": category_id,
+                    "bbox": bbox,
+                    "area": area,
+                    "segmentation": [],
+                    "iscrowd": 0,
+                }
+
+                # Add attributes if available
+                if hasattr(annotation, "attributes") and annotation.attributes:
+                    for attr_name, attr_value in annotation.attributes.items():
+                        if attr_value != -1:  # Only export non-default attributes
+                            coco_annotation[attr_name.lower()] = attr_value
+
+                coco_data["annotations"].append(coco_annotation)
+                annotation_id += 1
+
+    # Write to file
+    with open(filename, "w") as f:
+        json.dump(coco_data, f, indent=2)
+
+
+def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_colors):
+    """
+    Export annotations for an image dataset in YOLO format.
+
+    Args:
+        output_dir (str): Directory to save YOLO .txt files
+        image_files (list): List of image file paths
+        frame_annotations (dict): Dictionary mapping frame numbers to annotations
+        class_colors (dict): Dictionary mapping class names to QColor (for class order)
+    """
+    import os
+    import cv2
+    
+    # Create output directories
+    labels_dir = os.path.join(output_dir, "labels")
+    os.makedirs(labels_dir, exist_ok=True)
+
+    # Get class list and mapping
+    class_list = list(class_colors.keys())
+    class_to_id = {cls: i for i, cls in enumerate(class_list)}
+
+    # Write classes.txt
+    classes_file = os.path.join(output_dir, "classes.txt")
+    with open(classes_file, "w") as f:
+        for cls in class_list:
+            f.write(f"{cls}\n")
+
+    # Process each image
+    for frame_num, image_path in enumerate(image_files):
+        # Skip if no annotations for this frame
+        if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            continue
+
+        # Get output .txt filename (same basename as image)
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        txt_filename = os.path.join(labels_dir, f"{base_name}.txt")
+
+        # Try to get actual image dimensions
+        try:
+            img = cv2.imread(image_path)
+            if img is not None:
+                image_height, image_width = img.shape[:2]
+            else:
+                image_width, image_height = 640, 480
+        except Exception:
+            image_width, image_height = 640, 480
+
+        with open(txt_filename, "w") as f:
+            for annotation in frame_annotations[frame_num]:
+                class_id = class_to_id.get(annotation.class_name, 0)
+                rect = annotation.rect
+
+                x = rect.x()
+                y = rect.y()
+                w = rect.width()
+                h = rect.height()
+                
+                # Ensure values are within image bounds
+                if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > image_width or y + h > image_height:
+                    continue
+                    
+                x_center = (x + w / 2) / image_width
+                y_center = (y + h / 2) / image_height
+                norm_w = w / image_width
+                norm_h = h / image_height
+                
+                # Ensure normalized values are between 0 and 1
+                x_center = max(0, min(1, x_center))
+                y_center = max(0, min(1, y_center))
+                norm_w = max(0, min(1, norm_w))
+                norm_h = max(0, min(1, norm_h))
+                
+                f.write(
+                    f"{class_id} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}\n"
+                )
+
+
+def export_image_dataset_pascal_voc(output_dir, image_files, frame_annotations, pixmap=None):
+    """
+    Export annotations for an image dataset in Pascal VOC XML format.
+
+    Args:
+        output_dir (str): Directory to save XML files
+        image_files (list): List of image file paths
+        frame_annotations (dict): Dictionary mapping frame numbers to annotations
+        pixmap (QPixmap, optional): Pixmap for getting image dimensions if not available
+    """
+    import os
+    import cv2
+    from datetime import datetime
+    
+    # Create output directories
+    annotations_dir = os.path.join(output_dir, "annotations")
+    os.makedirs(annotations_dir, exist_ok=True)
+
+    # Process each image
+    for frame_num, image_path in enumerate(image_files):
+        # Skip if no annotations for this frame
+        if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            continue
+
+        # Get output XML filename (same basename as image)
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        xml_filename = os.path.join(annotations_dir, f"{base_name}.xml")
+
+        # Try to get actual image dimensions
+        try:
+            img = cv2.imread(image_path)
+            if img is not None:
+                image_height, image_width = img.shape[:2]
+            elif pixmap:
+                image_width = pixmap.width()
+                image_height = pixmap.height()
+            else:
+                image_width, image_height = 640, 480
+        except Exception:
+            if pixmap:
+                image_width = pixmap.width()
+                image_height = pixmap.height()
+            else:
+                image_width, image_height = 640, 480
+
+        # # Create XML content
+        # xml_content = create_pascal_voc_xml(
+        #     os.path.basename(image_path),
+        #     image_width,
+        #     image_height,
+        #     frame_annotations[frame_num]
+        # )
+
+        # # Write to file
+        # with open(xml_filename, "w") as f:
+        #     f.write(xml_content)
+
