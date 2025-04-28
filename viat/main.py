@@ -68,10 +68,12 @@ from utils import (
     mse_similarity,
     calculate_frame_hash,
     create_thumbnail,
-    import_annotations
+    import_annotations,
+    UICreator
 )
 from utils.icon_provider import IconProvider
 from natsort import natsorted
+
 
 class VideoAnnotationTool(QMainWindow):
     """
@@ -93,7 +95,7 @@ class VideoAnnotationTool(QMainWindow):
         self.init_properties()
         self.video_filename = ""
         # Set up the user interface
-        self.init_ui()
+        self.setup_ui()
         self.canvas.smart_edge_enabled = False
         self.setup_autosave()
 
@@ -177,120 +179,112 @@ class VideoAnnotationTool(QMainWindow):
         self.is_image_dataset = False
         self.image_files = []
 
-    def init_ui(self):
-        """Initialize the user interface components."""
-        # Create central widget with video canvas
+    def setup_ui(self):
+        """Set up the user interface."""
+        # Create UI creator
+        self.ui_creator = UICreator(self)
+        
+        # Create menu bar
+        self.ui_creator.create_menu_bar()
+        
+        # Create toolbar
+        self.ui_creator.create_toolbar()
+        
+        # Create dock widgets
+        self.ui_creator.create_dock_widgets()
+        
+        # Create status bar
+        self.ui_creator.create_status_bar()
+        
+        # Set up playback timer
+        self.ui_creator.setup_playback_timer()
+        
+        # Create central widget
         central_widget = QWidget()
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
-        main_layout.setSpacing(2)  # Reduce spacing between widgets
-
-        self.canvas = VideoCanvas(self)
-        main_layout.addWidget(self.canvas, 1)  # Give canvas a stretch factor of 1
-
-        playback_controls = self.create_playback_controls()
-        main_layout.addWidget(playback_controls, 0)  # No stretch for controls
-
         self.setCentralWidget(central_widget)
-        # Create UI components
-        self.create_menu_bar()
-        self.create_toolbar()
-        self.create_dock_widgets()
-        self.create_status_bar()
+        
+        # Create layout
+        layout = QVBoxLayout(central_widget)
+        
+        # Create canvas
+        self.canvas = VideoCanvas(self)
+        layout.addWidget(self.canvas)
+        
+        # Add playback controls
+        playback_controls = self.ui_creator.create_playback_controls()
+        layout.addWidget(playback_controls)
+        
+        # Set layout margins
+        layout.setContentsMargins(5, 5, 5, 5)
+            
+        # Set initial window size
+        self.resize(1200, 800)
+        
+        # Set window title
+        self.setWindowTitle("VIAT - Video Image Annotation Tool")
+        
+        # Set window icon
+        self.setWindowIcon(self.icon_provider.get_icon("app-icon"))
 
-        # Set up timer for video playback
-        self.setup_playback_timer()
+    def setup_playback_timer(self):
+        """Set up the timer for video playback."""
+        self.play_timer = QTimer()
+        self.play_timer.timeout.connect(self.next_frame)
 
-        # Initialize annotation list
-        self.update_annotation_list()
-        self.styles[self.current_style]()
+    def toggle_attribute_dialog(self):
+        """Toggle automatic attribute dialog display."""
+        self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
+        self.statusBar.showMessage(
+            f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}",
+            3000,
+        )
 
-    def create_menu_bar(self):
-        """Create the application menu bar and its actions."""
-        menubar = self.menuBar()
+    def toggle_previous_attributes(self):
+        """Toggle using previous annotation attributes as default."""
+        self.use_previous_attributes = not self.use_previous_attributes
+        self.statusBar.showMessage(
+            f"Using previous annotation attributes as default {'enabled' if self.use_previous_attributes else 'disabled'}",
+            3000,
+        )
 
-        # File menu
-        self.create_file_menu(menubar)
+    def toggle_autosave(self):
+        """Toggle auto-save functionality."""
+        self.autosave_enabled = not self.autosave_enabled
 
-        # Edit menu
-        self.create_edit_menu(menubar)
+        if self.autosave_enabled:
+            self.autosave_timer.start(self.autosave_interval)
+            self.statusBar.showMessage("Auto-save enabled", 3000)
+        else:
+            self.autosave_timer.stop()
+            self.statusBar.showMessage("Auto-save disabled", 3000)
 
-        # Tools menu
-        self.create_tools_menu(menubar)
+    def toggle_smart_edge(self):
+        """Toggle smart edge movement functionality."""
+        is_active = self.smart_edge_action.isChecked()
+        self.canvas.smart_edge_enabled = is_active
 
-        # Settings menu
-        self.settings_menu = menubar.addMenu("Settings")
-        self.create_settings_menu(self.settings_menu)
+        if is_active:
+            self.statusBar.showMessage(
+                "Smart Edge Movement enabled - edges will snap to image features"
+            )
+        else:
+            self.statusBar.showMessage("Smart Edge Movement disabled")
 
-        # Style menu
-        self.create_style_menu(menubar)
+    def change_annotation_method(self, method_name):
+        """Change the current annotation method."""
+        if method_name in ["Drag", "TwoClick"]:
+            # Update canvas annotation method
+            self.canvas.set_annotation_method(method_name)
 
-        # Help menu
-        self.create_help_menu(menubar)
-
-    def create_file_menu(self, menubar):
-        """Create the File menu and its actions."""
-        file_menu = menubar.addMenu("File")
-
-        # Open Video action
-        open_action = QAction("Open Video", self)
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.open_video)
-        file_menu.addAction(open_action)
-
-        # Open Image Folder action
-        open_image_folder_action = QAction("Open Image Folder", self)
-        open_image_folder_action.setShortcut("Ctrl+I")
-        open_image_folder_action.triggered.connect(self.open_image_folder)
-        file_menu.addAction(open_image_folder_action)
-
-        # Save Project action
-        save_action = QAction("Save Project", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_project)
-        file_menu.addAction(save_action)
-
-        # Save Project As action
-        save_as_action = QAction("Save Project As...", self)
-        save_as_action.setShortcut("Ctrl+Shift+S")
-        save_as_action.triggered.connect(lambda: self.save_project(True))
-        file_menu.addAction(save_as_action)
-
-        # Load Project action
-        load_action = QAction("Load Project", self)
-        load_action.setShortcut("Ctrl+L")
-        load_action.triggered.connect(self.load_project)
-        file_menu.addAction(load_action)
-
-        # Recent Projects submenu
-        self.recent_projects_menu = file_menu.addMenu("Recent Projects")
-        self.update_recent_projects_menu()
-
-        # Import Annotations action
-        import_action = QAction("Import Annotations", self)
-        import_action.setShortcut("Ctrl+I")
-        import_action.triggered.connect(self.import_annotations)
-        file_menu.addAction(import_action)
-
-        # Export Annotations action
-        export_action = QAction("Export Annotations", self)
-        export_action.setShortcut("Ctrl+E")
-        export_action.triggered.connect(self.export_annotations)
-        file_menu.addAction(export_action)
-
-        file_menu.addSeparator()
-
-        # Delete History action
-        delete_history_action = QAction("Delete History", self)
-        delete_history_action.triggered.connect(self.delete_history)
-        file_menu.addAction(delete_history_action)
-
-        # Exit action
-        exit_action = QAction("Exit", self)
-        exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
+            if method_name == "TwoClick":
+                self.statusBar.showMessage(
+                    "Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel."
+                )
+            else:
+                self.statusBar.showMessage(
+                    f"Annotation method changed to {method_name}"
+                )
+    
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
         config_dir = get_config_directory()
@@ -326,364 +320,6 @@ class VideoAnnotationTool(QMainWindow):
         clear_action = QAction("Clear Recent Projects", self)
         clear_action.triggered.connect(self.clear_recent_projects)
         self.recent_projects_menu.addAction(clear_action)
-
-    def create_edit_menu(self, menubar):
-        """Create the Edit menu and its actions."""
-        edit_menu = menubar.addMenu("Edit")
-
-        # Clear Annotations action
-        clear_action = QAction("Clear Annotations", self)
-        clear_action.triggered.connect(self.clear_annotations)
-        edit_menu.addAction(clear_action)
-
-        # Add Annotation action
-        add_action = QAction("Add Annotation", self)
-        add_action.triggered.connect(self.add_annotation)
-        edit_menu.addAction(add_action)
-
-        # Batch Edit Annotations action
-        batch_edit_action = QAction("Batch Edit Annotations", self)
-        batch_edit_action.setShortcut("Ctrl+B")
-        batch_edit_action.triggered.connect(
-            lambda: self.annotation_dock.batch_edit_annotations()
-        )
-        edit_menu.addAction(batch_edit_action)
-
-        # Add Class action
-        add_class_action = QAction("Add Class", self)
-        add_class_action.triggered.connect(self.add_class)
-        edit_menu.addAction(add_class_action)
-    
-    def create_tools_menu(self, menubar):
-        """Create the Tools menu and its actions."""
-        tools_menu = menubar.addMenu("Tools")
-
-        # Auto Label action
-        auto_label_action = QAction("Auto Label", self)
-        auto_label_action.triggered.connect(self.auto_label)
-        tools_menu.addAction(auto_label_action)
-
-        # Track Objects action
-        track_action = QAction("Track Objects", self)
-        track_action.triggered.connect(self.track_objects)
-        tools_menu.addAction(track_action)
-
-        # Smart Edge Movement action
-        smart_edge_action = QAction("Smart Edge Movement", self, checkable=True)
-        smart_edge_action.setShortcut("Ctrl+E")
-        smart_edge_action.triggered.connect(self.toggle_smart_edge)
-        tools_menu.addAction(smart_edge_action)
-
-        # Add separator
-        tools_menu.addSeparator()
-
-        # Create Dataset action (for image datasets)
-        create_dataset_action = QAction("Create Dataset...", self)
-        create_dataset_action.setToolTip("Create a new dataset from the current annotations")
-        create_dataset_action.triggered.connect(self.create_dataset)
-        tools_menu.addAction(create_dataset_action)
-
-        # Add separator
-        tools_menu.addSeparator()
-
-        # Detect Duplicate Frames action
-        duplicate_frames_action = QAction(
-            "Detect Duplicate Frames", self, checkable=True
-        )
-        duplicate_frames_action.setToolTip(
-            "Automatically detect and propagate annotations to duplicate frames"
-        )
-        duplicate_frames_action.triggered.connect(
-            self.toggle_duplicate_frames_detection
-        )
-        duplicate_frames_action.setChecked(
-            self.duplicate_frames_enabled
-        )  # Set initial state
-        tools_menu.addAction(duplicate_frames_action)
-        self.duplicate_frames_action = duplicate_frames_action
-
-        # Scan for Duplicates action
-        scan_action = QAction("Scan Video for Duplicates", self)
-        scan_action.setToolTip("Scan the entire video to identify duplicate frames")
-        scan_action.triggered.connect(self.scan_video_for_duplicates)
-        tools_menu.addAction(scan_action)
-
-        # Propagate Annotations action
-        propagate_action = QAction("Propagate Annotations...", self)
-        propagate_action.setToolTip("Copy current frame annotations to multiple frames")
-        propagate_action.setShortcut("Ctrl+P")
-        propagate_action.triggered.connect(self.propagate_annotations)
-        tools_menu.addAction(propagate_action)
-
-        # Propagate to Similar Frames action
-        similar_action = QAction("Propagate to Similar Frames...", self)
-        similar_action.setToolTip("Copy annotations to frames that look similar")
-        similar_action.triggered.connect(self.propagate_to_similar_frames)
-        tools_menu.addAction(similar_action)
-
-        # Store reference to keep menu and toolbar in sync
-        self.smart_edge_action = smart_edge_action
-
-    def create_style_menu(self, menubar):
-        """Create the Style menu and its actions."""
-        self.style_menu = menubar.addMenu("Style")
-
-        # Create action group for styles to make them exclusive
-        style_group = QActionGroup(self)
-        style_group.setExclusive(True)
-
-        # Add style options
-        for style_name in self.styles.keys():
-            style_action = QAction(style_name, self, checkable=True)
-            if style_name == self.current_style:
-                style_action.setChecked(True)
-            style_action.triggered.connect(
-                lambda checked, s=style_name: self.change_style(s)
-            )
-            style_group.addAction(style_action)
-            self.style_menu.addAction(style_action)
-
-    def create_help_menu(self, menubar):
-        """Create the Help menu and its actions."""
-        help_menu = menubar.addMenu("Help")
-
-        # About action
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-
-    def create_toolbar(self):
-        """Create the annotation toolbar."""
-        self.toolbar = AnnotationToolbar(self, self.icon_provider)
-        self.addToolBar(self.toolbar)
-        self.class_selector = self.toolbar.class_selector
-
-        # Add annotation method selector
-        method_label = QLabel("Method:")
-        self.toolbar.addWidget(method_label)
-
-        self.method_selector = QComboBox()
-        self.method_selector.addItems(["Drag", "TwoClick"])
-        self.method_selector.setToolTip(
-            "Drag: Click and drag to create box\nTwoClick: Click two corners to create box"
-        )
-        self.method_selector.currentTextChanged.connect(self.change_annotation_method)
-        self.toolbar.addWidget(self.method_selector)
-
-    def toggle_smart_edge(self):
-        """Toggle smart edge movement functionality."""
-        is_active = self.smart_edge_action.isChecked()
-        self.canvas.smart_edge_enabled = is_active
-
-        if is_active:
-            self.statusBar.showMessage(
-                "Smart Edge Movement enabled - edges will snap to image features"
-            )
-        else:
-            self.statusBar.showMessage("Smart Edge Movement disabled")
-
-    def change_annotation_method(self, method_name):
-        """Change the current annotation method."""
-        if method_name in ["Drag", "TwoClick"]:
-            # Update canvas annotation method
-            self.canvas.set_annotation_method(method_name)
-
-            if method_name == "TwoClick":
-                self.statusBar.showMessage(
-                    "Two-click mode: Click first corner, then click second corner to create box. Press ESC to cancel."
-                )
-            else:
-                self.statusBar.showMessage(
-                    f"Annotation method changed to {method_name}"
-                )
-
-    def create_dock_widgets(self):
-        """Create and set up the dock widgets."""
-        # Annotation dock
-        self.annotation_dock = AnnotationDock(self)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.annotation_dock)
-
-        # Class dock
-        self.class_dock = ClassDock(self)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.class_dock)
-
-    def create_status_bar(self):
-        """Create the status bar."""
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("Ready")
-
-    def create_playback_controls(self):
-        """Create video playback controls."""
-        # Create a widget to hold the controls
-        playback_widget = QWidget()
-        playback_layout = QHBoxLayout(playback_widget)
-        playback_layout.setContentsMargins(5, 2, 5, 2)  # Reduce margins
-
-        # Play/Pause button
-        self.play_button = QPushButton()
-        self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
-        self.play_button.setToolTip("Play/Pause")
-        self.play_button.clicked.connect(self.play_pause_video)
-        self.play_button.setMaximumWidth(30)  # Make button smaller
-        self.play_button.setMaximumHeight(24)  # Make button smaller
-
-        # Previous frame button
-        prev_button = QPushButton()
-        prev_button.setIcon(self.icon_provider.get_icon("media-skip-backward"))
-        prev_button.setToolTip("Previous Frame")
-        prev_button.clicked.connect(self.prev_frame)
-        prev_button.setMaximumWidth(30)  # Make button smaller
-        prev_button.setMaximumHeight(24)  # Make button smaller
-
-        # Next frame button
-        next_button = QPushButton()
-        next_button.setIcon(self.icon_provider.get_icon("media-skip-forward"))
-        next_button.setToolTip("Next Frame")
-        next_button.clicked.connect(self.next_frame)
-        next_button.setMaximumWidth(30)  # Make button smaller
-        next_button.setMaximumHeight(24)  # Make button smaller
-
-        # Frame slider
-        self.frame_slider = QSlider(Qt.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(100)  # Will be updated when video is loaded
-        self.frame_slider.valueChanged.connect(self.slider_changed)
-        self.frame_slider.setMaximumHeight(20)  # Make slider smaller
-
-        # Frame counter label
-        self.frame_label = QLabel("0/0")
-        self.frame_label.setMaximumWidth(80)  # Limit width
-
-        # Add widgets to layout
-        playback_layout.addWidget(prev_button)
-        playback_layout.addWidget(self.play_button)
-        playback_layout.addWidget(next_button)
-        playback_layout.addWidget(self.frame_slider)
-        playback_layout.addWidget(self.frame_label)
-
-        # Set fixed height for the entire widget
-        playback_widget.setMaximumHeight(30)
-
-        return playback_widget
-
-    def setup_playback_timer(self):
-        """Set up the timer for video playback."""
-        self.play_timer = QTimer()
-        self.play_timer.timeout.connect(self.next_frame)
-
-    def create_settings_menu(self, menubar):
-        """Create the Settings menu and its actions."""
-        settings_menu = menubar.addMenu("Settings")
-
-        # Auto-save toggle
-        autosave_action = QAction("Enable Auto-save", self, checkable=True)
-        autosave_action.setChecked(self.autosave_enabled)
-        autosave_action.triggered.connect(self.toggle_autosave)
-        autosave_action.setToolTip(
-            "Automatically save the project at regular intervals"
-        )
-        settings_menu.addAction(autosave_action)
-
-        # Auto-save interval submenu
-        interval_menu = settings_menu.addMenu("Auto-save Interval")
-
-        # Add interval options
-        intervals = [
-            ("10 seconds", 10000),
-            ("30 seconds", 30000),
-            ("1 minutes", 60000),
-            ("1.5 minutes", 90000),
-            ("3 minutes", 180000),
-        ]
-
-        interval_group = QActionGroup(self)
-        interval_group.setExclusive(True)
-
-        for name, ms in intervals:
-            action = QAction(name, self, checkable=True)
-            action.setChecked(self.autosave_interval == ms)
-            action.triggered.connect(
-                lambda checked, ms=ms: self.set_autosave_interval(ms)
-            )
-            interval_group.addAction(action)
-            interval_menu.addAction(action)
-
-        # Add separator
-        settings_menu.addSeparator()
-
-        # Annotation attribute settings
-        attr_dialog_action = QAction(
-            "Show Attribute Dialog for New Annotations", self, checkable=True
-        )
-        attr_dialog_action.setChecked(self.auto_show_attribute_dialog)
-        attr_dialog_action.triggered.connect(self.toggle_attribute_dialog)
-        attr_dialog_action.setToolTip(
-            "Automatically show the attribute dialog when creating a new annotation (Ctrl+A)"
-        )
-        attr_dialog_action.setShortcut("Ctrl+A")
-        settings_menu.addAction(attr_dialog_action)
-
-        prev_attr_action = QAction(
-            "Use Previous Annotation Attributes as Default", self, checkable=True
-        )
-        prev_attr_action.setChecked(self.use_previous_attributes)
-        prev_attr_action.triggered.connect(self.toggle_previous_attributes)
-        prev_attr_action.setToolTip(
-            "Use attribute values from previous annotations of the same class as default values"
-        )
-        settings_menu.addAction(prev_attr_action)
-        settings_menu.addSeparator()
-    
-        slideshow_menu = settings_menu.addMenu("Slideshow Speed")
-        
-        # Add speed options
-        speeds = [
-            ("0.5x (2 seconds per image)", 0.5),
-            ("1x (1 second per image)", 1.0),
-            ("2x (0.5 seconds per image)", 2.0),
-            ("3x (0.33 seconds per image)", 3.0),
-            ("5x (0.2 seconds per image)", 5.0),
-        ]
-        
-        speed_group = QActionGroup(self)
-        speed_group.setExclusive(True)
-        
-        for name, speed in speeds:
-            action = QAction(name, self, checkable=True)
-            action.setChecked(speed == 1.0)  # Default to 1x
-            action.triggered.connect(
-                lambda checked, s=speed: self.set_slideshow_speed(s)
-            )
-            speed_group.addAction(action)
-            slideshow_menu.addAction(action)
-
-    def toggle_attribute_dialog(self):
-        """Toggle automatic attribute dialog display."""
-        self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
-        self.statusBar.showMessage(
-            f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}",
-            3000,
-        )
-
-    def toggle_previous_attributes(self):
-        """Toggle using previous annotation attributes as default."""
-        self.use_previous_attributes = not self.use_previous_attributes
-        self.statusBar.showMessage(
-            f"Using previous annotation attributes as default {'enabled' if self.use_previous_attributes else 'disabled'}",
-            3000,
-        )
-
-    def toggle_autosave(self):
-        """Toggle auto-save functionality."""
-        self.autosave_enabled = not self.autosave_enabled
-
-        if self.autosave_enabled:
-            self.autosave_timer.start(self.autosave_interval)
-            self.statusBar.showMessage("Auto-save enabled", 3000)
-        else:
-            self.autosave_timer.stop()
-            self.statusBar.showMessage("Auto-save disabled", 3000)
 
     def set_autosave_interval(self, interval_ms):
         """Set the auto-save interval."""
@@ -733,11 +369,11 @@ class VideoAnnotationTool(QMainWindow):
             # Reset image dataset related state
             self.image_dataset_info = None
             self.is_image_dataset = False
-            
+
             # Clear existing annotations
             self.canvas.annotations = []
             self.frame_annotations = {}
-            
+
             # Reset frame-related variables
             self.current_frame = 0
             self.frame_hashes = {}
@@ -911,20 +547,20 @@ class VideoAnnotationTool(QMainWindow):
 
     def show_annotation_file_selection_dialog(self, annotation_files):
         """
-        Show a dialog for the user to select which annotation file to import.
+        Show a dialog for the user to select which annotation file(s) to import.
 
         Args:
             annotation_files (list): List of annotation file paths
         """
         dialog = QDialog(self)
-        dialog.setWindowTitle("Select Annotation File")
+        dialog.setWindowTitle("Select Annotation Files")
         dialog.setMinimumWidth(400)
 
         layout = QVBoxLayout(dialog)
 
         # Add explanation label
         label = QLabel(
-            "Multiple annotation files found. Please select which one to import:"
+            "Multiple annotation files found. Please select which ones to import:"
         )
         layout.addWidget(label)
 
@@ -932,7 +568,8 @@ class VideoAnnotationTool(QMainWindow):
         list_widget = QListWidget()
         for file in annotation_files:
             item = QListWidgetItem(os.path.basename(file))
-            item.setData(Qt.UserRole, file)  # Store full path as data
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
             list_widget.addItem(item)
 
         layout.addWidget(list_widget)
@@ -943,12 +580,63 @@ class VideoAnnotationTool(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        # Show dialog and process result
         if dialog.exec_() == QDialog.Accepted:
-            selected_items = list_widget.selectedItems()
-            if selected_items:
-                selected_file = selected_items[0].data(Qt.UserRole)
-                self.import_annotations(selected_file)
+            # Get selected files
+            selected_files = []
+            for i in range(list_widget.count()):
+                item = list_widget.item(i)
+                if item.checkState() == Qt.Checked:
+                    selected_files.append(annotation_files[i])
+
+            # Import selected files
+            if selected_files:
+                self.import_multiple_annotations(selected_files)
+
+    def import_multiple_annotations(self, annotation_files):
+        """
+        Import annotations from multiple files.
+
+        Args:
+            annotation_files (list): List of annotation file paths
+        """
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Importing Annotations")
+        progress.setFixedSize(400, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        status_label = QLabel("Importing annotations...")
+        progress_layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, len(annotation_files))
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Import each file
+        for i, file_path in enumerate(annotation_files):
+            status_label.setText(f"Importing {os.path.basename(file_path)}...")
+            progress_bar.setValue(i)
+            QApplication.processEvents()
+
+            try:
+                self.import_annotations(file_path)
+            except Exception as e:
+                print(f"Error importing {file_path}: {str(e)}")
+
+        # Close progress dialog
+        progress.close()
+
+        # Show success message
+        QMessageBox.information(
+            self,
+            "Import Complete",
+            f"Successfully imported annotations from {len(annotation_files)} files.",
+        )
 
     def update_frame_info(self):
         """Update frame information in the UI."""
@@ -956,15 +644,17 @@ class VideoAnnotationTool(QMainWindow):
             # Update frame label for image datasets
             total = len(self.image_files) if self.image_files else 0
             self.frame_label.setText(f"{self.current_frame + 1}/{total}")
-            
+
             # Update slider position (without triggering valueChanged)
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame)
             self.frame_slider.blockSignals(False)
-            
+
             # Show current image filename in status bar
             if 0 <= self.current_frame < len(self.image_files):
-                self.statusBar.showMessage(f"Image: {os.path.basename(self.image_files[self.current_frame])}")
+                self.statusBar.showMessage(
+                    f"Image: {os.path.basename(self.image_files[self.current_frame])}"
+                )
         elif self.cap and self.cap.isOpened():
             # Update frame label for videos
             self.frame_label.setText(f"{self.current_frame}/{self.total_frames}")
@@ -973,7 +663,6 @@ class VideoAnnotationTool(QMainWindow):
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame)
             self.frame_slider.blockSignals(False)
-
 
     def update_frame_annotations(self):
         """Update annotations for the current frame."""
@@ -1039,7 +728,6 @@ class VideoAnnotationTool(QMainWindow):
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
 
-
     def prev_frame(self):
         """Go to the previous frame in the video or previous image in the dataset."""
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
@@ -1065,7 +753,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def next_frame(self):
         """Go to the next frame in the video or next image in the dataset."""
-        
+
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
                 self.current_frame += 1
@@ -1140,7 +828,7 @@ class VideoAnnotationTool(QMainWindow):
                 )
                 self.statusBar.showMessage("Slideshow playing")
             return
-            
+
         if not self.cap:
             return
 
@@ -1199,7 +887,7 @@ class VideoAnnotationTool(QMainWindow):
             # Get video path if available or image dataset info
             video_path = None
             image_dataset_info = None
-            
+
             if hasattr(self, "is_image_dataset") and self.is_image_dataset:
                 # For image datasets, store the folder and relative paths
                 if self.image_files:
@@ -1207,7 +895,9 @@ class VideoAnnotationTool(QMainWindow):
                     image_dataset_info = {
                         "is_image_dataset": True,
                         "base_folder": base_folder,
-                        "image_files": [os.path.relpath(f, base_folder) for f in self.image_files]
+                        "image_files": [
+                            os.path.relpath(f, base_folder) for f in self.image_files
+                        ],
                     }
             else:
                 # For videos, store the video path
@@ -1231,7 +921,7 @@ class VideoAnnotationTool(QMainWindow):
                 duplicate_frames_enabled=self.duplicate_frames_enabled,
                 frame_hashes=self.frame_hashes,
                 duplicate_frames_cache=self.duplicate_frames_cache,
-                image_dataset_info=image_dataset_info
+                image_dataset_info=image_dataset_info,
             )
 
             self.project_file = filename
@@ -1301,7 +991,7 @@ class VideoAnnotationTool(QMainWindow):
                     duplicate_frames_enabled,
                     frame_hashes,
                     duplicate_frames_cache,
-                    image_dataset_info
+                    image_dataset_info,
                 ) = load_project(filename, BoundingBox)
 
                 # Update canvas
@@ -1342,14 +1032,18 @@ class VideoAnnotationTool(QMainWindow):
                 self.duplicate_frames_cache = (
                     duplicate_frames_cache if duplicate_frames_cache else {}
                 )
-                
+
                 # Handle image dataset if present
-                if image_dataset_info and image_dataset_info.get("is_image_dataset", False):
-                    self.load_image_dataset_from_project(image_dataset_info, current_frame)
+                if image_dataset_info and image_dataset_info.get(
+                    "is_image_dataset", False
+                ):
+                    self.load_image_dataset_from_project(
+                        image_dataset_info, current_frame
+                    )
                 # Otherwise load video if path is available
                 elif video_path and os.path.exists(video_path):
                     self.load_video_from_project(video_path, current_frame)
-                
+
                 # Update UI
                 self.update_settings_menu_actions()
                 self.update_annotation_list()
@@ -1375,7 +1069,6 @@ class VideoAnnotationTool(QMainWindow):
             except Exception as e:
                 self._loading_from_project = False
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
-
 
     # Add these methods to save and load application state
     def save_application_state(self):
@@ -1432,9 +1125,11 @@ class VideoAnnotationTool(QMainWindow):
 
         # Perform final auto-save if enabled
         if self.autosave_enabled:
-            if (hasattr(self, "project_file") and self.project_file) or \
-            (hasattr(self, "is_image_dataset") and self.is_image_dataset) or \
-            (hasattr(self, "video_filename") and self.video_filename):
+            if (
+                (hasattr(self, "project_file") and self.project_file)
+                or (hasattr(self, "is_image_dataset") and self.is_image_dataset)
+                or (hasattr(self, "video_filename") and self.video_filename)
+            ):
                 self.perform_autosave()
 
             self.perform_autosave()
@@ -1471,22 +1166,26 @@ class VideoAnnotationTool(QMainWindow):
         # Format selection
         format_label = QLabel("Export Format:")
         format_combo = QComboBox()
-        
+
         # Add appropriate formats based on dataset type
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
-            format_combo.addItems([
-                "COCO JSON",
-                "YOLO TXT",
-                "Pascal VOC XML",
-                "Raya TXT",
-            ])
+            format_combo.addItems(
+                [
+                    "COCO JSON",
+                    "YOLO TXT",
+                    "Pascal VOC XML",
+                    "Raya TXT",
+                ]
+            )
         else:
-            format_combo.addItems([
-                "Raya TXT",
-                "COCO JSON",
-                "YOLO TXT",
-                "Pascal VOC XML",
-            ])
+            format_combo.addItems(
+                [
+                    "Raya TXT",
+                    "COCO JSON",
+                    "YOLO TXT",
+                    "Pascal VOC XML",
+                ]
+            )
 
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1507,7 +1206,11 @@ class VideoAnnotationTool(QMainWindow):
         default_filename = ""
 
         # If we have a video file loaded, use its directory and name
-        if hasattr(self, "is_image_dataset") and self.is_image_dataset and self.image_files:
+        if (
+            hasattr(self, "is_image_dataset")
+            and self.is_image_dataset
+            and self.image_files
+        ):
             # For image datasets, use the folder name
             image_folder = os.path.dirname(self.image_files[0])
             folder_name = os.path.basename(image_folder)
@@ -1516,7 +1219,9 @@ class VideoAnnotationTool(QMainWindow):
         elif hasattr(self, "video_filename") and self.video_filename:
             # For videos, use the video filename
             default_dir = os.path.dirname(self.video_filename)
-            default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
+            default_filename = os.path.splitext(os.path.basename(self.video_filename))[
+                0
+            ]
 
         # Get export filename based on format
         if format_type == "COCO JSON":
@@ -1540,10 +1245,15 @@ class VideoAnnotationTool(QMainWindow):
                     self,
                     "Select Directory for YOLO Export",
                     default_path,
-                    QFileDialog.ShowDirsOnly
+                    QFileDialog.ShowDirsOnly,
                 )
                 if export_dir:
-                    export_image_dataset_yolo(export_dir, self.image_files, self.frame_annotations, self.canvas.class_colors)
+                    export_image_dataset_yolo(
+                        export_dir,
+                        self.image_files,
+                        self.frame_annotations,
+                        self.canvas.class_colors,
+                    )
                     self.statusBar.showMessage(
                         f"Annotations exported to YOLO format in {os.path.basename(export_dir)}"
                     )
@@ -1568,14 +1278,14 @@ class VideoAnnotationTool(QMainWindow):
                     self,
                     "Select Directory for Pascal VOC Export",
                     default_path,
-                    QFileDialog.ShowDirsOnly
+                    QFileDialog.ShowDirsOnly,
                 )
                 if export_dir:
                     export_image_dataset_pascal_voc(
                         export_dir,
                         self.image_files,
                         self.frame_annotations,
-                        self.canvas.pixmap
+                        self.canvas.pixmap,
                     )
                     self.statusBar.showMessage(
                         f"Annotations exported to Pascal VOC format in {os.path.basename(export_dir)}"
@@ -1619,24 +1329,30 @@ class VideoAnnotationTool(QMainWindow):
                 )
 
                 # For image datasets, we need to handle the export differently for some formats
-                if hasattr(self, "is_image_dataset") and self.is_image_dataset and export_format == "coco":
-                        export_image_dataset_coco(
+                if (
+                    hasattr(self, "is_image_dataset")
+                    and self.is_image_dataset
+                    and export_format == "coco"
+                ):
+                    export_image_dataset_coco(
                         filename,
                         self.image_files,
                         self.frame_annotations,
                         self.canvas.class_colors,
                         image_width,
-                        image_height
+                        image_height,
                     )
                 else:
-                    
-                    export_standard_annotations(filename,
-                    self.frame_annotations,
-                    self.canvas.annotations,
-                    export_format,
-                    image_width,
-                    image_height)
-                    
+
+                    export_standard_annotations(
+                        filename,
+                        self.frame_annotations,
+                        self.canvas.annotations,
+                        export_format,
+                        image_width,
+                        image_height,
+                    )
+
                 self.statusBar.showMessage(
                     f"Annotations exported to {os.path.basename(filename)}"
                 )
@@ -1645,6 +1361,7 @@ class VideoAnnotationTool(QMainWindow):
                     self, "Error", f"Failed to export annotations: {str(e)}"
                 )
                 import traceback
+
                 traceback.print_exc()
 
     #
@@ -2168,70 +1885,73 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "class_selector") and self.class_selector.count() > 0:
                 self.class_selector.setCurrentText(first_class)
 
-    def import_annotations(self, filename=None):
+    def import_annotations(self, filename):
         """
-        Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
-        The format is automatically detected based on file extension and content.
+        Import annotations from a file.
 
         Args:
-            filename (str, optional): Path to the annotation file. If None, a file dialog will be shown.
+            filename (str): Path to the annotation file
         """
-        if not (self.cap or (hasattr(self, "is_image_dataset") and self.is_image_dataset)):
-            QMessageBox.warning(
-            self, "Import Annotations", "Please open a video or image dataset first!"
-        )
-            return
+        # Check if it's a VIAT project file
+        try:
+            with open(filename, "r") as f:
+                data = json.load(f)
+                if "viat_project_identifier" in data:
+                    # This is a VIAT project file, not an annotation file
+                    QMessageBox.information(
+                        self,
+                        "Project File Detected",
+                        f"{os.path.basename(filename)} is a VIAT project file, not an annotation file. "
+                        "Please use 'Open Project' to load this file.",
+                    )
+                    return
+        except:
+            pass
 
-        # If no filename provided, show file dialog to select one
-        if not filename:
-            filename, _ = QFileDialog.getOpenFileName(
-                self,
-                "Import Annotations",
-                "",
-                "All Supported Files (*.json *.xml *.txt);;JSON Files (*.json);;XML Files (*.xml);;Text Files (*.txt);;All Files (*)",
-            )
-
-            if not filename:
-                return
+        # Get current frame dimensions
+        if self.canvas.pixmap:
+            image_width = self.canvas.pixmap.width()
+            image_height = self.canvas.pixmap.height()
+        else:
+            image_width = 640
+            image_height = 480
 
         try:
-            # Get image dimensions from canvas
-            image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
-            image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
+            # Import annotations
+            from utils.file_operations import import_annotations
 
-            # Import annotations using the function from file_operations.py
-            self.statusBar.showMessage(f"Importing annotations...")
-            
             format_type, annotations, imported_frame_annotations = import_annotations(
-                filename, 
-                BoundingBox, 
-                image_width, 
-                image_height, 
-                self.canvas.class_colors
+                filename, BoundingBox, image_width, image_height, self.class_colors
             )
-            
-            # Update frame annotations with imported annotations
-            for frame_num, frame_anns in imported_frame_annotations.items():
+
+            # Update frame annotations
+            for frame_num, anns in imported_frame_annotations.items():
                 if frame_num not in self.frame_annotations:
                     self.frame_annotations[frame_num] = []
-                self.frame_annotations[frame_num].extend(frame_anns)
-            
-            # Update canvas annotations if we have annotations for the current frame
-            if self.current_frame in imported_frame_annotations:
-                self.canvas.annotations.extend(imported_frame_annotations[self.current_frame])
-            
-            # Update UI
-            self.update_annotation_list()
-            self.update_class_ui_after_import()
-            self.canvas.update()
+                self.frame_annotations[frame_num].extend(anns)
 
-            self.statusBar.showMessage(
-                f"Successfully imported {format_type} annotations from {os.path.basename(filename)}"
+            # Update canvas annotations if we're on a frame that has imported annotations
+            if self.current_frame in imported_frame_annotations:
+                self.canvas.annotations.extend(
+                    imported_frame_annotations[self.current_frame]
+                )
+                self.canvas.update()
+
+            # Update annotation dock
+            self.annotation_dock.update_annotation_list()
+
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Import Successful",
+                f"Successfully imported annotations from {os.path.basename(filename)} "
+                f"({format_type} format).",
             )
         except Exception as e:
             QMessageBox.critical(
-                self, "Error", f"Failed to import annotations: {str(e)}"
+                self, "Import Error", f"Error importing annotations: {str(e)}"
             )
+
     #
     # Class handling methods
     #
@@ -2942,7 +2662,7 @@ class VideoAnnotationTool(QMainWindow):
             self.autosave_timer.start(self.autosave_interval)
             if hasattr(self, "statusBar") and self.statusBar:
                 self.statusBar.showMessage("Auto-save enabled", 3000)
-   
+
     def perform_autosave(self):
         """Perform auto-save of the current project."""
         if not self.autosave_enabled:
@@ -2952,11 +2672,17 @@ class VideoAnnotationTool(QMainWindow):
         if not hasattr(self, "project_file") or not self.project_file:
             # Create auto-save filename based on video filename or image dataset folder
             if not self.autosave_file:
-                if hasattr(self, "is_image_dataset") and self.is_image_dataset and self.image_files:
+                if (
+                    hasattr(self, "is_image_dataset")
+                    and self.is_image_dataset
+                    and self.image_files
+                ):
                     # For image datasets, use the folder name
                     image_folder = os.path.dirname(self.image_files[0])
                     folder_name = os.path.basename(image_folder)
-                    self.autosave_file = os.path.join(image_folder, f"{folder_name}_autosave.json")
+                    self.autosave_file = os.path.join(
+                        image_folder, f"{folder_name}_autosave.json"
+                    )
                 elif hasattr(self, "video_filename") and self.video_filename:
                     # For videos, use the video filename
                     video_base = os.path.splitext(self.video_filename)[0]
@@ -2972,7 +2698,7 @@ class VideoAnnotationTool(QMainWindow):
             # Get video path or image dataset info
             video_path = None
             image_dataset_info = None
-            
+
             if hasattr(self, "is_image_dataset") and self.is_image_dataset:
                 # For image datasets, store the folder and relative paths
                 if self.image_files:
@@ -2980,7 +2706,9 @@ class VideoAnnotationTool(QMainWindow):
                     image_dataset_info = {
                         "is_image_dataset": True,
                         "base_folder": base_folder,
-                        "image_files": [os.path.relpath(f, base_folder) for f in self.image_files]
+                        "image_files": [
+                            os.path.relpath(f, base_folder) for f in self.image_files
+                        ],
                     }
             else:
                 # For videos, store the video path
@@ -3004,7 +2732,7 @@ class VideoAnnotationTool(QMainWindow):
                 duplicate_frames_enabled=self.duplicate_frames_enabled,
                 frame_hashes=self.frame_hashes,
                 duplicate_frames_cache=self.duplicate_frames_cache,
-                image_dataset_info=image_dataset_info
+                image_dataset_info=image_dataset_info,
             )
 
             self.last_autosave_time = QDateTime.currentDateTime()
@@ -3013,7 +2741,6 @@ class VideoAnnotationTool(QMainWindow):
             )
         except Exception as e:
             print(f"Auto-save failed: {str(e)}")
-
 
     def update_recent_projects_menu(self):
         """Update the recent projects menu with the latest projects."""
@@ -3104,13 +2831,13 @@ class VideoAnnotationTool(QMainWindow):
 
         if not folder_path:
             return
-            
+
         # Import the dataset manager
         from utils.dataset_manager import detect_folder_type
-        
+
         # Detect if this is a simple folder or a dataset
         folder_type = detect_folder_type(folder_path)
-        
+
         if folder_type == "dataset":
             # Handle as a dataset
             self.open_image_dataset(folder_path)
@@ -3133,7 +2860,9 @@ class VideoAnnotationTool(QMainWindow):
 
         if not image_files:
             QMessageBox.warning(
-                self, "Open Image Folder", "No image files found in the selected folder!"
+                self,
+                "Open Image Folder",
+                "No image files found in the selected folder!",
             )
             return
 
@@ -3160,7 +2889,9 @@ class VideoAnnotationTool(QMainWindow):
         # Enable play button for image datasets
         if hasattr(self, "play_button"):
             self.play_button.setEnabled(True)
-            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
+            self.play_button.setIcon(
+                self.icon_provider.get_icon("media-playback-start")
+            )
 
         # Set up auto-save for this dataset
         self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
@@ -3181,67 +2912,65 @@ class VideoAnnotationTool(QMainWindow):
 
         if not folder_path:
             return
-       
+
         # Show import dialog
         config = import_dataset_dialog(self, folder_path)
-        
+
         if not config:
             return  # User cancelled
-        
+
         # Reset existing state
         self.reset_media_state()
-        
+
         # Load the dataset
         image_files, success_message = load_dataset(
-            self, 
-            config, 
-            self.frame_annotations, 
-            self.canvas.class_colors,
-            BoundingBox
+            self, config, self.frame_annotations, self.canvas.class_colors, BoundingBox
         )
-        
+
         if not image_files:
             QMessageBox.warning(
                 self,
                 "Open Image Dataset",
-                "No image files found in the selected dataset!"
+                "No image files found in the selected dataset!",
             )
             return
-        
+
         # Set up the image dataset interface
         self.image_files = image_files
         self.total_frames = len(image_files)
         self.current_frame = 0
         self.is_image_dataset = True
-        
+
         # Load the first image
         self.load_current_image()
-        
+
         # Update UI
         self.frame_slider.setMaximum(self.total_frames - 1)
         self.update_frame_info()
-        
+
         # Update window title
         folder_name = os.path.basename(folder_path)
         self.setWindowTitle(f"Video Annotation Tool - Image Dataset: {folder_name}")
-        
+
         # Enable play button for image datasets
         if hasattr(self, "play_button"):
             self.play_button.setEnabled(True)
-            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
-        
+            self.play_button.setIcon(
+                self.icon_provider.get_icon("media-playback-start")
+            )
+
         # Set up auto-save for this dataset
         self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
-        
+
         # Start auto-save timer
         if self.autosave_enabled and not self.autosave_timer.isActive():
             self.autosave_timer.start(self.autosave_interval)
-        
+
         # Update UI
         self.update_annotation_list()
         self.toolbar.update_class_selector()
         self.class_dock.update_class_list()
-        
+
         # Show success message
         self.statusBar.showMessage(success_message)
 
@@ -3258,21 +2987,21 @@ class VideoAnnotationTool(QMainWindow):
 
             if frame is not None:
 
-
                 # Set the frame to the canvas
                 self.canvas.set_frame(frame)
 
                 # Load annotations for this frame if they exist
                 self.load_current_frame_annotations()
-                
+
                 # Update frame info and slider
                 self.update_frame_info()
-                
+
                 return True
             else:
-                self.statusBar.showMessage(f"Error loading image: {os.path.basename(image_path)}")
+                self.statusBar.showMessage(
+                    f"Error loading image: {os.path.basename(image_path)}"
+                )
                 return False
-
 
     def toggle_duplicate_frames_detection(self):
         """Toggle automatic duplicate frame detection and annotation propagation."""
@@ -3376,8 +3105,6 @@ class VideoAnnotationTool(QMainWindow):
             "Scan Complete",
             f"Found {duplicate_count} duplicate frames in {self.total_frames} total frames.",
         )
-
-
 
     def propagate_annotations_to_duplicate(self, frame_hash):
         """
@@ -3596,79 +3323,79 @@ class VideoAnnotationTool(QMainWindow):
             )
 
     def detect_similar_frames(self, reference_frame, similarity_threshold=0.9):
-            """
-            Detect frames that are similar to the reference frame.
+        """
+        Detect frames that are similar to the reference frame.
 
-            Args:
-                reference_frame (int): The reference frame number
-                similarity_threshold (float): Threshold for considering frames similar (0-1)
+        Args:
+            reference_frame (int): The reference frame number
+            similarity_threshold (float): Threshold for considering frames similar (0-1)
 
-            Returns:
-                list: List of frame numbers that are similar to the reference frame
-            """
-            if not self.cap or not self.cap.isOpened():
-                return []
+        Returns:
+            list: List of frame numbers that are similar to the reference frame
+        """
+        if not self.cap or not self.cap.isOpened():
+            return []
 
-            # Get reference frame image
-            current_pos = self.current_frame
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
-            ret, ref_frame = self.cap.read()
-            if not ret:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-                return []
-
-            # Create progress dialog
-            progress = QDialog(self)
-            progress.setWindowTitle("Finding Similar Frames")
-            progress.setFixedSize(300, 100)
-            layout = QVBoxLayout(progress)
-
-            label = QLabel("Scanning for similar frames...")
-            layout.addWidget(label)
-
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, self.total_frames)
-            layout.addWidget(progress_bar)
-
-            # Non-blocking progress dialog
-            progress.setModal(False)
-            progress.show()
-            QApplication.processEvents()
-
-            # Scan video
-            similar_frames = [reference_frame]  # Include reference frame in results
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-            for frame_num in range(self.total_frames):
-                # Skip reference frame
-                if frame_num == reference_frame:
-                    continue
-
-                # Update progress
-                progress_bar.setValue(frame_num)
-                if frame_num % 10 == 0:  # Update UI every 10 frames
-                    QApplication.processEvents()
-
-                # Read frame
-                ret, frame = self.cap.read()
-                if not ret:
-                    break
-
-                # Use mse_similarity from utils.im_tools
-                similarity = mse_similarity(ref_frame, frame)
-
-                # Add to similar frames if above threshold
-                if similarity >= similarity_threshold:
-                    similar_frames.append(frame_num)
-
-            # Restore position
+        # Get reference frame image
+        current_pos = self.current_frame
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
+        ret, ref_frame = self.cap.read()
+        if not ret:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+            return []
 
-            # Close progress dialog
-            progress.close()
+        # Create progress dialog
+        progress = QDialog(self)
+        progress.setWindowTitle("Finding Similar Frames")
+        progress.setFixedSize(300, 100)
+        layout = QVBoxLayout(progress)
 
-            return similar_frames
-    
+        label = QLabel("Scanning for similar frames...")
+        layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, self.total_frames)
+        layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Scan video
+        similar_frames = [reference_frame]  # Include reference frame in results
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        for frame_num in range(self.total_frames):
+            # Skip reference frame
+            if frame_num == reference_frame:
+                continue
+
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 10 == 0:  # Update UI every 10 frames
+                QApplication.processEvents()
+
+            # Read frame
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            # Use mse_similarity from utils.im_tools
+            similarity = mse_similarity(ref_frame, frame)
+
+            # Add to similar frames if above threshold
+            if similarity >= similarity_threshold:
+                similar_frames.append(frame_num)
+
+        # Restore position
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+
+        # Close progress dialog
+        progress.close()
+
+        return similar_frames
+
     def propagate_to_similar_frames(self):
         """Propagate current frame annotations to similar frames."""
         if not self.canvas.annotations:
@@ -4021,15 +3748,19 @@ class VideoAnnotationTool(QMainWindow):
         """Load an image dataset from project information."""
         base_folder = image_dataset_info.get("base_folder", "")
         relative_paths = image_dataset_info.get("image_files", [])
-        
+
         # Check if base folder exists
         if not os.path.exists(base_folder):
             # Ask user to locate the base folder
             msg = f"The original image folder '{base_folder}' was not found.\nWould you like to locate it?"
             reply = QMessageBox.question(
-                self, "Folder Not Found", msg, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                self,
+                "Folder Not Found",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
             )
-            
+
             if reply == QMessageBox.Yes:
                 new_base_folder = QFileDialog.getExistingDirectory(
                     self, "Locate Image Folder", "", QFileDialog.ShowDirsOnly
@@ -4040,60 +3771,66 @@ class VideoAnnotationTool(QMainWindow):
                     return False
             else:
                 return False
-        
+
         # Construct absolute paths
         image_files = []
         missing_files = []
-        
+
         for rel_path in relative_paths:
             abs_path = os.path.join(base_folder, rel_path)
             if os.path.exists(abs_path):
                 image_files.append(abs_path)
             else:
                 missing_files.append(rel_path)
-        
+
         # Warn about missing files
         if missing_files:
             if len(missing_files) > 10:
-                missing_msg = "\n".join(missing_files[:10]) + f"\n... and {len(missing_files) - 10} more"
+                missing_msg = (
+                    "\n".join(missing_files[:10])
+                    + f"\n... and {len(missing_files) - 10} more"
+                )
             else:
                 missing_msg = "\n".join(missing_files)
-            
+
             QMessageBox.warning(
                 self,
                 "Missing Files",
-                f"The following {len(missing_files)} image files were not found:\n\n{missing_msg}"
+                f"The following {len(missing_files)} image files were not found:\n\n{missing_msg}",
             )
-        
+
         if not image_files:
             QMessageBox.critical(
                 self, "Error", "No image files could be loaded from the project."
             )
             return False
-        
+
         # Set up the image dataset
         self.image_files = image_files
         self.total_frames = len(image_files)
         self.current_frame = min(current_frame, self.total_frames - 1)
         self.is_image_dataset = True
-        
+
         # Update UI
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(self.total_frames - 1)
         self.frame_slider.setValue(self.current_frame)
-        
-        
+
         self.load_current_image()
 
         self.update_frame_info()
-        
+
         # Update window title
-        self.setWindowTitle(f"Video Annotation Tool - Image Dataset: {os.path.basename(base_folder)}")
-        
+        self.setWindowTitle(
+            f"Video Annotation Tool - Image Dataset: {os.path.basename(base_folder)}"
+        )
+
         if hasattr(self, "play_button"):
             self.play_button.setEnabled(True)
-            self.play_button.setIcon(self.icon_provider.get_icon("media-playback-start"))
-        
+            self.play_button.setIcon(
+                self.icon_provider.get_icon("media-playback-start")
+            )
+
         return True
 
     def load_video_from_project(self, video_path, current_frame):
@@ -4120,61 +3857,61 @@ class VideoAnnotationTool(QMainWindow):
                     self.canvas.set_frame(frame)
                     self.update_frame_info()
                     self.load_current_frame_annotations()
-        
+
         return success
 
     def scan_images_for_duplicates(self):
         """Scan all images in the dataset to identify duplicates."""
         if not hasattr(self, "image_files") or not self.image_files:
             return
-        
+
         # Create progress dialog
         progress = QDialog(self)
         progress.setWindowTitle("Scanning Images")
         progress.setFixedSize(300, 100)
         layout = QVBoxLayout(progress)
-        
+
         label = QLabel("Scanning for duplicate images...")
         layout.addWidget(label)
-        
+
         progress_bar = QProgressBar()
         progress_bar.setRange(0, len(self.image_files))
         layout.addWidget(progress_bar)
-        
+
         # Non-blocking progress dialog
         progress.setModal(False)
         progress.show()
         QApplication.processEvents()
-        
+
         # Reset cache
         self.duplicate_frames_cache = {}
         self.frame_hashes = {}
-        
+
         # Scan images
         for frame_num, image_path in enumerate(self.image_files):
             # Update progress
             progress_bar.setValue(frame_num)
             if frame_num % 5 == 0:  # Update UI every 5 images
                 QApplication.processEvents()
-            
+
             # Load image
             frame = cv2.imread(image_path)
             if frame is None:
                 continue
-            
+
             # Calculate frame hash
             frame_hash = calculate_frame_hash(frame)
             self.frame_hashes[frame_num] = frame_hash
-            
+
             # Add to duplicate cache
             if frame_hash in self.duplicate_frames_cache:
                 self.duplicate_frames_cache[frame_hash].append(frame_num)
             else:
                 self.duplicate_frames_cache[frame_hash] = [frame_num]
-        
+
         # Close progress dialog
         progress.close()
-        
+
         # Report results
         duplicate_count = sum(
             len(frames) - 1
@@ -4189,40 +3926,40 @@ class VideoAnnotationTool(QMainWindow):
 
     def set_slideshow_speed(self, speed_factor):
         """Set the speed of the image slideshow.
-        
+
         Args:
             speed_factor (float): Speed multiplier (1.0 = 1 second per image)
         """
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             # Calculate interval in milliseconds (1000ms / speed_factor)
             interval = int(1000 / speed_factor)
-            
+
             # Update interval if currently playing
             if self.is_playing:
                 self.play_timer.stop()
                 self.play_timer.start(interval)
-            
+
             self.statusBar.showMessage(f"Slideshow speed: {speed_factor}x")
 
     def setup_playback_timer(self):
         """Set up the timer for video playback or image slideshow."""
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self.next_frame)
-        
+
         # Initialize slideshow speed to 1 second per image
         self.slideshow_speed = 1.0
-   
+
     def check_for_image_annotation_files(self, folder_path, folder_name):
         """
         Check if annotation files exist for this image dataset.
-        
+
         Args:
             folder_path (str): Path to the image folder
             folder_name (str): Name of the image folder
         """
         # Check for auto-save file first
         autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
-        
+
         if os.path.exists(autosave_file):
             reply = QMessageBox.question(
                 self,
@@ -4246,21 +3983,21 @@ class VideoAnnotationTool(QMainWindow):
                         "Auto-Save Error",
                         f"Error loading auto-save file: {str(e)}",
                     )
-        
+
         # List of possible annotation file patterns
         annotation_patterns = [
             f"{folder_name}_annotations.json",  # COCO format
-            f"{folder_name}_annotations.txt",   # Raya format
-            "annotations.json",                # Common COCO filename
+            f"{folder_name}_annotations.txt",  # Raya format
+            "annotations.json",  # Common COCO filename
         ]
-        
+
         # Find matching annotation files
         annotation_files = []
         for pattern in annotation_patterns:
             potential_file = os.path.join(folder_path, pattern)
             if os.path.exists(potential_file) and potential_file != autosave_file:
                 annotation_files.append(potential_file)
-        
+
         # Also check for YOLO format (classes.txt and image-specific .txt files)
         classes_file = os.path.join(folder_path, "classes.txt")
         if os.path.exists(classes_file):
@@ -4272,10 +4009,12 @@ class VideoAnnotationTool(QMainWindow):
                 if os.path.exists(txt_file):
                     has_txt_annotations = True
                     break
-            
+
             if has_txt_annotations:
-                annotation_files.append(classes_file)  # Use classes.txt as the identifier
-        
+                annotation_files.append(
+                    classes_file
+                )  # Use classes.txt as the identifier
+
         # Check if any of the files is a VIAT project file
         for i, file_path in enumerate(annotation_files[:]):
             if file_path.endswith(".json"):
@@ -4287,7 +4026,7 @@ class VideoAnnotationTool(QMainWindow):
                             annotation_files.remove(file_path)
                 except:
                     pass
-        
+
         if annotation_files:
             # Create a message with the found files
             message = "Found the following annotation file(s):\n\n"
@@ -4315,91 +4054,100 @@ class VideoAnnotationTool(QMainWindow):
     def reset_media_state(self):
         """Reset all state related to the current media (video or image dataset)"""
         # Reset canvas
-        if hasattr(self, 'canvas'):
+        if hasattr(self, "canvas"):
             self.canvas.annotations = []
             self.canvas.selected_annotation = None
             self.canvas.update()
-        
+
         # Reset annotation storage
         self.frame_annotations = {}
         self.current_frame = 0
-        
+
         # Reset media-specific state
         self.video_path = None
         self.image_dataset_info = None
         self.is_image_dataset = False
-        
+
         # Reset frame analysis data
         self.frame_hashes = {}
         self.duplicate_frames_cache = {}
-        
+
         # Update UI
-        if hasattr(self, 'annotation_dock'):
+        if hasattr(self, "annotation_dock"):
             self.annotation_dock.update_annotation_list()
-        
+
         # Reset status
         self.statusBar.showMessage("Ready")
-
 
     def export_image_dataset(self):
         """Export the current image dataset with advanced options."""
         if not hasattr(self, "is_image_dataset") or not self.is_image_dataset:
             QMessageBox.warning(
-                self,
-                "Export Image Dataset",
-                "Please open an image dataset first!"
+                self, "Export Image Dataset", "Please open an image dataset first!"
             )
             return
-        
+
         # Import the dataset manager
-        
+
         # Show export dialog
         config = export_dataset_dialog(self, self.image_files, self.frame_annotations)
-        
+
         if not config:
             return  # User cancelled
-        
+
         # Export the dataset
         result = export_dataset(
             self,
             config,
             self.image_files,
             self.frame_annotations,
-            self.canvas.class_colors
+            self.canvas.class_colors,
         )
-        
+
         if result:
             self.statusBar.showMessage(result, 5000)
 
     def create_dataset(self):
         """Create a new dataset from the current annotations."""
-        if not hasattr(self, "is_image_dataset") or not self.is_image_dataset or not self.image_files:
+        if (
+            not hasattr(self, "is_image_dataset")
+            or not self.is_image_dataset
+            or not self.image_files
+        ):
             QMessageBox.warning(
-                self, "Create Dataset", "This feature is only available for image datasets."
+                self,
+                "Create Dataset",
+                "This feature is only available for image datasets.",
             )
             return
-        
+
         # Check if we have any annotations
         has_annotations = any(self.frame_annotations.values())
         if not has_annotations:
-            QMessageBox.warning(
-                self, "Create Dataset", "No annotations to export!"
-            )
+            QMessageBox.warning(self, "Create Dataset", "No annotations to export!")
             return
-        
+
         # Import the dataset manager
         from utils.dataset_manager import create_dataset_dialog, create_dataset
-        
+
         # Show dialog to configure dataset
-        config = create_dataset_dialog(self, self.image_files, self.frame_annotations, self.canvas.class_colors)
-        
+        config = create_dataset_dialog(
+            self, self.image_files, self.frame_annotations, self.canvas.class_colors
+        )
+
         if config:
             # Create the dataset
-            success = create_dataset(self, config, self.image_files, self.frame_annotations, self.canvas.class_colors)
-            
+            success = create_dataset(
+                self,
+                config,
+                self.image_files,
+                self.frame_annotations,
+                self.canvas.class_colors,
+            )
+
             if success:
                 QMessageBox.information(
                     self,
                     "Dataset Created",
-                    f"Dataset created successfully in {config['output_dir']}"
+                    f"Dataset created successfully in {config['output_dir']}",
                 )
