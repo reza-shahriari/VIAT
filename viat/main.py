@@ -94,7 +94,6 @@ class VideoAnnotationTool(QMainWindow):
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
 
-
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
@@ -196,6 +195,7 @@ class VideoAnnotationTool(QMainWindow):
         # Initialize annotation list
         self.update_annotation_list()
         self.styles[self.current_style]()
+    
     def create_menu_bar(self):
         """Create the application menu bar and its actions."""
         menubar = self.menuBar()
@@ -281,7 +281,6 @@ class VideoAnnotationTool(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-
 
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
@@ -803,7 +802,13 @@ class VideoAnnotationTool(QMainWindow):
             potential_file = os.path.join(directory, base_name + ext)
             if os.path.exists(potential_file) and potential_file != autosave_file:
                 annotation_files.append(potential_file)
-
+        # check if the json file in annotaton_files is project save not a coco
+        for an in annotation_files:
+            if an.endswith(".json"):
+                with open(an, "r") as f:
+                    data = json.load(f)
+                    if "viat_project_identifier" in data:
+                        annotation_files.remove(an)
         if annotation_files:
             # Create a message with the found files
             message = "Found the following annotation file(s):\n\n"
@@ -1938,7 +1943,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def import_annotations(self, filename=None):
         """
-        Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya Text).
+        Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
         The format is automatically detected based on file extension and content.
 
         Args:
@@ -1970,7 +1975,7 @@ class VideoAnnotationTool(QMainWindow):
                 QMessageBox.warning(
                     self,
                     "Import Annotations",
-                    "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, or Raya format.",
+                    "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, Raya, or Raya YOLO format.",
                 )
                 return
 
@@ -1990,6 +1995,8 @@ class VideoAnnotationTool(QMainWindow):
                 self.import_pascal_voc_annotations(filename, image_width, image_height)
             elif format_type == "Raya":
                 self.import_raya_annotations(filename, image_width, image_height)
+            elif format_type == "RayaYOLO":
+                self.import_raya_yolo_annotations(filename, image_width, image_height)
 
             # Update UI
             self.update_annotation_list()
@@ -2012,7 +2019,7 @@ class VideoAnnotationTool(QMainWindow):
             filename (str): Path to the annotation file
 
         Returns:
-            str: Detected format ("COCO", "YOLO", "Pascal VOC", "Raya") or None if not detected
+            str: Detected format ("COCO", "YOLO", "Pascal VOC", "Raya", "RayaYOLO") or None if not detected
         """
         # Check file extension
         ext = os.path.splitext(filename)[1].lower()
@@ -2037,6 +2044,20 @@ class VideoAnnotationTool(QMainWindow):
                 return "Pascal VOC"
         elif ext == ".txt":
             lines = content.strip().split("\n")
+            
+            # Check for RayaYOLO format
+            if lines and all(
+                line.strip() == "[]" or (
+                    line.strip().startswith("[[") and 
+                    line.strip().endswith("]]") and
+                    "], [" in line or not "], [" in line  # Handle single prediction case
+                )
+                for line in lines
+                if line.strip()
+            ):
+                return "RayaYOLO"
+                
+            # Check for Raya format
             if lines and all(
                 line.strip() == "[]"
                 or (
@@ -2074,6 +2095,7 @@ class VideoAnnotationTool(QMainWindow):
                 pass
 
         return None
+
     def import_coco_annotations(self, filename, image_width, image_height):
         """
         Import annotations from COCO JSON format.
@@ -2273,7 +2295,7 @@ class VideoAnnotationTool(QMainWindow):
         """
         Import annotations from Raya text format.
 
-        Format: [class,x,y,width,height,size,quality,shadow(optional)];
+        Format: [class,x,y,width,height,size,quality,Difficult(optional)];
         If no detection: []
 
         Args:
@@ -2331,7 +2353,7 @@ class VideoAnnotationTool(QMainWindow):
                         height = float(parts[4])
                         size = float(parts[5])
                         quality = float(parts[6]) if len(parts) > 6 else 100.0
-                        shadow = float(parts[7]) if len(parts) > 7 else 0.0
+                        Difficult = float(parts[7]) if len(parts) > 7 else 0.0
 
 
                         # Create class name based on class ID
@@ -2354,8 +2376,8 @@ class VideoAnnotationTool(QMainWindow):
                             "Size": int(size),
                             "Quality": int(quality),
                         }
-                        if shadow != 0.0:
-                            attributes["Shadow"] = int(shadow)
+                        if Difficult != 0.0:
+                            attributes["Difficult"] = int(Difficult)
                         # Create bounding box
                         bbox_obj = BoundingBox(rect, class_name, attributes, color)
                         frame_annotations.append(bbox_obj)
@@ -2375,6 +2397,114 @@ class VideoAnnotationTool(QMainWindow):
 
         except Exception as e:
             raise Exception(f"Error parsing Raya text file: {str(e)}")
+
+    def import_raya_yolo_annotations(self, filename, image_width, image_height):
+        """
+        Import annotations from Raya YOLO format.
+        
+        Format:
+        - Empty frames: []
+        - Frames with predictions: [[cls,x1,y1,x2,y2,s], [cls,x1,y1,x2,y2,s], ...]
+        
+        Where:
+        - cls: class ID
+        - x1, y1: top-left corner coordinates
+        - x2, y2: bottom-right corner coordinates
+        - s: prediction score (ignored for annotation purposes)
+        
+        Args:
+            filename (str): Path to the Raya YOLO text file
+            image_width (int): Width of the image/video frame
+            image_height (int): Height of the image/video frame
+        """
+        try:
+            with open(filename, 'r') as f:
+                lines = f.readlines()
+            
+            # Process each line (each line represents a frame)
+            for frame_num, line in enumerate(lines):
+                line = line.strip()
+                
+                # Skip empty frames or frames with no detections
+                if not line or line == "[]":
+                    continue
+                
+                # Extract content between the outermost brackets
+                if not (line.startswith("[[") and line.endswith("]]")):
+                    continue
+                    
+                content = line[2:-2]  # Remove outer [[ and ]]
+                
+                # Split by "], [" for multiple annotations
+                if "], [" in content:
+                    annotations = content.split("], [")
+                else:
+                    # Single annotation case
+                    annotations = [content]
+                    
+                frame_annotations = []
+                
+                for annotation in annotations:
+                    # Clean up any remaining brackets
+                    annotation = annotation.strip("[]")
+                    
+                    # Parse the annotation values
+                    parts = annotation.split(",")
+                    
+                    # Ensure we have at least the minimum required fields (cls, x1, y1, x2, y2)
+                    if len(parts) < 5:
+                        continue
+                    
+                    try:
+                        # Parse values
+                        class_id = int(float(parts[0]))
+                        x1 = float(parts[1])
+                        y1 = float(parts[2])
+                        x2 = float(parts[3])
+                        y2 = float(parts[4])
+                        
+                        # Calculate width and height
+                        width = x2 - x1
+                        height = y2 - y1
+                        
+                        # Create class name based on class ID
+                        class_name = f"class_{class_id}"
+                        
+                        # Create QRect (ensure coordinates are valid)
+                        rect = QRect(int(x1), int(y1), int(width), int(height))
+                        
+                        # Get or create color for this class
+                        if class_name not in self.canvas.class_colors:
+                            self.canvas.class_colors[class_name] = QColor(
+                                random.randint(0, 255),
+                                random.randint(0, 255),
+                                random.randint(0, 255)
+                            )
+                        color = self.canvas.class_colors[class_name]
+                        
+                        # Create attributes dictionary
+                        attributes = {
+                            "Size": -1,
+                            "Quality": -1
+                        }
+                        
+                        # Create bounding box
+                        bbox_obj = BoundingBox(rect, class_name, attributes, color)
+                        frame_annotations.append(bbox_obj)
+                        
+                    except (ValueError, IndexError) as e:
+                        print(f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}")
+                
+                # Add to frame annotations
+                if frame_annotations:
+                    self.frame_annotations[frame_num] = frame_annotations
+                    
+                    # If this is the current frame, update canvas annotations
+                    if frame_num == self.current_frame:
+                        self.canvas.annotations = frame_annotations.copy()
+        
+        except Exception as e:
+            raise Exception(f"Error parsing Raya YOLO text file: {str(e)}")
 
     #
     # Class handling methods

@@ -54,7 +54,7 @@ class VideoCanvas(QWidget):
         self.start_point = None
         self.current_point = None
         self.selected_annotation = None
-        self.current_class = "Drone"  # Default class
+        self.current_class = "Quad" 
         self.class_colors = {
             "Quad": QColor(0, 255, 255),
         }

@@ -43,6 +43,7 @@ def save_project(filename, annotations, class_colors, video_path=None, current_f
     
     # Create project data
     project_data = {
+        "viat_project_identifier": "VIAT_PROJECT_FILE_V1",
         "annotations": annotations_dict,
         "class_colors": colors_dict,
         "video_path": video_path,
@@ -464,7 +465,7 @@ def export_raya_annotations(filename, annotations):
     """
     Export annotations to Raya text format.
 
-    Format: [class,x,y,width,height,size,quality,shadow(optional)];
+    Format: [class,x,y,width,height,size,quality,Difficult(optional)];
     If no detection: []
 
     Args:
@@ -505,16 +506,16 @@ def export_raya_annotations(filename, annotations):
                 height = rect.height()
                 size = annotation.attributes.get("Size", -1)
                 quality = annotation.attributes.get("Quality", -1)
-                shadow = annotation.attributes.get("Shadow", -1)
+                Difficult = annotation.attributes.get("Difficult", -1)
 
                 # Format the annotation with a semicolon after each one
-                if shadow==-1:
+                if Difficult==-1:
                     frame_str += (
                         f"[{class_id},{x},{y},{width},{height},{size},{quality}];"
                     )
                 else:
                     frame_str += (
-                        f"[{class_id},{x},{y},{width},{height},{size},{quality},{shadow}];"
+                        f"[{class_id},{x},{y},{width},{height},{size},{quality},{Difficult}];"
                     )
 
             lines[frame_num] = frame_str
