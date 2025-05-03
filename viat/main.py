@@ -1070,7 +1070,6 @@ class VideoAnnotationTool(QMainWindow):
                 self._loading_from_project = False
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
 
-    # Add these methods to save and load application state
     def save_application_state(self):
         """Save the current application state."""
         if not hasattr(self, "project_file") or not self.project_file:
@@ -1133,6 +1132,13 @@ class VideoAnnotationTool(QMainWindow):
                 self.perform_autosave()
 
             self.perform_autosave()
+
+
+
+
+    #
+    # Annotation handling methods
+    #
 
     def export_annotations(self):
         """Export annotations to various formats."""
@@ -1364,245 +1370,6 @@ class VideoAnnotationTool(QMainWindow):
 
                 traceback.print_exc()
 
-    #
-    # Annotation handling methods
-    #
-
-
-    def clear_annotations(self):
-        """Clear all annotations."""
-        if not self.canvas.annotations:
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Clear Annotations",
-            "Are you sure you want to clear all annotations?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-
-        if reply == QMessageBox.Yes:
-            self.canvas.annotations = []
-            self.canvas.selected_annotation = None
-            self.update_annotation_list()
-            self.canvas.update()
-            self.statusBar.showMessage("All annotations cleared")
-
-    def add_annotation(self):
-        """Add annotation manually."""
-        if not self.cap:
-            QMessageBox.warning(self, "Add Annotation", "Please open a video first!")
-            return
-
-        # Create dialog
-        dialog = self.create_annotation_dialog()
-
-        # Show dialog
-        if dialog.exec_() == QDialog.Accepted:
-            # Get form widgets
-            class_combo = dialog.findChild(QComboBox)
-            x_spin = dialog.findChildren(QSpinBox)[0]
-            y_spin = dialog.findChildren(QSpinBox)[1]
-            width_spin = dialog.findChildren(QSpinBox)[2]
-            height_spin = dialog.findChildren(QSpinBox)[3]
-            size_spin = dialog.findChildren(QSpinBox)[4]
-            quality_spin = dialog.findChildren(QSpinBox)[5]
-
-            # Create attributes dictionary
-            attributes = {"Size": size_spin.value(), "Quality": quality_spin.value()}
-
-            # Create rectangle
-            rect = QRect(
-                x_spin.value(), y_spin.value(), width_spin.value(), height_spin.value()
-            )
-
-            # Get class and color
-            class_name = class_combo.currentText()
-            color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-
-            # Create bounding box
-            bbox = BoundingBox(rect, class_name, attributes, color)
-
-            # Add to annotations
-            self.canvas.annotations.append(bbox)
-
-            # Save to frame annotations
-            self.frame_annotations[self.current_frame] = self.canvas.annotations
-
-            self.update_annotation_list()
-            self.canvas.update()
-
-    def create_annotation_dialog(self):
-        """Create a dialog for adding or editing annotations."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add Annotation")
-        dialog.setMinimumWidth(300)
-
-        layout = QVBoxLayout(dialog)
-
-        # Class selection
-        class_label = QLabel("Class:")
-        class_combo = QComboBox()
-        class_combo.addItems(list(self.canvas.class_colors.keys()))
-
-        # Coordinates
-        coords_layout = QFormLayout()
-        x_spin = QSpinBox()
-        x_spin.setRange(0, self.canvas.pixmap.width() if self.canvas.pixmap else 1000)
-        y_spin = QSpinBox()
-        y_spin.setRange(0, self.canvas.pixmap.height() if self.canvas.pixmap else 1000)
-        width_spin = QSpinBox()
-        width_spin.setRange(
-            5, self.canvas.pixmap.width() if self.canvas.pixmap else 1000
-        )
-        height_spin = QSpinBox()
-        height_spin.setRange(
-            5, self.canvas.pixmap.height() if self.canvas.pixmap else 1000
-        )
-
-        coords_layout.addRow("X:", x_spin)
-        coords_layout.addRow("Y:", y_spin)
-        coords_layout.addRow("Width:", width_spin)
-        coords_layout.addRow("Height:", height_spin)
-
-        # Attributes
-        attributes_layout = QFormLayout()
-
-        # Get default values from previous annotations if enabled
-        default_size = -1
-        default_quality = -1
-
-        if hasattr(self, "use_previous_attributes") and self.use_previous_attributes:
-            # Get the current selected class
-            current_class = class_combo.currentText()
-            prev_attributes = self.get_previous_annotation_attributes(current_class)
-
-            if prev_attributes:
-                default_size = prev_attributes.get("Size", -1)
-                default_quality = prev_attributes.get("Quality", -1)
-
-        # Create attribute spinboxes with default values
-        size_spin = QSpinBox()
-        size_spin.setRange(0, 100)
-        size_spin.setValue(default_size)  # Use default or previous value
-
-        quality_spin = QSpinBox()
-        quality_spin.setRange(0, 100)
-        quality_spin.setValue(default_quality)  # Use default or previous value
-
-        attributes_layout.addRow("Size (0-100):", size_spin)
-        attributes_layout.addRow("Quality (0-100):", quality_spin)
-
-        # Update attributes when class changes
-        def update_attributes_for_class(class_name):
-            if (
-                hasattr(self, "use_previous_attributes")
-                and self.use_previous_attributes
-            ):
-                prev_attributes = self.get_previous_annotation_attributes(class_name)
-                if prev_attributes:
-                    size_spin.setValue(prev_attributes.get("Size", -1))
-                    quality_spin.setValue(prev_attributes.get("Quality", -1))
-
-        class_combo.currentTextChanged.connect(update_attributes_for_class)
-
-        # Buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-
-        # Add widgets to layout
-        layout.addWidget(class_label)
-        layout.addWidget(class_combo)
-        layout.addLayout(coords_layout)
-        layout.addLayout(attributes_layout)
-        layout.addWidget(buttons)
-
-        # Set tab order for easy navigation
-        dialog.setTabOrder(class_combo, x_spin)
-        dialog.setTabOrder(x_spin, y_spin)
-        dialog.setTabOrder(y_spin, width_spin)
-        dialog.setTabOrder(width_spin, height_spin)
-        dialog.setTabOrder(height_spin, size_spin)
-        dialog.setTabOrder(size_spin, quality_spin)
-
-        # Focus on the first field
-        class_combo.setFocus()
-
-        return dialog
-
-    def parse_attributes(self, text):
-        """Parse attributes from text input."""
-        attributes = {}
-        for line in text.strip().split("\n"):
-            if "=" in line:
-                key, value = line.split("=", 1)
-                attributes[key.strip()] = value.strip()
-        return attributes
-
-    def keyPressEvent(self, event):
-        """Handle keyboard events."""
-        # Handle arrow keys for frame navigation
-        if event.key() == Qt.Key_Right:
-            # Right or Down arrow - go to next frame
-            self.next_frame()
-            return
-        elif event.key() == Qt.Key_Left:
-            # Left or Up arrow - go to previous frame
-            self.prev_frame()
-            return
-        elif event.key() == Qt.Key_Space:
-            # Space - toggle play/pause
-            self.play_pause_video()
-            return True
-        # Toggle annotation method with 'M' key
-        elif event.key() == Qt.Key_M:
-            current_index = self.method_selector.currentIndex()
-            new_index = (current_index + 1) % self.method_selector.count()
-            self.method_selector.setCurrentIndex(new_index)
-        # Batch edit annotations with 'B' key
-        elif event.key() == Qt.Key_B:
-            if hasattr(self, "annotation_dock"):
-                self.annotation_dock.batch_edit_annotations()
-        # Toggle smart edge with 'E' key
-        elif event.key() == Qt.Key_E:
-            if hasattr(self, "smart_edge_action"):
-                self.smart_edge_action.setChecked(
-                    not self.smart_edge_action.isChecked()
-                )
-                self.toggle_smart_edge()
-        # Toggle attribute dialog with 'A' key
-        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
-            self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
-            self.statusBar.showMessage(
-                f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}",
-                3000,
-            )
-            # Update menu if it exists
-            for action in self.settings_menu.actions():
-                if action.text() == "Show Attribute Dialog for New Annotations":
-                    action.setChecked(self.auto_show_attribute_dialog)
-                    break
-        # Propagate annotations with 'P' key
-        elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
-            self.propagate_annotations()
-        # Copy selected annotation with Ctrl+C
-        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
-            self.copy_selected_annotation()
-        # Paste annotation with Ctrl+V
-        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
-            self.paste_annotation()
-        # Cut selected annotation with Ctrl+X
-        elif event.key() == Qt.Key_X and (event.modifiers() & Qt.ControlModifier):
-            self.cut_selected_annotation()
-        # Select all annotations with Ctrl+A
-        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
-            self.select_all_annotations()
-
-        else:
-            super().keyPressEvent(event)
-
     def edit_annotation(self, annotation, focus_first_field=False):
         """
         Edit the properties of an annotation.
@@ -1667,6 +1434,22 @@ class VideoAnnotationTool(QMainWindow):
             class_attributes: The class attribute configuration
         """
         self.annotation_manager.update_annotation_attributes(annotation, class_attributes)
+
+    def clear_annotations(self):
+        """Clear all annotations."""
+        self.annotation_manager.clear_annotations()
+
+    def add_annotation(self):
+        """Add annotation manually."""
+        self.annotation_manager.add_annotation()
+
+    def create_annotation_dialog(self):
+        """Create a dialog for adding or editing annotations."""
+        return self.annotation_manager.create_annotation_dialog()
+
+    def parse_attributes(self, text):
+        """Parse attributes from text input."""
+        return self.annotation_manager.parse_attributes(text)
 
     #
     # Import handling methods
@@ -1779,6 +1562,72 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(
                 self, "Import Error", f"Error importing annotations: {str(e)}"
             )
+    
+    #
+    # Input handling methods
+    #
+
+    def keyPressEvent(self, event):
+        """Handle keyboard events."""
+        # Handle arrow keys for frame navigation
+        if event.key() == Qt.Key_Right:
+            # Right or Down arrow - go to next frame
+            self.next_frame()
+            return
+        elif event.key() == Qt.Key_Left:
+            # Left or Up arrow - go to previous frame
+            self.prev_frame()
+            return
+        elif event.key() == Qt.Key_Space:
+            # Space - toggle play/pause
+            self.play_pause_video()
+            return True
+        # Toggle annotation method with 'M' key
+        elif event.key() == Qt.Key_M:
+            current_index = self.method_selector.currentIndex()
+            new_index = (current_index + 1) % self.method_selector.count()
+            self.method_selector.setCurrentIndex(new_index)
+        # Batch edit annotations with 'B' key
+        elif event.key() == Qt.Key_B:
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.batch_edit_annotations()
+        # Toggle smart edge with 'E' key
+        elif event.key() == Qt.Key_E:
+            if hasattr(self, "smart_edge_action"):
+                self.smart_edge_action.setChecked(
+                    not self.smart_edge_action.isChecked()
+                )
+                self.toggle_smart_edge()
+        # Toggle attribute dialog with 'A' key
+        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
+            self.statusBar.showMessage(
+                f"Attribute dialog for new annotations {'enabled' if self.auto_show_attribute_dialog else 'disabled'}",
+                3000,
+            )
+            # Update menu if it exists
+            for action in self.settings_menu.actions():
+                if action.text() == "Show Attribute Dialog for New Annotations":
+                    action.setChecked(self.auto_show_attribute_dialog)
+                    break
+        # Propagate annotations with 'P' key
+        elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
+            self.propagate_annotations()
+        # Copy selected annotation with Ctrl+C
+        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self.copy_selected_annotation()
+        # Paste annotation with Ctrl+V
+        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            self.paste_annotation()
+        # Cut selected annotation with Ctrl+X
+        elif event.key() == Qt.Key_X and (event.modifiers() & Qt.ControlModifier):
+            self.cut_selected_annotation()
+        # Select all annotations with Ctrl+A
+        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.select_all_annotations()
+
+        else:
+            super().keyPressEvent(event)
 
     #
     # Class handling methods

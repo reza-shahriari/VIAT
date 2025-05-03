@@ -422,3 +422,212 @@ class AnnotationManager:
                 self.main_window.propagate_to_duplicate_frames(current_hash)
 
         self.main_window.perform_autosave()
+
+    def clear_annotations(self):
+        """Clear all annotations after confirmation."""
+        from PyQt5.QtWidgets import QMessageBox
+        
+        if not self.canvas.annotations:
+            return
+
+        reply = QMessageBox.question(
+            self.main_window,
+            "Clear Annotations",
+            "Are you sure you want to clear all annotations?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply == QMessageBox.Yes:
+            self.canvas.annotations = []
+            self.canvas.selected_annotation = None
+            self.update_annotation_list()
+            self.canvas.update()
+            self.main_window.statusBar.showMessage("All annotations cleared")
+
+    def add_annotation(self):
+        """Add annotation manually through a dialog."""
+        from PyQt5.QtWidgets import QMessageBox, QDialog, QComboBox, QSpinBox
+        from PyQt5.QtCore import QRect
+        from .annotation import BoundingBox
+        
+        if not self.main_window.cap:
+            QMessageBox.warning(self.main_window, "Add Annotation", "Please open a video first!")
+            return
+
+        # Create dialog
+        dialog = self.create_annotation_dialog()
+
+        # Show dialog
+        if dialog.exec_() == QDialog.Accepted:
+            # Get form widgets
+            class_combo = dialog.findChild(QComboBox)
+            x_spin = dialog.findChildren(QSpinBox)[0]
+            y_spin = dialog.findChildren(QSpinBox)[1]
+            width_spin = dialog.findChildren(QSpinBox)[2]
+            height_spin = dialog.findChildren(QSpinBox)[3]
+            size_spin = dialog.findChildren(QSpinBox)[4]
+            quality_spin = dialog.findChildren(QSpinBox)[5]
+
+            # Create attributes dictionary
+            attributes = {"Size": size_spin.value(), "Quality": quality_spin.value()}
+
+            # Create rectangle
+            rect = QRect(
+                x_spin.value(), y_spin.value(), width_spin.value(), height_spin.value()
+            )
+
+            # Get class and color
+            class_name = class_combo.currentText()
+            color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
+
+            # Create bounding box
+            bbox = BoundingBox(rect, class_name, attributes, color)
+
+            # Add to annotations
+            self.canvas.annotations.append(bbox)
+
+            # Save to frame annotations
+            self.main_window.frame_annotations[self.main_window.current_frame] = self.canvas.annotations
+
+            self.update_annotation_list()
+            self.canvas.update()
+
+    def create_annotation_dialog(self):
+        """Create a dialog for adding or editing annotations."""
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QFormLayout, QLabel, QComboBox, 
+            QSpinBox, QDialogButtonBox
+        )
+        
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Add Annotation")
+        dialog.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dialog)
+
+        # Class selection
+        class_label = QLabel("Class:")
+        class_combo = QComboBox()
+        class_combo.addItems(list(self.canvas.class_colors.keys()))
+
+        # Coordinates
+        coords_layout = QFormLayout()
+        x_spin = QSpinBox()
+        x_spin.setRange(0, self.canvas.pixmap.width() if self.canvas.pixmap else 1000)
+        y_spin = QSpinBox()
+        y_spin.setRange(0, self.canvas.pixmap.height() if self.canvas.pixmap else 1000)
+        width_spin = QSpinBox()
+        width_spin.setRange(
+            5, self.canvas.pixmap.width() if self.canvas.pixmap else 1000
+        )
+        height_spin = QSpinBox()
+        height_spin.setRange(
+            5, self.canvas.pixmap.height() if self.canvas.pixmap else 1000
+        )
+
+        coords_layout.addRow("X:", x_spin)
+        coords_layout.addRow("Y:", y_spin)
+        coords_layout.addRow("Width:", width_spin)
+        coords_layout.addRow("Height:", height_spin)
+
+        # Attributes
+        attributes_layout = QFormLayout()
+
+        # Get default values from previous annotations if enabled
+        default_size = -1
+        default_quality = -1
+
+        if hasattr(self.main_window, "use_previous_attributes") and self.main_window.use_previous_attributes:
+            # Get the current selected class
+            current_class = class_combo.currentText()
+            prev_attributes = self.get_previous_annotation_attributes(current_class)
+
+            if prev_attributes:
+                default_size = prev_attributes.get("Size", -1)
+                default_quality = prev_attributes.get("Quality", -1)
+
+        # Create attribute spinboxes with default values
+        size_spin = QSpinBox()
+        size_spin.setRange(0, 100)
+        size_spin.setValue(default_size)  # Use default or previous value
+
+        quality_spin = QSpinBox()
+        quality_spin.setRange(0, 100)
+        quality_spin.setValue(default_quality)  # Use default or previous value
+
+        attributes_layout.addRow("Size (0-100):", size_spin)
+        attributes_layout.addRow("Quality (0-100):", quality_spin)
+
+        # Update attributes when class changes
+        def update_attributes_for_class(class_name):
+            if (
+                hasattr(self.main_window, "use_previous_attributes")
+                and self.main_window.use_previous_attributes
+            ):
+                prev_attributes = self.get_previous_annotation_attributes(class_name)
+                if prev_attributes:
+                    size_spin.setValue(prev_attributes.get("Size", -1))
+                    quality_spin.setValue(prev_attributes.get("Quality", -1))
+
+        class_combo.currentTextChanged.connect(update_attributes_for_class)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        # Add widgets to layout
+        layout.addWidget(class_label)
+        layout.addWidget(class_combo)
+        layout.addLayout(coords_layout)
+        layout.addLayout(attributes_layout)
+        layout.addWidget(buttons)
+
+        # Set tab order for easy navigation
+        dialog.setTabOrder(class_combo, x_spin)
+        dialog.setTabOrder(x_spin, y_spin)
+        dialog.setTabOrder(y_spin, width_spin)
+        dialog.setTabOrder(width_spin, height_spin)
+        dialog.setTabOrder(height_spin, size_spin)
+        dialog.setTabOrder(size_spin, quality_spin)
+
+        # Focus on the first field
+        class_combo.setFocus()
+
+        return dialog
+
+    def get_previous_annotation_attributes(self, class_name):
+        """
+        Get attributes from previous annotations of the same class.
+        
+        Args:
+            class_name: The class name to look for
+            
+        Returns:
+            Dictionary of attributes or None if no previous annotations found
+        """
+        # Look through all frames for annotations of this class
+        for frame_num, annotations in self.main_window.frame_annotations.items():
+            for annotation in annotations:
+                if annotation.class_name == class_name:
+                    return annotation.attributes
+        
+        return None
+
+    def parse_attributes(self, text):
+        """
+        Parse attributes from text input.
+        
+        Args:
+            text: Text containing attribute definitions
+            
+        Returns:
+            Dictionary of parsed attributes
+        """
+        attributes = {}
+        for line in text.strip().split("\n"):
+            if "=" in line:
+                key, value = line.split("=", 1)
+                attributes[key.strip()] = value.strip()
+        return attributes
