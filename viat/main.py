@@ -109,8 +109,9 @@ class VideoAnnotationTool(QMainWindow):
         QTimer.singleShot(100, self.load_last_project)
 
     def init_managers(self):
-        self.annotation_manager =  AnnotationManager(self,self.canvas)
+        self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
+
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
@@ -740,18 +741,18 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame > 0:
                 self.current_frame -= 1
+                self.frame_slider.setValue(self.current_frame)
                 self.load_current_image()
                 self.update_frame_info()
         elif self.cap and self.cap.isOpened():
-            # Get current position
-            current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-
+            
             # Go back one frame
-            if current_pos > 1:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos - 2)
+            if self.current_frame > 1:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame - 2)
                 ret, frame = self.cap.read()
                 if ret:
-                    self.current_frame = current_pos - 1
+                    self.current_frame = self.current_frame - 1
+                    self.frame_slider.setValue(self.current_frame)
                     self.canvas.set_frame(frame)
                     self.update_frame_info()
 
@@ -760,16 +761,19 @@ class VideoAnnotationTool(QMainWindow):
 
     def next_frame(self):
         """Go to the next frame in the video or next image in the dataset."""
-
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
                 self.current_frame += 1
+                # Update slider position first
+                self.frame_slider.setValue(self.current_frame)
                 self.load_current_image()
                 self.update_frame_info()
                 self.load_current_frame_annotations()
             else:
                 if self.is_playing:
                     self.current_frame = 0
+                    # Update slider position first
+                    self.frame_slider.setValue(self.current_frame)
                     self.load_current_image()
                     self.update_frame_info()
                     self.load_current_frame_annotations()
@@ -778,9 +782,35 @@ class VideoAnnotationTool(QMainWindow):
                     # Just show message if not playing
                     self.statusBar.showMessage("End of image dataset")
         elif self.cap and self.cap.isOpened():
+            # Calculate the next frame number explicitly
+            next_frame_number = self.current_frame + 1
+            
+            # Check if we've reached the end of the video
+            if next_frame_number >= self.total_frames:
+                # End of video
+                self.play_timer.stop()
+                self.is_playing = False
+                self.statusBar.showMessage("End of video")
+                # Rewind to beginning
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.current_frame = 0
+                # Update slider position first
+                self.frame_slider.setValue(self.current_frame)
+                ret, frame = self.cap.read()
+                if ret:
+                    self.canvas.set_frame(frame)
+                    self.update_frame_info()
+                    self.load_current_frame_annotations()
+                return
+                
+            # Explicitly set the frame position instead of just reading the next frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, next_frame_number)
             ret, frame = self.cap.read()
+            
             if ret:
-                self.current_frame += 1
+                self.current_frame = next_frame_number
+                # Update slider position first
+                self.frame_slider.setValue(self.current_frame)
                 self.canvas.set_frame(frame)
                 self.update_frame_info()
 
@@ -799,21 +829,6 @@ class VideoAnnotationTool(QMainWindow):
 
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
-            else:
-                # End of video
-                self.play_timer.stop()
-                self.is_playing = False
-                self.statusBar.showMessage("End of video")
-                # Rewind to beginning
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                self.current_frame = 0
-                ret, frame = self.cap.read()
-                if ret:
-                    self.canvas.set_frame(frame)
-                    self.update_frame_info()
-
-                    # Load annotations for the new frame
-                    self.load_current_frame_annotations()
 
     def play_pause_video(self):
         """Toggle between playing and pausing the video or image slideshow."""
@@ -849,13 +864,15 @@ class VideoAnnotationTool(QMainWindow):
         else:
             # Set timer interval based on playback speed
             fps = self.cap.get(cv2.CAP_PROP_FPS)
-            interval = int(1000 / (fps * self.playback_speed))
+            if fps <= 0:  # Protect against invalid FPS
+                fps = 30  # Use a default value
+            interval = max(1, int(1000 / (fps * self.playback_speed)))
             self.play_timer.start(interval)
             self.is_playing = True
             self.play_button.setIcon(
                 self.icon_provider.get_icon("media-playback-pause")
             )
-            self.statusBar.showMessage("Playing")
+            self.statusBar.showMessage(f"Playing at {fps:.1f} FPS")
 
     def eventFilter(self, obj, event):
         """Global event filter to handle shortcuts regardless of focus."""
@@ -874,12 +891,12 @@ class VideoAnnotationTool(QMainWindow):
                 # Space - toggle play/pause
                 self.play_pause_video()
                 return True
-                    # Cycle through annotations with Tab
+                # Cycle through annotations with Tab
             elif event.key() == Qt.Key_Tab:
                 # Check if the focused widget is an input field
-                focused_widget = QApplication.focusWidget()                
+                focused_widget = QApplication.focusWidget()
                 # Only use Tab for cycling if we're not in an input field
-                if isinstance(focused_widget,VideoCanvas):
+                if isinstance(focused_widget, VideoCanvas):
                     self.cycle_annotation_selection()
                     event.accept()
                     return True
@@ -951,7 +968,6 @@ class VideoAnnotationTool(QMainWindow):
 
             # Get video path if available
             video_path = getattr(self, "video_filename", None)
-
 
     def load_project(self, filename=None):
         """Load a saved project."""
@@ -1132,9 +1148,6 @@ class VideoAnnotationTool(QMainWindow):
                 self.perform_autosave()
 
             self.perform_autosave()
-
-
-
 
     #
     # Annotation handling methods
@@ -1384,13 +1397,11 @@ class VideoAnnotationTool(QMainWindow):
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
         if self.annotation_manager.delete_annotation(
-            annotation, 
-            self.frame_annotations, 
-            self.current_frame
+            annotation, self.frame_annotations, self.current_frame
         ):
             # Mark project as modified
             self.project_modified = True
-            
+
             # Update annotation list
             self.update_annotation_list()
 
@@ -1420,20 +1431,22 @@ class VideoAnnotationTool(QMainWindow):
     def add_empty_annotation(self):
         """Add a new empty annotation with default values."""
         self.annotation_manager.add_empty_annotation()
-    
+
     def update_annotation_list(self):
         """Update the annotation list in the UI."""
         self.annotation_manager.update_annotation_list()
-   
+
     def update_annotation_attributes(self, annotation, class_attributes):
         """
         Update annotation attributes based on class configuration.
-        
+
         Args:
             annotation: The annotation to update
             class_attributes: The class attribute configuration
         """
-        self.annotation_manager.update_annotation_attributes(annotation, class_attributes)
+        self.annotation_manager.update_annotation_attributes(
+            annotation, class_attributes
+        )
 
     def clear_annotations(self):
         """Clear all annotations."""
@@ -1562,7 +1575,7 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(
                 self, "Import Error", f"Error importing annotations: {str(e)}"
             )
-    
+
     #
     # Input handling methods
     #
@@ -1663,7 +1676,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def edit_selected_class(self):
         """Edit the selected class with option to convert to another class."""
-        
+
         self.class_manager.edit_selected_class()
 
     def convert_class_with_attributes(self, old_class, new_class, keep_original=False):
@@ -1687,11 +1700,7 @@ class VideoAnnotationTool(QMainWindow):
             old_class (str): The original class name
             new_class (str): The target class name
         """
-        self.class_manager.convert_class_with_attribute_mapping(
-            old_class, new_class
-        )
-
-    
+        self.class_manager.convert_class_with_attribute_mapping(old_class, new_class)
 
     def refresh_class_ui(self):
         """Refresh all UI components that display class information"""
@@ -1996,7 +2005,6 @@ class VideoAnnotationTool(QMainWindow):
         clear_action = QAction("Clear Recent Projects", self)
         clear_action.triggered.connect(self.clear_recent_projects)
         self.recent_projects_menu.addAction(clear_action)
-
 
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
@@ -2892,6 +2900,12 @@ class VideoAnnotationTool(QMainWindow):
         # Reset annotations
         self.canvas.annotations = []
         self.frame_annotations = {}
+        
+        # Reset class information
+        self.canvas.class_colors = {"Quad": QColor(0, 255, 255)}  
+        if hasattr(self.canvas, "class_attributes"):
+            self.canvas.class_attributes = {}
+        self.canvas.current_class = "Quad"
 
         # Reset duplicate frame detection
         self.duplicate_frames_enabled = False
@@ -2907,6 +2921,9 @@ class VideoAnnotationTool(QMainWindow):
 
         # Reset UI
         self.update_annotation_list()
+        
+        # Update class-related UI
+        self.refresh_class_ui()
 
         # Reset to default style
         self.change_style("DarkModern")
@@ -2922,6 +2939,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Update status bar
         self.statusBar.showMessage("Application reset to initial state")
+
 
     def delete_history(self):
         """Delete all application history and reset to initial state."""
@@ -3390,22 +3408,22 @@ class VideoAnnotationTool(QMainWindow):
 
     def paste_annotation(self):
         """Paste the copied annotation to the current frame."""
-        if hasattr(self, 'clipboard_annotation') and self.clipboard_annotation:
+        if hasattr(self, "clipboard_annotation") and self.clipboard_annotation:
             # Create a new annotation based on the clipboard one
             new_annotation = self.clipboard_annotation.copy()
-            
+
             # Add to current frame
             current_frame = self.current_frame
             if current_frame not in self.frame_annotations:
                 self.frame_annotations[current_frame] = []
-            
+
             self.frame_annotations[current_frame].append(new_annotation)
-            
+
             # Update canvas
             self.canvas.annotations = self.frame_annotations.get(current_frame, [])
             self.canvas.selected_annotation = new_annotation
             self.canvas.update()
-            
+
             # Update annotation list if it exists
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.update_annotation_list()
@@ -3416,18 +3434,23 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, "canvas") and self.canvas.selected_annotation:
             # Copy first
             self.clipboard_annotation = self.canvas.selected_annotation.copy()
-            
+
             # Then delete
             current_frame = self.current_frame
             if current_frame in self.frame_annotations:
-                if self.canvas.selected_annotation in self.frame_annotations[current_frame]:
-                    self.frame_annotations[current_frame].remove(self.canvas.selected_annotation)
-            
+                if (
+                    self.canvas.selected_annotation
+                    in self.frame_annotations[current_frame]
+                ):
+                    self.frame_annotations[current_frame].remove(
+                        self.canvas.selected_annotation
+                    )
+
             # Update canvas
             self.canvas.annotations = self.frame_annotations.get(current_frame, [])
             self.canvas.selected_annotation = None
             self.canvas.update()
-            
+
             # Update annotation list if it exists
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.update_annotation_list()
@@ -3438,28 +3461,40 @@ class VideoAnnotationTool(QMainWindow):
         # Since we can only have one selected annotation at a time in the current implementation,
         # we'll just show a message to the user
         current_frame = self.current_frame
-        if current_frame in self.frame_annotations and self.frame_annotations[current_frame]:
+        if (
+            current_frame in self.frame_annotations
+            and self.frame_annotations[current_frame]
+        ):
             count = len(self.frame_annotations[current_frame])
-            self.statusBar.showMessage(f"There are {count} annotations in this frame. Use Tab to cycle through them.", 3000)
+            self.statusBar.showMessage(
+                f"There are {count} annotations in this frame. Use Tab to cycle through them.",
+                3000,
+            )
         else:
             self.statusBar.showMessage("No annotations in this frame", 2000)
 
     def cycle_annotation_selection(self):
         """Cycle through annotations in the current frame or deselect if only one exists."""
         current_frame = self.current_frame
-        if current_frame not in self.frame_annotations or not self.frame_annotations[current_frame]:
+        if (
+            current_frame not in self.frame_annotations
+            or not self.frame_annotations[current_frame]
+        ):
             self.statusBar.showMessage("No annotations in this frame", 2000)
             return
-        
+
         annotations = self.frame_annotations[current_frame]
-        
+
         # If nothing is selected, select the first annotation
         if not self.canvas.selected_annotation:
             self.canvas.selected_annotation = annotations[0]
             self.canvas.update()
-            self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)
+            self.statusBar.showMessage(
+                f"Selected annotation: {self.canvas.selected_annotation.class_name}",
+                2000,
+            )
             return
-        
+
         # Find the index of the currently selected annotation
         try:
             current_index = annotations.index(self.canvas.selected_annotation)
@@ -3473,9 +3508,15 @@ class VideoAnnotationTool(QMainWindow):
                 next_index = current_index + 1
                 self.canvas.selected_annotation = annotations[next_index]
                 self.canvas.update()
-                self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)
+                self.statusBar.showMessage(
+                    f"Selected annotation: {self.canvas.selected_annotation.class_name}",
+                    2000,
+                )
         except ValueError:
             # If the selected annotation is not in the list, select the first one
             self.canvas.selected_annotation = annotations[0]
             self.canvas.update()
-            self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)
+            self.statusBar.showMessage(
+                f"Selected annotation: {self.canvas.selected_annotation.class_name}",
+                2000,
+            )
