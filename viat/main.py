@@ -46,7 +46,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .canvas import VideoCanvas
-from .annotation import BoundingBox
+from .annotation import BoundingBox,AnnotationManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from utils.dataset_manager import import_dataset_dialog, load_dataset
 from utils.dataset_manager import export_dataset_dialog, export_dataset
@@ -101,11 +101,15 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.smart_edge_enabled = False
         self.setup_autosave()
 
+        self.init_managers()
         # Install event filter to handle global shortcuts
         QApplication.instance().installEventFilter(self)
 
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
+
+    def init_managers(self):
+        self.annotation_manager =  AnnotationManager(self,self.canvas)
 
     def load_last_project(self):
         """Load the last project that was open."""
@@ -390,7 +394,7 @@ class VideoAnnotationTool(QMainWindow):
             self.cap.release()
 
         # Open the video file
-        self.cap = cv2.VideoCapture(filename)
+        self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
 
         if not self.cap.isOpened():
             QMessageBox.critical(self, "Error", "Could not open video file!")
@@ -948,35 +952,6 @@ class VideoAnnotationTool(QMainWindow):
             # Get video path if available
             video_path = getattr(self, "video_filename", None)
 
-            # Get class attributes if available
-            class_attributes = getattr(self.canvas, "class_attributes", {})
-
-            # Save project with additional data
-            save_project(
-                filename,
-                self.canvas.annotations,
-                self.canvas.class_colors,
-                video_path=video_path,
-                current_frame=self.current_frame,
-                frame_annotations=self.frame_annotations,
-                class_attributes=class_attributes,
-                current_style=self.current_style,
-                auto_show_attribute_dialog=self.auto_show_attribute_dialog,
-                use_previous_attributes=self.use_previous_attributes,
-                duplicate_frames_enabled=self.duplicate_frames_enabled,
-                frame_hashes=self.frame_hashes,
-                duplicate_frames_cache=self.duplicate_frames_cache,
-            )
-
-            self.project_file = filename
-            self.project_modified = False
-            self.statusBar.showMessage(f"Project saved to {os.path.basename(filename)}")
-
-            # Update recent projects menu
-            self.update_recent_projects_menu()
-
-            # Save application state
-            self.save_application_state()
 
     def load_project(self, filename=None):
         """Load a saved project."""
@@ -1699,180 +1674,19 @@ class VideoAnnotationTool(QMainWindow):
             annotation: The annotation to edit
             focus_first_field: Whether to focus on the first attribute field
         """
-        if not annotation:
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Edit Annotation")
-        dialog.setMinimumWidth(350)
-
-        layout = QVBoxLayout()
-        form_layout = QFormLayout()
-
-        # Class selector
-        class_combo = QComboBox()
-        class_combo.addItems(self.canvas.class_colors.keys())
-        class_combo.setCurrentText(annotation.class_name)
-        form_layout.addRow("Class:", class_combo)
-
-        # Get class attribute configuration if available
-        class_attributes = {}
-        if hasattr(self.canvas, "class_attributes"):
-            class_attributes = self.canvas.class_attributes.get(
-                annotation.class_name, {}
-            )
-
-        # Create input widgets for all attributes
-        attribute_widgets = {}
-        first_widget = None
-
-        for attr_name, attr_value in sorted(annotation.attributes.items()):
-            # Get attribute type from class configuration or infer from value
-            attr_type = "string"
-            attr_min = None
-            attr_max = None
-
-            if attr_name in class_attributes:
-                attr_config = class_attributes[attr_name]
-                attr_type = attr_config.get("type", "string")
-                attr_min = attr_config.get("min", None)
-                attr_max = attr_config.get("max", None)
-            elif isinstance(attr_value, int):
-                attr_type = "int"
-            elif isinstance(attr_value, float):
-                attr_type = "float"
-            elif isinstance(attr_value, bool):
-                attr_type = "boolean"
-
-            # Create appropriate input widget based on type
-            if attr_type == "boolean":
-                input_widget = QComboBox()
-                input_widget.addItems(["False", "True"])
-                input_widget.setCurrentText(str(bool(attr_value)))
-            elif attr_type == "int":
-                input_widget = QSpinBox()
-                if attr_min is not None:
-                    input_widget.setMinimum(attr_min)
-                else:
-                    input_widget.setMinimum(-999999)
-                if attr_max is not None:
-                    input_widget.setMaximum(attr_max)
-                else:
-                    input_widget.setMaximum(999999)
-                input_widget.setValue(int(attr_value))
-            elif attr_type == "float":
-                input_widget = QDoubleSpinBox()
-                if attr_min is not None:
-                    input_widget.setMinimum(attr_min)
-                else:
-                    input_widget.setMinimum(-999999.0)
-                if attr_max is not None:
-                    input_widget.setMaximum(attr_max)
-                else:
-                    input_widget.setMaximum(999999.0)
-                input_widget.setValue(float(attr_value))
-                input_widget.setDecimals(2)
-            else:  # string or default
-                input_widget = QLineEdit()
-                input_widget.setText(str(attr_value))
-
-            # Store the first widget for focus
-            if first_widget is None and attr_name in ["Size", "Quality"]:
-                first_widget = input_widget
-
-            form_layout.addRow(f"{attr_name}:", input_widget)
-            attribute_widgets[attr_name] = input_widget
-
-        layout.addLayout(form_layout)
-
-        # Add OK and Cancel buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-
-        # Get direct references to the OK and Cancel buttons
-        ok_button = button_box.button(QDialogButtonBox.Ok)
-        cancel_button = button_box.button(QDialogButtonBox.Cancel)
-
-        dialog.setLayout(layout)
-
-        # Set focus on the first attribute field if requested
-        if focus_first_field and first_widget:
-            # Use singleShot timer to ensure focus happens after dialog is shown
-            QTimer.singleShot(0, lambda: first_widget.setFocus())
-            # For QSpinBox and QDoubleSpinBox, select all text
-            if isinstance(first_widget, (QSpinBox, QDoubleSpinBox)):
-                QTimer.singleShot(0, lambda: first_widget.selectAll())
-            # For QLineEdit, select all text
-            elif isinstance(first_widget, QLineEdit):
-                QTimer.singleShot(0, lambda: first_widget.selectAll())
-
-        # Set proper tab order
-        previous_widget = class_combo
-        for attr_name, widget in attribute_widgets.items():
-            dialog.setTabOrder(previous_widget, widget)
-            previous_widget = widget
-
-        # Make sure the last tab goes to the OK button first, then Cancel
-        dialog.setTabOrder(previous_widget, ok_button)
-        dialog.setTabOrder(ok_button, cancel_button)
-
-        # If dialog is accepted, update the annotation
-        if dialog.exec_() == QDialog.Accepted:
-            old_class = annotation.class_name
-            new_class = class_combo.currentText()
-
-            # Update class and color
-            annotation.class_name = new_class
-            annotation.color = self.canvas.class_colors[new_class]
-
-            # If class changed, update attributes based on new class configuration
-            if old_class != new_class and hasattr(self.canvas, "class_attributes"):
-                new_class_attributes = self.canvas.class_attributes.get(new_class, {})
-                self.update_annotation_attributes(annotation, new_class_attributes)
-
-            # Update attribute values from the dialog
-            for attr_name, widget in attribute_widgets.items():
-                if attr_name in annotation.attributes:
-                    if isinstance(widget, QComboBox):  # Boolean
-                        annotation.attributes[attr_name] = (
-                            widget.currentText() == "True"
-                        )
-                    elif isinstance(widget, QSpinBox):  # Int
-                        annotation.attributes[attr_name] = widget.value()
-                    elif isinstance(widget, QDoubleSpinBox):  # Float
-                        annotation.attributes[attr_name] = widget.value()
-                    else:  # String or other
-                        annotation.attributes[attr_name] = widget.text()
-
-            # Update canvas and mark project as modified
-            self.canvas.update()
-            self.project_modified = True
-
-            # Update annotation list
-            self.update_annotation_list()
-
-            # Save to frame annotations
-            self.frame_annotations[self.current_frame] = self.canvas.annotations
+        # Delegate to the annotation manager
+        self.annotation_manager.edit_annotation(annotation, focus_first_field)
 
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
-        if annotation in self.canvas.annotations:
-            # Remove from annotations list
-            self.canvas.annotations.remove(annotation)
-
-            # Clear selection if this was the selected annotation
-            if self.canvas.selected_annotation == annotation:
-                self.canvas.selected_annotation = None
-
-            # Update canvas and mark project as modified
-            self.canvas.update()
+        if self.annotation_manager.delete_annotation(
+            annotation, 
+            self.frame_annotations, 
+            self.current_frame
+        ):
+            # Mark project as modified
             self.project_modified = True
-
-            # Update frame_annotations dictionary
-            self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
-
+            
             # Update annotation list
             self.update_annotation_list()
 
