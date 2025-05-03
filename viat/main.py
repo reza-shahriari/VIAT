@@ -36,6 +36,8 @@ from PyQt5.QtWidgets import (
     QApplication,
     QProgressBar,
     QCheckBox,
+    QTextEdit,
+    QPlainTextEdit,
 )
 from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime, QEvent
 from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
@@ -125,6 +127,7 @@ class VideoAnnotationTool(QMainWindow):
         self.styles = {}
         self.icon_provider = IconProvider()
         self._class_refresh_scheduled = False
+        self.setFocusPolicy(Qt.StrongFocus)
         for style_name in StyleManager.get_available_styles():
             method_name = f"set_{style_name.lower().replace(' ', '_')}_style"
             if hasattr(StyleManager, method_name):
@@ -867,7 +870,15 @@ class VideoAnnotationTool(QMainWindow):
                 # Space - toggle play/pause
                 self.play_pause_video()
                 return True
-
+                    # Cycle through annotations with Tab
+            elif event.key() == Qt.Key_Tab:
+                # Check if the focused widget is an input field
+                focused_widget = QApplication.focusWidget()                
+                # Only use Tab for cycling if we're not in an input field
+                if isinstance(focused_widget,VideoCanvas):
+                    self.cycle_annotation_selection()
+                    event.accept()
+                    return True
         # Let other events pass through
         return super().eventFilter(obj, event)
 
@@ -1664,6 +1675,19 @@ class VideoAnnotationTool(QMainWindow):
         # Propagate annotations with 'P' key
         elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
             self.propagate_annotations()
+        # Copy selected annotation with Ctrl+C
+        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            self.copy_selected_annotation()
+        # Paste annotation with Ctrl+V
+        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            self.paste_annotation()
+        # Cut selected annotation with Ctrl+X
+        elif event.key() == Qt.Key_X and (event.modifiers() & Qt.ControlModifier):
+            self.cut_selected_annotation()
+        # Select all annotations with Ctrl+A
+        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self.select_all_annotations()
+
         else:
             super().keyPressEvent(event)
 
@@ -3061,7 +3085,7 @@ class VideoAnnotationTool(QMainWindow):
         clear_action.triggered.connect(self.clear_recent_projects)
         self.recent_projects_menu.addAction(clear_action)
 
-    # Add this method to clear recent projects
+
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
 
@@ -4445,3 +4469,101 @@ class VideoAnnotationTool(QMainWindow):
                     "Dataset Created",
                     f"Dataset created successfully in {config['output_dir']}",
                 )
+
+    def copy_selected_annotation(self):
+        """Copy the currently selected annotation."""
+        if hasattr(self, "canvas") and self.canvas.selected_annotation:
+            self.clipboard_annotation = self.canvas.selected_annotation.copy()
+            self.statusBar.showMessage("Annotation copied", 2000)
+
+    def paste_annotation(self):
+        """Paste the copied annotation to the current frame."""
+        if hasattr(self, 'clipboard_annotation') and self.clipboard_annotation:
+            # Create a new annotation based on the clipboard one
+            new_annotation = self.clipboard_annotation.copy()
+            
+            # Add to current frame
+            current_frame = self.current_frame
+            if current_frame not in self.frame_annotations:
+                self.frame_annotations[current_frame] = []
+            
+            self.frame_annotations[current_frame].append(new_annotation)
+            
+            # Update canvas
+            self.canvas.annotations = self.frame_annotations.get(current_frame, [])
+            self.canvas.selected_annotation = new_annotation
+            self.canvas.update()
+            
+            # Update annotation list if it exists
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.update_annotation_list()
+            self.statusBar.showMessage("Annotation pasted", 2000)
+
+    def cut_selected_annotation(self):
+        """Cut (copy and delete) the selected annotation."""
+        if hasattr(self, "canvas") and self.canvas.selected_annotation:
+            # Copy first
+            self.clipboard_annotation = self.canvas.selected_annotation.copy()
+            
+            # Then delete
+            current_frame = self.current_frame
+            if current_frame in self.frame_annotations:
+                if self.canvas.selected_annotation in self.frame_annotations[current_frame]:
+                    self.frame_annotations[current_frame].remove(self.canvas.selected_annotation)
+            
+            # Update canvas
+            self.canvas.annotations = self.frame_annotations.get(current_frame, [])
+            self.canvas.selected_annotation = None
+            self.canvas.update()
+            
+            # Update annotation list if it exists
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.update_annotation_list()
+            self.statusBar.showMessage("Annotation cut", 2000)
+
+    def select_all_annotations(self):
+        """Select all annotations in the current frame."""
+        # Since we can only have one selected annotation at a time in the current implementation,
+        # we'll just show a message to the user
+        current_frame = self.current_frame
+        if current_frame in self.frame_annotations and self.frame_annotations[current_frame]:
+            count = len(self.frame_annotations[current_frame])
+            self.statusBar.showMessage(f"There are {count} annotations in this frame. Use Tab to cycle through them.", 3000)
+        else:
+            self.statusBar.showMessage("No annotations in this frame", 2000)
+
+    def cycle_annotation_selection(self):
+        """Cycle through annotations in the current frame or deselect if only one exists."""
+        current_frame = self.current_frame
+        if current_frame not in self.frame_annotations or not self.frame_annotations[current_frame]:
+            self.statusBar.showMessage("No annotations in this frame", 2000)
+            return
+        
+        annotations = self.frame_annotations[current_frame]
+        
+        # If nothing is selected, select the first annotation
+        if not self.canvas.selected_annotation:
+            self.canvas.selected_annotation = annotations[0]
+            self.canvas.update()
+            self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)
+            return
+        
+        # Find the index of the currently selected annotation
+        try:
+            current_index = annotations.index(self.canvas.selected_annotation)
+            # If we're at the last annotation, deselect (adding a complete cycle behavior)
+            if current_index == len(annotations) - 1:
+                self.canvas.selected_annotation = None
+                self.canvas.update()
+                self.statusBar.showMessage("Annotation deselected", 2000)
+            else:
+                # Otherwise, select the next annotation
+                next_index = current_index + 1
+                self.canvas.selected_annotation = annotations[next_index]
+                self.canvas.update()
+                self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)
+        except ValueError:
+            # If the selected annotation is not in the list, select the first one
+            self.canvas.selected_annotation = annotations[0]
+            self.canvas.update()
+            self.statusBar.showMessage(f"Selected annotation: {self.canvas.selected_annotation.class_name}", 2000)

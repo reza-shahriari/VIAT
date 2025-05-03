@@ -77,3 +77,31 @@ class BoundingBox:
             color = QColor(255, 0, 0)  # Default red
 
         return cls(rect, class_name, attributes, color)
+    def copy(self):
+        """Create a deep copy of this bounding box."""
+        from PyQt5.QtCore import QRect
+        from PyQt5.QtGui import QColor
+        
+        # Create a new rect with the same dimensions
+        new_rect = QRect(
+            self.rect.x(),
+            self.rect.y(),
+            self.rect.width(),
+            self.rect.height()
+        )
+        
+        # Create a new color if one exists
+        new_color = None
+        if self.color:
+            new_color = QColor(
+                self.color.red(),
+                self.color.green(),
+                self.color.blue(),
+                self.color.alpha()
+            )
+        
+        # Create a copy of attributes
+        new_attributes = self.attributes.copy() if self.attributes else {}
+        
+        # Return a new BoundingBox with the copied properties
+        return BoundingBox(new_rect, self.class_name, new_attributes, new_color)

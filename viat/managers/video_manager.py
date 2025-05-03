@@ -246,7 +246,7 @@ class VideoManager(QObject):
             # Define a simple hash function if import fails
             def calculate_frame_hash(img):
                 # Simple hash: resize to small image and calculate average of pixels
-                small_img = cv2.resize(img, (256, 256))
+                small_img = cv2.resize(img, (16, 16))
                 gray = cv2.cvtColor(small_img, cv2.COLOR_BGR2GRAY)
                 avg = gray.mean()
                 # Create a binary hash based on whether pixels are above or below average
@@ -257,25 +257,16 @@ class VideoManager(QObject):
         # Create progress dialog if parent window is provided
         progress_dialog = None
         if parent_window:
-            from PyQt5.QtWidgets import QProgressDialog
-            from PyQt5.QtCore import Qt
+            from PyQt5.QtWidgets import QProgressDialog, QApplication
             
             # Create the progress dialog with proper parent and flags
             progress_dialog = QProgressDialog("Scanning for duplicate frames...", "Cancel", 0, self.total_frames, parent_window)
             progress_dialog.setWindowTitle("Duplicate Frame Detection")
-            progress_dialog.setWindowModality(Qt.WindowModal)  # Make it modal to block parent window
             progress_dialog.setMinimumDuration(0)  # Show immediately
             progress_dialog.setValue(0)
-            progress_dialog.setMinimumWidth(300)  # Ensure dialog is wide enough
-            progress_dialog.setCancelButton(None)  # Optional: remove cancel button if you don't handle cancellation
-            
-            # Force the dialog to show and process events
             progress_dialog.show()
-            from PyQt5.QtWidgets import QApplication
             QApplication.processEvents()  # Process pending events to ensure dialog displays
-        else:
-            print("no parent window!!")
-            print(parent_window)
+        
         # Reset duplicate frame data
         self.frame_hashes = {}
         self.duplicate_frames_cache = {}
@@ -290,6 +281,8 @@ class VideoManager(QObject):
                 # Update progress
                 if progress_dialog:
                     progress_dialog.setValue(frame_num)
+                    if frame_num % 10 == 0:  # Process events every 10 frames
+                        QApplication.processEvents()
                 
                 # Set position and read frame
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
@@ -318,13 +311,6 @@ class VideoManager(QObject):
             # Restore original frame
             self.goto_frame(current_frame)
             
-            # Count duplicates
-            duplicate_count = sum(
-                len(frames) - 1
-                for frames in self.duplicate_frames_cache.values()
-                if len(frames) > 1
-            )
-            
             # Filter out non-duplicates from the cache
             self.duplicate_frames_cache = {
                 hash_val: frames 
@@ -332,13 +318,11 @@ class VideoManager(QObject):
                 if len(frames) > 1
             }
             
-            # Notify about results
-            if parent_window:
-                QMessageBox.information(
-                    parent_window,
-                    "Duplicate Frame Detection",
-                    f"Found {duplicate_count} duplicate frames in the video.",
-                )
+            # Count duplicates
+            duplicate_count = sum(
+                len(frames) - 1
+                for frames in self.duplicate_frames_cache.values()
+            )
             
             # Emit signal with duplicate frames
             self.duplicate_frames_found.emit(self.duplicate_frames_cache)
@@ -350,20 +334,12 @@ class VideoManager(QObject):
             if progress_dialog:
                 progress_dialog.close()
                 
-            if parent_window:
-                QMessageBox.critical(
-                    parent_window,
-                    "Error",
-                    f"An error occurred while scanning for duplicates: {str(e)}"
-                )
-            
             print(f"Error in scan_video_for_duplicates: {str(e)}")
             
             # Restore original frame
             self.goto_frame(current_frame)
             
             return 0
-    
     def get_duplicate_frames(self, frame_number):
         """
         Get all frames that are duplicates of the given frame.

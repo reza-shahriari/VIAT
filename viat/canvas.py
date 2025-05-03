@@ -802,6 +802,7 @@ class VideoCanvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         """Handle mouse release events"""
+        self.setFocus()
         if not self.pixmap:
             return
         if self.panning and (event.button() == Qt.MiddleButton or 
