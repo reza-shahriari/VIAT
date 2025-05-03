@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QApplication,
 )
 from PyQt5.QtCore import Qt, QRect,QTimer
-from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator
+from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator,QPainter
 
 
 
@@ -49,6 +49,17 @@ class AnnotationItemWidget(QWidget):
         self.parent_dock = parent
         self.attribute_inputs = {}  # Store references to attribute input widgets
         self.init_ui()
+        self.selected = False
+
+    def paintEvent(self, event):
+        """Override paint event to draw selection highlight"""
+        super().paintEvent(event)
+        if self.selected:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 255, 80))  # Semi-transparent blue
+            painter.drawRoundedRect(self.rect(), 5, 5)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -56,9 +67,9 @@ class AnnotationItemWidget(QWidget):
 
         # Annotation class name and label
         header_layout = QHBoxLayout()
-        class_label = QLabel(f"{self.annotation.class_name}")
-        class_label.setStyleSheet("font-weight: bold;")
-        header_layout.addWidget(class_label)
+        self.class_label = QLabel(f"{self.annotation.class_name}")
+        self.class_label.setStyleSheet("font-weight: bold;")
+        header_layout.addWidget(self.class_label)
         header_layout.addStretch()
         layout.addLayout(header_layout)
 
@@ -179,6 +190,16 @@ class AnnotationItemWidget(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
+    def set_selected(self, selected):
+        """Set the selection state of this widget"""
+        self.is_selected = selected
+        if selected:
+            self.setStyleSheet("background-color: #3399ff; color: white; border-radius: 3px;")
+            self.class_label.setStyleSheet("font-weight: bold; color: white;")
+        else:
+            self.setStyleSheet("")
+            self.class_label.setStyleSheet("font-weight: bold;")
+        self.update()
 
     def update_numeric_attribute(self, name, text, attr_type):
         """Update a numeric attribute value"""
@@ -397,12 +418,111 @@ class AnnotationDock(QDockWidget):
 
     def on_annotation_selected(self, item):
         """Handle selection of an annotation in the list"""
+        # Clear all selections first
+        for i in range(self.annotations_list.count()):
+            current_item = self.annotations_list.item(i)
+            widget = self.annotations_list.itemWidget(current_item)
+            if hasattr(widget, "set_selected"):
+                widget.set_selected(False)
+        
+        # Set the selected item
         widget = self.annotations_list.itemWidget(item)
         if widget and hasattr(widget, "annotation"):
-            annotation = widget.annotation
+            if hasattr(widget, "set_selected"):
+                widget.set_selected(True)
+            
             # Select this annotation on the canvas
-            self.main_window.canvas.select_annotation(annotation)
+            if hasattr(self.main_window, "canvas") and self.main_window.canvas:
+                # Block signals to prevent recursive selection
+                old_block_state = self.main_window.canvas.blockSignals(True)
+                self.main_window.canvas.selected_annotation = widget.annotation
+                self.main_window.canvas.update()
+                self.main_window.canvas.blockSignals(old_block_state)
 
+
+   
+    def select_annotation_in_list(self, target_annotation):
+        """
+        Select the specified annotation in the list and scroll to it.
+        
+        Args:
+            target_annotation: The annotation to select
+        """
+        if not target_annotation:
+            # Clear all selections if no annotation is provided
+            for i in range(self.annotations_list.count()):
+                item = self.annotations_list.item(i)
+                widget = self.annotations_list.itemWidget(item)
+                if hasattr(widget, "set_selected"):
+                    widget.set_selected(False)
+            return
+        
+        # Find and select the matching annotation widget
+        found = False
+        for i in range(self.annotations_list.count()):
+            item = self.annotations_list.item(i)
+            widget = self.annotations_list.itemWidget(item)
+            
+            if not widget or not hasattr(widget, "annotation"):
+                continue
+                
+            # Check if this is the annotation we're looking for
+            is_match = False
+            if widget.annotation is target_annotation:
+                is_match = True
+            elif (hasattr(widget.annotation, 'rect') and hasattr(target_annotation, 'rect') and
+                widget.annotation.rect == target_annotation.rect and 
+                widget.annotation.class_name == target_annotation.class_name):
+                is_match = True
+                
+            # Set selection state
+            if hasattr(widget, "set_selected"):
+                widget.set_selected(is_match)
+                
+            if is_match:
+                found = True
+                # Scroll to make this item visible
+                self.annotations_list.scrollToItem(item)
+        
+        return found
+
+
+    def update_annotation_list(self):
+        """Update the annotation list with current frame's annotations."""
+        # Remember the currently selected annotation
+        selected_annotation = None
+        if hasattr(self.main_window, "canvas") and self.main_window.canvas:
+            selected_annotation = self.main_window.canvas.selected_annotation
+        
+        # Clear the list
+        self.annotations_list.clear()
+
+        # Get current frame
+        current_frame = self.main_window.current_frame
+
+        # Check if frame_annotations exists and has entries for the current frame
+        if (
+            hasattr(self.main_window, "frame_annotations")
+            and current_frame in self.main_window.frame_annotations
+        ):
+            # Add annotations for the current frame to the list
+            for annotation in self.main_window.frame_annotations[current_frame]:
+                item = QListWidgetItem()
+                annotation_widget = AnnotationItemWidget(annotation, self)
+                item.setSizeHint(annotation_widget.sizeHint())
+                self.annotations_list.addItem(item)
+                self.annotations_list.setItemWidget(item, annotation_widget)
+                
+                # Set selection state
+                if selected_annotation and (
+                    annotation is selected_annotation or
+                    (hasattr(annotation, 'rect') and hasattr(selected_annotation, 'rect') and
+                    annotation.rect == selected_annotation.rect and 
+                    annotation.class_name == selected_annotation.class_name)
+                ):
+                    annotation_widget.set_selected(True)
+
+                      
     def add_annotation(self):
         """Add a new annotation with the current class"""
         if hasattr(self.main_window, "add_empty_annotation"):

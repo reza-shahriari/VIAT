@@ -18,7 +18,7 @@ Key features:
 
 import cv2
 from PyQt5.QtWidgets import QWidget, QMenu
-from PyQt5.QtCore import Qt, QRect, QPoint
+from PyQt5.QtCore import Qt, QRect, QPoint,QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
 import sys
 import os
@@ -556,7 +556,9 @@ class VideoCanvas(QWidget):
             if annotation:
                 # Select the annotation
                 self.selected_annotation = annotation
-                
+                if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                    self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+          
                 # Check if we're clicking on an edge
                 display_rect = self.image_to_display_rect(annotation.rect)
                 edge = self.detect_edge(display_rect, event.pos())
@@ -616,7 +618,9 @@ class VideoCanvas(QWidget):
                     # Add to annotations list
                     self.annotations.append(bbox)
                     self.selected_annotation = bbox
-
+                    if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                        self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+          
                     # Show attribute dialog if enabled
                     if (
                         self.main_window
@@ -659,6 +663,9 @@ class VideoCanvas(QWidget):
                 self.start_point = img_pos
                 self.current_point = img_pos
                 self.selected_annotation = None
+                if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                    self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+          
                 self.update()
                 return
 
@@ -880,7 +887,9 @@ class VideoCanvas(QWidget):
                     # Add to annotations list
                     self.annotations.append(bbox)
                     self.selected_annotation = bbox
-
+                    if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                        self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+          
                     # Show attribute dialog if enabled
                     if (
                         self.main_window
@@ -903,12 +912,11 @@ class VideoCanvas(QWidget):
                 self.is_drawing = False
                 self.start_point = None
                 self.current_point = None
+                if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                    # Use a timer to delay this slightly to ensure it happens after all other events
+                    QTimer.singleShot(50, lambda: self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation))
                 self.update()
 
-    def select_annotation(self, annotation):
-        """Select the specified annotation."""
-        self.selected_annotation = annotation
-        self.update()
 
     def show_context_menu(self, position):
         """Show context menu for right-click actions"""
@@ -921,6 +929,9 @@ class VideoCanvas(QWidget):
         # If we have an annotation, show context menu
         if annotation:
             self.selected_annotation = annotation
+            if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+          
             self.update()
 
             # Create context menu
@@ -984,6 +995,8 @@ class VideoCanvas(QWidget):
                 self.two_click_first_point = None  # Also reset two-click first point
             else:
                 self.selected_annotation = None
+                if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                    self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
             self.update()
         # WASD keys to move the selected annotation
         elif self.selected_annotation:

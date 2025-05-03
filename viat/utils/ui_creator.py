@@ -85,6 +85,12 @@ class UICreator:
         load_action.setShortcut("Ctrl+L")
         load_action.triggered.connect(self.main_window.load_project)
         file_menu.addAction(load_action)
+        
+        undo_action = QAction("&Undo", self.main_window)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.setStatusTip("Undo the last action")
+        undo_action.triggered.connect(self.main_window.undo)
+        file_menu.addAction(undo_action)
 
         # Recent Projects submenu
         self.main_window.recent_projects_menu = file_menu.addMenu("Recent Projects")
