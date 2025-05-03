@@ -333,35 +333,92 @@ class AnnotationManager:
                 else:  # string or default
                     annotation.attributes[attr_name] = ""
 
-    def delete_annotation(self, annotation, frame_annotations, current_frame):
+    def add_empty_annotation(self):
+        """Add a new empty annotation with default values."""
+        from .annotation import BoundingBox
+        
+        # Get current frame dimensions
+        frame_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
+        frame_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
+        
+        # Create a default bounding box in the center of the frame
+        center_x = frame_width // 2
+        center_y = frame_height // 2
+        width = frame_width // 4
+        height = frame_height // 4
+        
+        # Create the bounding box with default class
+        current_class = self.canvas.current_class
+        bbox = BoundingBox(
+            center_x - width // 2,
+            center_y - height // 2,
+            center_x + width // 2,
+            center_y + height // 2,
+            current_class,
+            self.canvas.class_colors[current_class]
+        )
+        
+        # Add default attributes if class has attribute configuration
+        if hasattr(self.canvas, "class_attributes"):
+            class_attributes = self.canvas.class_attributes.get(current_class, {})
+            self.update_annotation_attributes(bbox, class_attributes)
+        
+        # Add the annotation to the canvas
+        self.canvas.annotations.append(bbox)
+        self.canvas.selected_annotation = bbox
+        
+        # Update the canvas and annotation list
+        self.canvas.update()
+        self.update_annotation_list()
+        
+        # Mark project as modified
+        self.main_window.project_modified = True
+        
+        # Save to frame annotations
+        self.main_window.frame_annotations[self.main_window.current_frame] = self.canvas.annotations
+        
+        # Edit the new annotation
+        self.edit_annotation(bbox, focus_first_field=True)
+
+    def delete_annotation(self, annotation):
         """
-        Delete the specified annotation.
+        Delete an annotation.
         
         Args:
-            canvas: The canvas containing the annotations
             annotation: The annotation to delete
-            frame_annotations: Dictionary mapping frame numbers to annotations
-            current_frame: The current frame number
-            
-        Returns:
-            bool: True if the annotation was deleted, False otherwise
         """
         if annotation in self.canvas.annotations:
-            # Remove from annotations list
+            # Remove from canvas annotations
             self.canvas.annotations.remove(annotation)
-
-            # Clear selection if this was the selected annotation
+            
+            # If this was the selected annotation, clear selection
             if self.canvas.selected_annotation == annotation:
                 self.canvas.selected_annotation = None
-
-            # Update canvas
+            
+            # Update the canvas and annotation list
             self.canvas.update()
-
-            # Update frame_annotations dictionary
-            frame_annotations[current_frame] = self.canvas.annotations.copy()
+            self.update_annotation_list()
             
-            return True
+            # Mark project as modified
+            self.main_window.project_modified = True
             
-        return False
+            # Save to frame annotations
+            self.main_window.frame_annotations[self.main_window.current_frame] = self.canvas.annotations
 
-    
+    def update_annotation_list(self):
+        """Update the annotation list in the UI."""
+        
+        self.main_window.annotation_dock.update_annotation_list()
+        
+
+        # If duplicate frame detection is enabled, propagate annotations to duplicates
+        if self.main_window.duplicate_frames_enabled and self.main_window.current_frame in self.main_window.frame_hashes:
+            current_hash = self.main_window.frame_hashes[self.main_window.current_frame]
+            if (
+                current_hash in self.main_window.duplicate_frames_cache
+                and len(self.main_window.duplicate_frames_cache[current_hash]) > 1
+            ):
+                # Propagate current frame annotations to all duplicates
+                self.main_window.propagate_to_duplicate_frames(current_hash)
+
+        self.main_window.perform_autosave()

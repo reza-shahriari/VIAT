@@ -1368,69 +1368,6 @@ class VideoAnnotationTool(QMainWindow):
     # Annotation handling methods
     #
 
-    def update_annotation_list(self):
-        """Update the annotations list widget."""
-        self.annotation_dock.update_annotation_list()
-
-        # If duplicate frame detection is enabled, propagate annotations to duplicates
-        if self.duplicate_frames_enabled and self.current_frame in self.frame_hashes:
-            current_hash = self.frame_hashes[self.current_frame]
-            if (
-                current_hash in self.duplicate_frames_cache
-                and len(self.duplicate_frames_cache[current_hash]) > 1
-            ):
-                # Propagate current frame annotations to all duplicates
-                self.propagate_to_duplicate_frames(current_hash)
-
-        self.perform_autosave()
-
-    def add_empty_annotation(self):
-        """Add a new empty annotation to the current frame."""
-        if not self.cap:
-            QMessageBox.warning(self, "Add Annotation", "Please open a video first!")
-            return
-
-        # Create a default rectangle in the center of the frame
-        if self.canvas.pixmap:
-            center_x = self.canvas.pixmap.width() // 2
-            center_y = self.canvas.pixmap.height() // 2
-            rect = QRect(center_x - 50, center_y - 50, 100, 100)
-
-            # Create a new bounding box with the current class
-            class_name = self.canvas.current_class
-            color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
-
-            # Get default attributes
-            default_attributes = {"Size": -1, "Quality": -1}
-
-            # Check if we should use attributes from previous annotations
-            if (
-                hasattr(self, "use_previous_attributes")
-                and self.use_previous_attributes
-            ):
-                prev_attributes = self.get_previous_annotation_attributes(class_name)
-                if prev_attributes:
-                    default_attributes = prev_attributes
-
-            bbox = BoundingBox(rect, class_name, default_attributes, color)
-
-            # Add to annotations
-            self.canvas.annotations.append(bbox)
-            self.canvas.selected_annotation = bbox
-
-            # Update frame_annotations dictionary
-            self.frame_annotations[self.current_frame] = self.canvas.annotations
-
-            # Show attribute dialog if enabled
-            if (
-                hasattr(self, "auto_show_attribute_dialog")
-                and self.auto_show_attribute_dialog
-            ):
-                self.edit_annotation(bbox, focus_first_field=True)
-
-            # Update UI
-            self.update_annotation_list()
-            self.canvas.update()
 
     def clear_annotations(self):
         """Clear all annotations."""
@@ -1713,6 +1650,24 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "update_annotation_list"):
                 self.update_annotation_list()
 
+    def add_empty_annotation(self):
+        """Add a new empty annotation with default values."""
+        self.annotation_manager.add_empty_annotation()
+    
+    def update_annotation_list(self):
+        """Update the annotation list in the UI."""
+        self.annotation_manager.update_annotation_list()
+   
+    def update_annotation_attributes(self, annotation, class_attributes):
+        """
+        Update annotation attributes based on class configuration.
+        
+        Args:
+            annotation: The annotation to update
+            class_attributes: The class attribute configuration
+        """
+        self.annotation_manager.update_annotation_attributes(annotation, class_attributes)
+
     #
     # Import handling methods
     #
@@ -1926,66 +1881,6 @@ class VideoAnnotationTool(QMainWindow):
                 self.class_selector.blockSignals(True)
                 self.class_selector.setCurrentText(class_name)
                 self.class_selector.blockSignals(False)
-
-    def update_annotation_attributes(self, annotation, attributes_config):
-        """Update annotation attributes based on class attribute configuration."""
-        # Create a new attributes dictionary with defaults from the configuration
-        new_attributes = {}
-
-        # First, set defaults from configuration
-        for attr_name, attr_config in attributes_config.items():
-            new_attributes[attr_name] = attr_config["default"]
-
-        # Then, preserve existing values where possible
-        for attr_name, attr_value in annotation.attributes.items():
-            if attr_name in new_attributes:
-                # Keep existing value if it's within constraints
-                if attr_name in attributes_config:
-                    attr_type = attributes_config[attr_name]["type"]
-
-                    if attr_type == "int":
-                        try:
-                            value = int(attr_value)
-                            min_val = attributes_config[attr_name].get(
-                                "min", float("-inf")
-                            )
-                            max_val = attributes_config[attr_name].get(
-                                "max", float("inf")
-                            )
-                            if min_val <= value <= max_val:
-                                new_attributes[attr_name] = value
-                        except (ValueError, TypeError):
-                            pass
-                    elif attr_type == "float":
-                        try:
-                            value = float(attr_value)
-                            min_val = attributes_config[attr_name].get(
-                                "min", float("-inf")
-                            )
-                            max_val = attributes_config[attr_name].get(
-                                "max", float("inf")
-                            )
-                            if min_val <= value <= max_val:
-                                new_attributes[attr_name] = value
-                        except (ValueError, TypeError):
-                            pass
-                    elif attr_type == "string":
-                        new_attributes[attr_name] = str(attr_value)
-                    elif attr_type == "boolean":
-                        if isinstance(attr_value, bool):
-                            new_attributes[attr_name] = attr_value
-                        else:
-                            try:
-                                new_attributes[attr_name] = str(attr_value).lower() in [
-                                    "true",
-                                    "1",
-                                    "yes",
-                                ]
-                            except (ValueError, TypeError):
-                                pass
-
-        # Update the annotation's attributes
-        annotation.attributes = new_attributes
 
     def refresh_class_lists(self):
         """Refresh class lists in all docks with debouncing"""
