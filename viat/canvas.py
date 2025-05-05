@@ -532,8 +532,8 @@ class VideoCanvas(QWidget):
         """Handle mouse press events"""
         if not self.pixmap:
             return
-        # Check for panning - either middle button or Ctrl+left button
-        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier):
+        # Check for panning - either middle button 
+        if event.button() == Qt.MiddleButton :
             self.panning = True
             self.pan_start_pos = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -569,7 +569,7 @@ class VideoCanvas(QWidget):
                     self.selected_annotations = []
                 if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                     self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
-          
+        
                 # Check if we're clicking on an edge
                 display_rect = self.image_to_display_rect(annotation.rect)
                 edge = self.detect_edge(display_rect, event.pos())
@@ -584,6 +584,10 @@ class VideoCanvas(QWidget):
                     # Start dragging the annotation
                     self.drag_start_pos = img_pos
                     self.original_rect = QRect(annotation.rect)
+                    
+                    # Store original rectangles for all selected annotations
+                    for ann in self.selected_annotations:
+                        ann.original_rect = QRect(ann.rect)
                 
                 # Reset two-click state if we're selecting an annotation
                 self.two_click_first_point = None
@@ -999,34 +1003,63 @@ class VideoCanvas(QWidget):
                 self.is_drawing = False
                 self.start_point = None
                 self.current_point = None
-                self.two_click_first_point = None  # Also reset two-click first point
+                self.two_click_first_point = None  
             else:
                 self.selected_annotation = None
+                self.selected_annotations = []  
                 if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                     self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
             self.update()
         #  Ctrl+Arrow keys to move the selected annotation
         elif self.selected_annotation:
-            # Move annotation with  keys
-            if  (event.key() == Qt.Key_Up and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move up
+            # Move annotation with keys
+            if (event.key() == Qt.Key_Up and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move up
+                # Move primary selected annotation
                 self.selected_annotation.rect.moveTop(
                     self.selected_annotation.rect.top() - 1
                 )
+                # Move all other selected annotations
+                for annotation in self.selected_annotations:
+                    if annotation != self.selected_annotation:
+                        annotation.rect.moveTop(
+                            annotation.rect.top() - 1
+                        )
                 self.update_annotation_after_edit()
-            elif  (event.key() == Qt.Key_Left and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move left
+            elif (event.key() == Qt.Key_Left and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move left
+                # Move primary selected annotation
                 self.selected_annotation.rect.moveLeft(
                     self.selected_annotation.rect.left() - 1
                 )
+                # Move all other selected annotations
+                for annotation in self.selected_annotations:
+                    if annotation != self.selected_annotation:
+                        annotation.rect.moveLeft(
+                            annotation.rect.left() - 1
+                        )
                 self.update_annotation_after_edit()
             elif (event.key() == Qt.Key_Down and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move down
+                # Move primary selected annotation
                 self.selected_annotation.rect.moveTop(
                     self.selected_annotation.rect.top() + 1
                 )
+                # Move all other selected annotations
+                for annotation in self.selected_annotations:
+                    if annotation != self.selected_annotation:
+                        annotation.rect.moveTop(
+                            annotation.rect.top() + 1
+                        )
                 self.update_annotation_after_edit()
             elif (event.key() == Qt.Key_Right and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move right
+                # Move primary selected annotation
                 self.selected_annotation.rect.moveLeft(
                     self.selected_annotation.rect.left() + 1
                 )
+                # Move all other selected annotations
+                for annotation in self.selected_annotations:
+                    if annotation != self.selected_annotation:
+                        annotation.rect.moveLeft(
+                            annotation.rect.left() + 1
+                        )
                 self.update_annotation_after_edit()
             # Resize annotation with 8456 keys (numpad or regular)
             elif event.key() == Qt.Key_8:  # Move top edge up
@@ -1051,24 +1084,6 @@ class VideoCanvas(QWidget):
                 self.update_annotation_after_edit()
             else:
                 super().keyPressEvent(event)
-        # Ctrl+Shift+Arrow keys for panning the video display
-        elif (event.modifiers() & Qt.ControlModifier and event.modifiers() & Qt.ShiftModifier and 
-            event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right)):
-            # Pan amount - can be adjusted as needed
-            pan_amount = 20
-            
-            if event.key() == Qt.Key_Up:
-                self.pan_offset.setY(self.pan_offset.y() + pan_amount)
-            elif event.key() == Qt.Key_Down:
-                self.pan_offset.setY(self.pan_offset.y() - pan_amount)
-            elif event.key() == Qt.Key_Left:
-                self.pan_offset.setX(self.pan_offset.x() + pan_amount)
-            elif event.key() == Qt.Key_Right:
-                self.pan_offset.setX(self.pan_offset.x() - pan_amount)
-                
-            self.update()
-        else:
-            super().keyPressEvent(event)
 
     def update_annotation_after_edit(self):
         """Update UI after annotation has been edited"""
