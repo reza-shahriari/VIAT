@@ -333,6 +333,13 @@ class AnnotationDock(QDockWidget):
                             self.class_selector.setCurrentIndex(index)
 
 
+    def select_all_in_list(self):
+        """Select all items in the annotation list."""
+        if hasattr(self, "annotations_list"):
+            for i in range(self.annotations_list.count()):
+                item = self.annotations_list.item(i)
+                item.setSelected(True)
+
 
     def on_class_selected(self, class_name):
         """Handle selection of a class"""

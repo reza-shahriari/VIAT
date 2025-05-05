@@ -130,7 +130,9 @@ class VideoAnnotationTool(QMainWindow):
         self.duplicate_frames_cache = {}  # Maps frame hash to list of frame numbers
         self.frame_hashes = {}  
         self.undo_stack = []
+        self.redo_stack = []  
         self.max_undo_steps = 20
+        self.max_redo_steps = 20  
         self.styles = {}
         self.icon_provider = IconProvider()
         self._class_refresh_scheduled = False
@@ -886,14 +888,16 @@ class VideoAnnotationTool(QMainWindow):
         """Global event filter to handle shortcuts regardless of focus."""
         if event.type() == QEvent.KeyPress:
             # Handle arrow keys for frame navigation
-            if event.key() == Qt.Key_Right:
-                # Right or Down arrow - go to next frame
-                self.next_frame()
-                return True
-            elif event.key() == Qt.Key_Left:
-                # Left or Up arrow - go to previous frame
-                self.prev_frame()
-                return True
+            # Check if control is not pressed
+            if not (QApplication.keyboardModifiers() & Qt.ControlModifier):
+                if event.key() == Qt.Key_Right:
+                    # Right or Down arrow - go to next frame
+                    self.next_frame()
+                    return True
+                elif event.key() == Qt.Key_Left:
+                    # Left or Up arrow - go to previous frame
+                    self.prev_frame()
+                    return True
             # Handle space key for play/pause
             elif event.key() == Qt.Key_Space:
                 # Space - toggle play/pause
@@ -1430,6 +1434,42 @@ class VideoAnnotationTool(QMainWindow):
             # Update annotation list
             self.update_annotation_list()
 
+    def delete_selected_annotations(self):
+        """Delete all currently selected annotations."""
+        if not hasattr(self.canvas, "selected_annotations") or not self.canvas.selected_annotations:
+            # If no multi-selection, fall back to single selection delete
+            self.delete_selected_annotation()
+            return
+        
+        self.save_undo_state()
+        
+        # Get a copy of the selected annotations to avoid modification during iteration
+        annotations_to_delete = self.canvas.selected_annotations.copy()
+        
+        # Remove all selected annotations
+        for annotation in annotations_to_delete:
+            if annotation in self.canvas.annotations:
+                self.canvas.annotations.remove(annotation)
+        
+        # Clear selection
+        self.canvas.selected_annotation = None
+        self.canvas.selected_annotations = []
+        
+        # Update canvas and mark project as modified
+        self.canvas.update()
+        self.project_modified = True
+        
+        # Update frame_annotations dictionary
+        self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
+        
+        # Update annotation list in UI
+        self.update_annotation_list()
+        
+        # Show status message
+        count = len(annotations_to_delete)
+        self.statusBar.showMessage(f"Deleted {count} annotations", 3000)
+
+    
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""
         if (
@@ -1625,6 +1665,11 @@ class VideoAnnotationTool(QMainWindow):
             # Space - toggle play/pause
             self.play_pause_video()
             return True
+        elif event.key() == Qt.Key_Delete:
+            if hasattr(self.canvas, "selected_annotations") and self.canvas.selected_annotations:
+                self.delete_selected_annotations()
+            elif hasattr(self.canvas, "selected_annotation") and self.canvas.selected_annotation:
+                self.delete_selected_annotation()
         # Toggle annotation method with 'M' key
         elif event.key() == Qt.Key_M:
             current_index = self.method_selector.currentIndex()
@@ -1658,10 +1703,15 @@ class VideoAnnotationTool(QMainWindow):
         elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
             self.select_all_annotations()
         # Undo with Ctrl+Z
-        elif event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier):
+        elif event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier) and not (event.modifiers() & Qt.ShiftModifier):
             self.undo()
+        # Redo with Ctrl+Y or Ctrl+Shift+Z
+        elif (event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier)) or \
+            (event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)):
+            self.redo()
         else:
             super().keyPressEvent(event)
+
 
 
     #
@@ -3488,20 +3538,27 @@ class VideoAnnotationTool(QMainWindow):
 
     def select_all_annotations(self):
         """Select all annotations in the current frame."""
-        # Since we can only have one selected annotation at a time in the current implementation,
-        # we'll just show a message to the user
         current_frame = self.current_frame
-        if (
-            current_frame in self.frame_annotations
-            and self.frame_annotations[current_frame]
-        ):
+        if current_frame in self.frame_annotations and self.frame_annotations[current_frame]:
+            # Store all annotations in the current frame as selected
+            self.canvas.selected_annotations = self.frame_annotations[current_frame].copy()
+            
+            # Also set the primary selected annotation if it doesn't exist
+            if not self.canvas.selected_annotation and self.canvas.selected_annotations:
+                self.canvas.selected_annotation = self.canvas.selected_annotations[0]
+            
+            # Update the canvas
+            self.canvas.update()
+            
+            # Update the annotation list in the dock if it exists
+            if hasattr(self, "annotation_dock"):
+                self.annotation_dock.select_annotation_in_list(None)  # Deselect current
+                self.annotation_dock.select_all_in_list()
             count = len(self.frame_annotations[current_frame])
-            self.statusBar.showMessage(
-                f"There are {count} annotations in this frame. Use Tab to cycle through them.",
-                3000,
-            )
+            self.statusBar.showMessage(f"Selected all {count} annotations in this frame", 3000)
         else:
             self.statusBar.showMessage("No annotations in this frame", 2000)
+
 
     def cycle_annotation_selection(self):
         """Cycle through annotations in the current frame or deselect if only one exists."""
@@ -3584,15 +3641,39 @@ class VideoAnnotationTool(QMainWindow):
         # Add to undo stack
         self.undo_stack.append(undo_state)
         
+        # Clear the redo stack when a new action is performed
+        self.redo_stack.clear()
+        
         # Limit the size of the undo stack
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
+
+
 
     def undo(self):
         """Undo the last annotation or class change."""
         if not self.undo_stack:
             self.statusBar.showMessage("Nothing to undo", 3000)
             return
+        
+        # Get the current state before undoing
+        current_state = {
+            'frame': self.current_frame,
+            'all_annotations': {frame_num: [self.clone_annotation(ann) for ann in anns] 
+                            for frame_num, anns in self.frame_annotations.items()},
+            'current_annotations': [self.clone_annotation(ann) for ann in self.canvas.annotations] 
+                                if self.canvas.annotations else [],
+            'class_colors': {class_name: QColor(color) for class_name, color in self.canvas.class_colors.items()},
+            'class_attributes': deepcopy(self.canvas.class_attributes) if hasattr(self.canvas, "class_attributes") else None,
+            'current_class': self.canvas.current_class if hasattr(self.canvas, "current_class") else None
+        }
+        
+        # Add current state to redo stack
+        self.redo_stack.append(current_state)
+        
+        # Limit the size of the redo stack
+        if len(self.redo_stack) > self.max_redo_steps:
+            self.redo_stack.pop(0)
         
         # Get the last state
         last_state = self.undo_stack.pop()
@@ -3664,4 +3745,116 @@ class VideoAnnotationTool(QMainWindow):
             
             self.statusBar.showMessage("Undo successful", 3000)
 
-    
+    def save_undo_state_without_clearing_redo(self):
+        """Save the current state for undo functionality without clearing the redo stack."""
+        # Create a deep copy of all frame annotations
+        all_frame_annotations = {}
+        for frame_num, annotations in self.frame_annotations.items():
+            all_frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in annotations]
+        
+        # Create a deep copy of class colors
+        class_colors = {}
+        for class_name, color in self.canvas.class_colors.items():
+            class_colors[class_name] = QColor(color)
+        
+        # Create a deep copy of class attributes if they exist
+        class_attributes = None
+        if hasattr(self.canvas, "class_attributes"):
+            class_attributes = deepcopy(self.canvas.class_attributes)
+        
+        # Save the state
+        undo_state = {
+            'frame': self.current_frame,
+            'all_annotations': all_frame_annotations,
+            'current_annotations': [self.clone_annotation(ann) for ann in self.canvas.annotations] if self.canvas.annotations else [],
+            'class_colors': class_colors,
+            'class_attributes': class_attributes,
+            'current_class': self.canvas.current_class if hasattr(self.canvas, "current_class") else None
+        }
+        
+        # Add to undo stack
+        self.undo_stack.append(undo_state)
+        
+        # Limit the size of the undo stack
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+
+    def redo(self):
+        """Redo the last undone action."""
+        if not self.redo_stack:
+            self.statusBar.showMessage("Nothing to redo", 3000)
+            return
+        
+        # Save current state to undo stack before redoing
+        self.save_undo_state_without_clearing_redo()
+        
+        # Get the last state from redo stack
+        redo_state = self.redo_stack.pop()
+        frame = redo_state['frame']
+        
+        # Restore class information if it exists
+        if 'class_colors' in redo_state and redo_state['class_colors']:
+            self.canvas.class_colors = redo_state['class_colors']
+        
+        if 'class_attributes' in redo_state and redo_state['class_attributes']:
+            self.canvas.class_attributes = redo_state['class_attributes']
+        
+        if 'current_class' in redo_state and redo_state['current_class']:
+            self.canvas.current_class = redo_state['current_class']
+        
+        # Restore all frame annotations if they exist
+        if 'all_annotations' in redo_state and redo_state['all_annotations']:
+            self.frame_annotations = redo_state['all_annotations']
+        
+        # If we're redoing a change on the current frame
+        if frame == self.current_frame:
+            # Restore the annotations for the current frame
+            if 'current_annotations' in redo_state:
+                self.canvas.annotations = redo_state['current_annotations']
+            else:
+                self.canvas.annotations = self.frame_annotations.get(frame, [])
+            
+            self.canvas.selected_annotation = None
+            self.canvas.update()
+            
+            # Update annotation list
+            self.update_annotation_list()
+            
+            # Update class UI
+            self.refresh_class_ui()
+            
+            self.statusBar.showMessage("Redo successful", 3000)
+        else:
+            # If the redo is for a different frame, we need to navigate to that frame first
+            self.statusBar.showMessage(f"Redo refers to frame {frame}, navigating there first", 3000)
+            
+            # Navigate to the frame with the redo state
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                self.current_frame = frame
+                self.frame_slider.setValue(frame)
+                self.load_current_image()
+            else:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+                ret, frame_img = self.cap.read()
+                if ret:
+                    self.current_frame = frame
+                    self.frame_slider.setValue(frame)
+                    self.canvas.set_frame(frame_img)
+            
+            # Restore the annotations for this frame
+            if 'current_annotations' in redo_state:
+                self.canvas.annotations = redo_state['current_annotations']
+            else:
+                self.canvas.annotations = self.frame_annotations.get(frame, [])
+            
+            self.canvas.selected_annotation = None
+            self.canvas.update()
+            
+            # Update annotation list
+            self.update_annotation_list()
+            
+            # Update class UI
+            self.refresh_class_ui()
+            
+            self.statusBar.showMessage("Redo successful", 3000)
+

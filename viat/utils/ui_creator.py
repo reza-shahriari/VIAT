@@ -86,11 +86,6 @@ class UICreator:
         load_action.triggered.connect(self.main_window.load_project)
         file_menu.addAction(load_action)
         
-        undo_action = QAction("&Undo", self.main_window)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.setStatusTip("Undo the last action")
-        undo_action.triggered.connect(self.main_window.undo)
-        file_menu.addAction(undo_action)
 
         # Recent Projects submenu
         self.main_window.recent_projects_menu = file_menu.addMenu("Recent Projects")
@@ -147,6 +142,25 @@ class UICreator:
         add_class_action = QAction("Add Class", self.main_window)
         add_class_action.triggered.connect(self.main_window.add_class)
         edit_menu.addAction(add_class_action)
+
+        edit_menu.addSeparator()
+
+        undo_action = QAction("&Undo", self.main_window)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.setStatusTip("Undo the last action")
+        undo_action.triggered.connect(self.main_window.undo)
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("&Redo", self.main_window)
+        redo_action.setShortcut("Ctrl+Y")
+        redo_action.setStatusTip("Redo the last undone action")
+        redo_action.triggered.connect(self.main_window.redo)
+        edit_menu.addAction(redo_action)
+
+        select_all_action = QAction("Select &All", self.main_window)
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.triggered.connect(self.main_window.select_all_annotations)
+        edit_menu.addAction(select_all_action)
 
     def create_tools_menu(self, menubar):
         """Create the Tools menu and its actions."""
@@ -386,9 +400,9 @@ class UICreator:
         attr_dialog_action.setChecked(self.main_window.auto_show_attribute_dialog)
         attr_dialog_action.triggered.connect(self.main_window.toggle_attribute_dialog)
         attr_dialog_action.setToolTip(
-            "Automatically show the attribute dialog when creating a new annotation (Ctrl+A)"
+            "Automatically show the attribute dialog when creating a new annotation "
         )
-        attr_dialog_action.setShortcut("Ctrl+A")
+        
         menubar.addAction(attr_dialog_action)
 
         prev_attr_action = QAction(

@@ -55,6 +55,7 @@ class VideoCanvas(QWidget):
         self.start_point = None
         self.current_point = None
         self.selected_annotation = None
+        self.selected_annotations = []
         self.current_class = "Quad"
         self.class_colors = {
             "Quad": QColor(0, 255, 255),
@@ -161,7 +162,7 @@ class VideoCanvas(QWidget):
                     continue
 
                 # Set pen based on selection status
-                if annotation == self.selected_annotation:
+                if annotation == self.selected_annotation or annotation in self.selected_annotations:
                     pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
                 else:
                     pen = QPen(annotation.color, 2)
@@ -556,6 +557,16 @@ class VideoCanvas(QWidget):
             if annotation:
                 # Select the annotation
                 self.selected_annotation = annotation
+                if event.modifiers() & Qt.ControlModifier:
+                    # If already in selected_annotations, remove it (toggle selection)
+                    if annotation in self.selected_annotations:
+                        self.selected_annotations.remove(annotation)
+                    else:
+                        # Otherwise add it to the multi-selection
+                        self.selected_annotations.append(annotation)
+                else:
+                    # If not using Ctrl key, clear multi-selection and just select this one
+                    self.selected_annotations = []
                 if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                     self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
           
@@ -982,10 +993,6 @@ class VideoCanvas(QWidget):
             # Update main window zoom level if available
             if self.main_window and hasattr(self.main_window, "zoom_level"):
                 self.main_window.zoom_level = self.zoom_level
-
-        if event.key() == Qt.Key_Delete and self.selected_annotation:
-            if self.main_window:
-                self.main_window.delete_selected_annotation()
         # Escape key to cancel drawing or selection
         elif event.key() == Qt.Key_Escape:
             if self.is_drawing:
@@ -998,25 +1005,25 @@ class VideoCanvas(QWidget):
                 if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                     self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
             self.update()
-        # WASD keys to move the selected annotation
+        #  Ctrl+Arrow keys to move the selected annotation
         elif self.selected_annotation:
-            # Move annotation with WASD keys
-            if event.key() == Qt.Key_W:  # Move up
+            # Move annotation with  keys
+            if  (event.key() == Qt.Key_Up and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move up
                 self.selected_annotation.rect.moveTop(
                     self.selected_annotation.rect.top() - 1
                 )
                 self.update_annotation_after_edit()
-            elif event.key() == Qt.Key_A:  # Move left
+            elif  (event.key() == Qt.Key_Left and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move left
                 self.selected_annotation.rect.moveLeft(
                     self.selected_annotation.rect.left() - 1
                 )
                 self.update_annotation_after_edit()
-            elif event.key() == Qt.Key_S:  # Move down
+            elif (event.key() == Qt.Key_Down and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move down
                 self.selected_annotation.rect.moveTop(
                     self.selected_annotation.rect.top() + 1
                 )
                 self.update_annotation_after_edit()
-            elif event.key() == Qt.Key_D:  # Move right
+            elif (event.key() == Qt.Key_Right and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move right
                 self.selected_annotation.rect.moveLeft(
                     self.selected_annotation.rect.left() + 1
                 )
@@ -1044,6 +1051,22 @@ class VideoCanvas(QWidget):
                 self.update_annotation_after_edit()
             else:
                 super().keyPressEvent(event)
+        # Ctrl+Shift+Arrow keys for panning the video display
+        elif (event.modifiers() & Qt.ControlModifier and event.modifiers() & Qt.ShiftModifier and 
+            event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right)):
+            # Pan amount - can be adjusted as needed
+            pan_amount = 20
+            
+            if event.key() == Qt.Key_Up:
+                self.pan_offset.setY(self.pan_offset.y() + pan_amount)
+            elif event.key() == Qt.Key_Down:
+                self.pan_offset.setY(self.pan_offset.y() - pan_amount)
+            elif event.key() == Qt.Key_Left:
+                self.pan_offset.setX(self.pan_offset.x() + pan_amount)
+            elif event.key() == Qt.Key_Right:
+                self.pan_offset.setX(self.pan_offset.x() - pan_amount)
+                
+            self.update()
         else:
             super().keyPressEvent(event)
 
@@ -1105,3 +1128,4 @@ class VideoCanvas(QWidget):
         """Reset the pan offset to center the image"""
         self.pan_offset = QPoint(0, 0)
         self.update()
+    
