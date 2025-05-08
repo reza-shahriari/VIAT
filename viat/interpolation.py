@@ -591,9 +591,10 @@ class InterpolationManager:
                     # Get confidence scores (default to 0.5 if not present)
                     existing_conf = getattr(existing, 'score', 0.5)
                     interpolated_conf = getattr(interpolated, 'score', 0.5)
+                    existing_source = getattr(existing, 'source', 'detected')  # Default to 'detected' if not specified
                     
                     # If existing is manual, always keep it
-                    if getattr(existing, 'source', '') == 'manual':
+                    if existing_source == 'manual':
                         final_annotations.append(existing)
                     # If interpolated is manual (unlikely), keep it
                     elif getattr(interpolated, 'source', '') == 'manual':
@@ -605,10 +606,12 @@ class InterpolationManager:
                             existing, interpolated, existing_conf, interpolated_conf
                         )
                         final_annotations.append(weighted_ann)
-                    # Otherwise, use the one with higher confidence
+                    # Otherwise, use the one with higher confidence and preserve its source
                     elif existing_conf >= interpolated_conf:
+                        # Keep the existing annotation with its original source
                         final_annotations.append(existing)
                     else:
+                        # Use the interpolated annotation with 'interpolated' source
                         final_annotations.append(interpolated)
                         
                     used_existing.add(i)

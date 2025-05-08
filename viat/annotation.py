@@ -136,6 +136,11 @@ class BoundingBox:
         bbox.original_source = self.original_source
         return bbox
 
+    def verify(self):
+        """Mark the annotation as verified."""
+        self.verified = True
+        self.source = "manual"  
+        self.score = None
 
 class AnnotationManager:
     """
