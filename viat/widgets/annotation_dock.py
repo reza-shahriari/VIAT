@@ -26,12 +26,11 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QProgressBar,
     QApplication,
+    QMessageBox,
+    QButtonGroup,
 )
-from PyQt5.QtCore import Qt, QRect,QTimer
-from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator,QPainter
-
-
-
+from PyQt5.QtCore import Qt, QRect, QTimer
+from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator, QPainter
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -152,10 +151,14 @@ class AnnotationItemWidget(QWidget):
                             try:
                                 min_val = int(attr_min)
                                 max_val = int(attr_max)
-                                input_widget.setValidator(QIntValidator(min_val, max_val))
+                                input_widget.setValidator(
+                                    QIntValidator(min_val, max_val)
+                                )
                             except (ValueError, TypeError):
                                 # Handle case where conversion fails
-                                print(f"Warning: Could not convert min/max values to integers: {attr_min}, {attr_max}")
+                                print(
+                                    f"Warning: Could not convert min/max values to integers: {attr_min}, {attr_max}"
+                                )
                     else:
                         input_widget.setValidator(
                             QDoubleValidator(attr_min, attr_max, 2)
@@ -190,11 +193,14 @@ class AnnotationItemWidget(QWidget):
         line.setFrameShape(QFrame.HLine)
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
+
     def set_selected(self, selected):
         """Set the selection state of this widget"""
         self.is_selected = selected
         if selected:
-            self.setStyleSheet("background-color: #3399ff; color: white; border-radius: 3px;")
+            self.setStyleSheet(
+                "background-color: #3399ff; color: white; border-radius: 3px;"
+            )
             self.class_label.setStyleSheet("font-weight: bold; color: white;")
         else:
             self.setStyleSheet("")
@@ -308,30 +314,31 @@ class AnnotationDock(QDockWidget):
         """Update the class selector with available classes"""
         # Store the current selection before clearing
         current_text = self.class_selector.currentText()
-        
+
         # Clear the selector
         self.class_selector.clear()
-        
-        
-        if hasattr(self.main_window, 'canvas'):
-            if hasattr(self.main_window.canvas, 'class_colors') and self.main_window.canvas.class_colors:
+
+        if hasattr(self.main_window, "canvas"):
+            if (
+                hasattr(self.main_window.canvas, "class_colors")
+                and self.main_window.canvas.class_colors
+            ):
                 class_colors = self.main_window.canvas.class_colors
-                
+
                 # Use a list to maintain order and prevent duplicates
                 class_list = list(dict.fromkeys(class_colors.keys()))
                 self.class_selector.addItems(class_list)
-                
+
                 # Restore previous selection if it exists
                 if current_text and self.class_selector.findText(current_text) >= 0:
                     self.class_selector.setCurrentText(current_text)
                 # Otherwise select the current class if it exists
-                elif hasattr(self.main_window.canvas, 'current_class'):
+                elif hasattr(self.main_window.canvas, "current_class"):
                     current_class = self.main_window.canvas.current_class
                     if current_class:
                         index = self.class_selector.findText(current_class)
                         if index >= 0:
                             self.class_selector.setCurrentIndex(index)
-
 
     def select_all_in_list(self):
         """Select all items in the annotation list."""
@@ -340,7 +347,6 @@ class AnnotationDock(QDockWidget):
                 item = self.annotations_list.item(i)
                 item.setSelected(True)
 
-
     def on_class_selected(self, class_name):
         """Handle selection of a class"""
         if class_name and hasattr(self.main_window, "canvas"):
@@ -348,13 +354,17 @@ class AnnotationDock(QDockWidget):
             self.main_window.canvas.blockSignals(True)
             self.main_window.canvas.set_current_class(class_name)
             self.main_window.canvas.blockSignals(False)
-            
+
             # Update the canvas
             self.main_window.canvas.update()
-            
+
             # Update class selector in class dock if it exists
-            if hasattr(self.main_window, "class_dock") and hasattr(self.main_window.class_dock, "classes_list"):
-                items = self.main_window.class_dock.classes_list.findItems(class_name, Qt.MatchExactly)
+            if hasattr(self.main_window, "class_dock") and hasattr(
+                self.main_window.class_dock, "classes_list"
+            ):
+                items = self.main_window.class_dock.classes_list.findItems(
+                    class_name, Qt.MatchExactly
+                )
                 if items:
                     self.main_window.class_dock.classes_list.setCurrentItem(items[0])
         widget = QWidget()
@@ -431,13 +441,13 @@ class AnnotationDock(QDockWidget):
             widget = self.annotations_list.itemWidget(current_item)
             if hasattr(widget, "set_selected"):
                 widget.set_selected(False)
-        
+
         # Set the selected item
         widget = self.annotations_list.itemWidget(item)
         if widget and hasattr(widget, "annotation"):
             if hasattr(widget, "set_selected"):
                 widget.set_selected(True)
-            
+
             # Select this annotation on the canvas
             if hasattr(self.main_window, "canvas") and self.main_window.canvas:
                 # Block signals to prevent recursive selection
@@ -446,12 +456,10 @@ class AnnotationDock(QDockWidget):
                 self.main_window.canvas.update()
                 self.main_window.canvas.blockSignals(old_block_state)
 
-
-   
     def select_annotation_in_list(self, target_annotation):
         """
         Select the specified annotation in the list and scroll to it.
-        
+
         Args:
             target_annotation: The annotation to select
         """
@@ -463,36 +471,38 @@ class AnnotationDock(QDockWidget):
                 if hasattr(widget, "set_selected"):
                     widget.set_selected(False)
             return
-        
+
         # Find and select the matching annotation widget
         found = False
         for i in range(self.annotations_list.count()):
             item = self.annotations_list.item(i)
             widget = self.annotations_list.itemWidget(item)
-            
+
             if not widget or not hasattr(widget, "annotation"):
                 continue
-                
+
             # Check if this is the annotation we're looking for
             is_match = False
             if widget.annotation is target_annotation:
                 is_match = True
-            elif (hasattr(widget.annotation, 'rect') and hasattr(target_annotation, 'rect') and
-                widget.annotation.rect == target_annotation.rect and 
-                widget.annotation.class_name == target_annotation.class_name):
+            elif (
+                hasattr(widget.annotation, "rect")
+                and hasattr(target_annotation, "rect")
+                and widget.annotation.rect == target_annotation.rect
+                and widget.annotation.class_name == target_annotation.class_name
+            ):
                 is_match = True
-                
+
             # Set selection state
             if hasattr(widget, "set_selected"):
                 widget.set_selected(is_match)
-                
+
             if is_match:
                 found = True
                 # Scroll to make this item visible
                 self.annotations_list.scrollToItem(item)
-        
-        return found
 
+        return found
 
     def update_annotation_list(self):
         """Update the annotation list with current frame's annotations."""
@@ -500,7 +510,7 @@ class AnnotationDock(QDockWidget):
         selected_annotation = None
         if hasattr(self.main_window, "canvas") and self.main_window.canvas:
             selected_annotation = self.main_window.canvas.selected_annotation
-        
+
         # Clear the list
         self.annotations_list.clear()
 
@@ -519,17 +529,19 @@ class AnnotationDock(QDockWidget):
                 item.setSizeHint(annotation_widget.sizeHint())
                 self.annotations_list.addItem(item)
                 self.annotations_list.setItemWidget(item, annotation_widget)
-                
+
                 # Set selection state
                 if selected_annotation and (
-                    annotation is selected_annotation or
-                    (hasattr(annotation, 'rect') and hasattr(selected_annotation, 'rect') and
-                    annotation.rect == selected_annotation.rect and 
-                    annotation.class_name == selected_annotation.class_name)
+                    annotation is selected_annotation
+                    or (
+                        hasattr(annotation, "rect")
+                        and hasattr(selected_annotation, "rect")
+                        and annotation.rect == selected_annotation.rect
+                        and annotation.class_name == selected_annotation.class_name
+                    )
                 ):
                     annotation_widget.set_selected(True)
 
-                      
     def add_annotation(self):
         """Add a new annotation with the current class"""
         if hasattr(self.main_window, "add_empty_annotation"):
@@ -566,26 +578,15 @@ class AnnotationDock(QDockWidget):
                 self.delete_selected_annotation()
 
     def batch_edit_annotations(self):
-        """Show dialog for batch editing annotations across frames."""
+        """Open dialog to batch edit annotations across multiple frames."""
         # Create dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Batch Operations")
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Batch Edit Annotations")
         dialog.setMinimumWidth(400)
+
         layout = QVBoxLayout(dialog)
 
-        # Create operation type group
-        operation_group = QGroupBox("Operation Type")
-        operation_layout = QVBoxLayout(operation_group)
-        
-        edit_radio = QRadioButton("Edit Annotation Attributes")
-        delete_radio = QRadioButton("Delete Annotations")
-        edit_radio.setChecked(True)
-        
-        operation_layout.addWidget(edit_radio)
-        operation_layout.addWidget(delete_radio)
-        layout.addWidget(operation_group)
-
-        # Add frame range selection
+        # Frame range selection
         range_group = QGroupBox("Frame Range")
         range_layout = QFormLayout(range_group)
 
@@ -601,161 +602,581 @@ class AnnotationDock(QDockWidget):
 
         range_layout.addRow("Start Frame:", start_spin)
         range_layout.addRow("End Frame:", end_spin)
+
+        # Action selection
+        action_group = QGroupBox("Action")
+        action_layout = QVBoxLayout(action_group)
+
+        # Radio buttons for different actions
+        action_radios = QButtonGroup(dialog)
+
+        # Change class radio
+        change_class_radio = QRadioButton("Change class")
+        action_radios.addButton(change_class_radio)
+        action_layout.addWidget(change_class_radio)
+
+        # Delete class radio
+        delete_class_radio = QRadioButton("Delete annotations of class")
+        action_radios.addButton(delete_class_radio)
+        action_layout.addWidget(delete_class_radio)
+
+        # Modify attributes radio
+        modify_attr_radio = QRadioButton("Modify attributes of a class")
+        action_radios.addButton(modify_attr_radio)
+        action_layout.addWidget(modify_attr_radio)
+
+        # Use current frame annotations radio
+        use_current_radio = QRadioButton("Use current frame annotations as template")
+        action_radios.addButton(use_current_radio)
+        action_layout.addWidget(use_current_radio)
+
+        # Set default selection
+        change_class_radio.setChecked(True)
+
+        # Class selection for relevant actions
+        class_group = QGroupBox("Class")
+        class_layout = QVBoxLayout(class_group)
+
+        # From class (for change class)
+        from_class_combo = QComboBox()
+        class_list = sorted(self.main_window.canvas.class_colors.keys())
+        from_class_combo.addItems(class_list)
+        from_class_label = QLabel("From class:")
+        class_layout.addWidget(from_class_label)
+        class_layout.addWidget(from_class_combo)
+
+        # To class (for change class)
+        to_class_combo = QComboBox()
+        to_class_combo.addItems(class_list)
+        to_class_label = QLabel("To class:")
+        class_layout.addWidget(to_class_label)
+        class_layout.addWidget(to_class_combo)
+
+        # Class for delete and modify attributes
+        target_class_combo = QComboBox()
+        # Add "ALL" option for delete
+        target_class_list = ["ALL"] + class_list
+        target_class_combo.addItems(target_class_list)
+        target_class_label = QLabel("Target class:")
+        class_layout.addWidget(target_class_label)
+        class_layout.addWidget(target_class_combo)
+
+        # Attribute editing (for modify attributes)
+        attr_group = QGroupBox("Attributes")
+        attr_layout = QVBoxLayout(attr_group)
+
+        # Create a form layout for attributes
+        attr_form = QFormLayout()
+        attr_widgets = {}  # Store attribute widgets for access later
+
+        # Function to update attribute form based on selected class
+        def update_attribute_form():
+            # Clear existing widgets
+            while attr_form.rowCount() > 0:
+                attr_form.removeRow(0)
+
+            attr_widgets.clear()
+
+            selected_class = target_class_combo.currentText()
+            if selected_class == "ALL":
+                # Show message that ALL is not valid for attribute modification
+                attr_form.addRow(
+                    QLabel("Cannot modify attributes for ALL classes at once.")
+                )
+                attr_form.addRow(QLabel("Please select a specific class."))
+                return
+
+            # Get all attributes used by this class across all frames
+            all_attributes = set()
+            for frame_anns in self.main_window.frame_annotations.values():
+                for ann in frame_anns:
+                    if ann.class_name == selected_class and hasattr(ann, "attributes"):
+                        all_attributes.update(ann.attributes.keys())
+
+            # If no attributes found
+            if not all_attributes:
+                attr_form.addRow(
+                    QLabel(f"No attributes found for class '{selected_class}'.")
+                )
+                return
+
+            # Add widgets for each attribute
+            for attr_name in sorted(all_attributes):
+                attr_value_edit = QLineEdit()
+                attr_widgets[attr_name] = attr_value_edit
+                attr_form.addRow(f"{attr_name}:", attr_value_edit)
+
+        # Connect class selection to attribute form update
+        target_class_combo.currentTextChanged.connect(update_attribute_form)
+
+        # Add the form to the layout
+        attr_layout.addLayout(attr_form)
+
+        # Options for using current frame annotations
+        current_options_group = QGroupBox("Current Frame Options")
+        current_options_layout = QVBoxLayout(current_options_group)
+
+        overwrite_check = QCheckBox("Overwrite existing annotations")
+        overwrite_check.setChecked(False)
+        current_options_layout.addWidget(overwrite_check)
+
+        keep_existing_check = QCheckBox("Keep existing annotations (add new ones)")
+        keep_existing_check.setChecked(True)
+        current_options_layout.addWidget(keep_existing_check)
+
+        current_options_group.setVisible(False)  # Initially hidden
+
+        # Connect radio buttons to show/hide relevant groups
+        def update_visible_groups():
+            # Class group visibility - only show for class-specific operations
+            class_group.setVisible(change_class_radio.isChecked() or 
+                                delete_class_radio.isChecked() or 
+                                modify_attr_radio.isChecked())
+            
+            # Show/hide specific class selection components
+            from_class_label.setVisible(change_class_radio.isChecked())
+            from_class_combo.setVisible(change_class_radio.isChecked())
+            to_class_label.setVisible(change_class_radio.isChecked())
+            to_class_combo.setVisible(change_class_radio.isChecked())
+            
+            target_class_label.setVisible(delete_class_radio.isChecked() or modify_attr_radio.isChecked())
+            target_class_combo.setVisible(delete_class_radio.isChecked() or modify_attr_radio.isChecked())
+            
+            # Attribute group visibility
+            attr_group.setVisible(modify_attr_radio.isChecked())
+            
+            # Current frame options visibility
+            current_options_group.setVisible(use_current_radio.isChecked())
+            
+            # Update attribute form if needed
+            if modify_attr_radio.isChecked():
+                update_attribute_form()
+
+
+        change_class_radio.toggled.connect(update_visible_groups)
+        delete_class_radio.toggled.connect(update_visible_groups)
+        modify_attr_radio.toggled.connect(update_visible_groups)
+        use_current_radio.toggled.connect(update_visible_groups)
+
+        # Initial update
+        update_visible_groups()
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        # Add widgets to layout
         layout.addWidget(range_group)
-
-        # Add propagation options
-        prop_group = QGroupBox("Apply To")
-        prop_layout = QVBoxLayout(prop_group)
-
-        all_frames_radio = QRadioButton("All frames in range")
-        all_frames_radio.setChecked(True)
-
-        duplicate_frames_radio = QRadioButton("Only duplicate frames")
-        duplicate_frames_radio.setEnabled(self.main_window.duplicate_frames_enabled)
-
-        similar_frames_radio = QRadioButton("Similar frames (experimental)")
-        similar_frames_radio.setEnabled(False)  # Not implemented yet
-
-        prop_layout.addWidget(all_frames_radio)
-        prop_layout.addWidget(duplicate_frames_radio)
-        prop_layout.addWidget(similar_frames_radio)
-        layout.addWidget(prop_group)
-
-        # Class filter for delete operation
-        class_filter_group = QGroupBox("Filter by Class")
-        class_filter_layout = QVBoxLayout(class_filter_group)
-        
-        class_filter = QComboBox()
-        class_filter.addItem("All Classes")
-        
-        # Add all available classes
-        if hasattr(self.main_window.canvas, 'class_colors'):
-            for class_name in self.main_window.canvas.class_colors.keys():
-                class_filter.addItem(class_name)
-        
-        class_filter_layout.addWidget(class_filter)
-        layout.addWidget(class_filter_group)
-        
-        # Only show class filter for delete operation
-        class_filter_group.setVisible(False)
-        delete_radio.toggled.connect(class_filter_group.setVisible)
-
-        # Create attribute editing section (only for edit operation)
-        attributes_group = QGroupBox("Edit Attributes")
-        attributes_layout = QFormLayout(attributes_group)
-        
-        # Collect all unique attributes across all annotations in all frames
-        all_attributes = set()
-        attribute_types = {}  # Store attribute types
-
-        for frame_annotations in self.main_window.frame_annotations.values():
-            for annotation in frame_annotations:
-                for attr_name in annotation.attributes.keys():
-                    all_attributes.add(attr_name)
-
-                    # Try to determine attribute type if not already known
-                    if attr_name not in attribute_types:
-                        attr_value = annotation.attributes[attr_name]
-                        if isinstance(attr_value, bool):
-                            attribute_types[attr_name] = "boolean"
-                        elif isinstance(attr_value, int):
-                            attribute_types[attr_name] = "int"
-                        elif isinstance(attr_value, float):
-                            attribute_types[attr_name] = "float"
-                        else:
-                            attribute_types[attr_name] = "string"
-
-        # Also check class attribute configurations
-        if hasattr(self.main_window.canvas, "class_attributes"):
-            for class_config in self.main_window.canvas.class_attributes.values():
-                for attr_name, attr_config in class_config.items():
-                    all_attributes.add(attr_name)
-                    attribute_types[attr_name] = attr_config.get("type", "string")
-
-        # Create input widgets for all attributes
-        dialog.attribute_widgets = {}
-
-        for attr_name in sorted(all_attributes):
-            attr_type = attribute_types.get(attr_name, "string")
-
-            if attr_type == "boolean":
-                input_widget = QComboBox()
-                input_widget.addItems(["No Change", "False", "True"])
-                input_widget.setCurrentText("No Change")
-            elif attr_type == "int":
-                input_widget = QSpinBox()
-                input_widget.setRange(-999999, 999999)
-                input_widget.setValue(0)
-                input_widget.setSpecialValueText("No Change")  # 0 means no change
-                input_widget.setProperty("no_change_value", 0)
-            elif attr_type == "float":
-                input_widget = QDoubleSpinBox()
-                input_widget.setRange(-999999.0, 999999.0)
-                input_widget.setValue(0.0)
-                input_widget.setSpecialValueText("No Change")  # 0.0 means no change
-                input_widget.setProperty("no_change_value", 0.0)
-                input_widget.setDecimals(2)
-            else:  # string
-                input_widget = QLineEdit()
-                input_widget.setPlaceholderText("No Change (leave empty)")
-
-            attributes_layout.addRow(f"{attr_name}:", input_widget)
-            dialog.attribute_widgets[attr_name] = input_widget
-
-        layout.addWidget(attributes_group)
-        
-        # Only show attributes for edit operation
-        attributes_group.setVisible(True)
-        edit_radio.toggled.connect(attributes_group.setVisible)
-        delete_radio.toggled.connect(lambda checked: attributes_group.setVisible(not checked))
-
-        # Add buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
+        layout.addWidget(action_group)
+        layout.addWidget(class_group)
+        layout.addWidget(attr_group)
+        layout.addWidget(current_options_group)
+        layout.addWidget(buttons)
 
         # Show dialog
         if dialog.exec_() == QDialog.Accepted:
+            # Save undo state before batch edit
+            self.main_window.save_undo_state()
+
             # Get frame range
             start_frame = start_spin.value()
             end_frame = end_spin.value()
 
-            # Get propagation mode
-            if duplicate_frames_radio.isChecked():
-                prop_mode = "duplicate"
-            elif similar_frames_radio.isChecked():
-                prop_mode = "similar"
-            else:
-                prop_mode = "all"
+            # Validate range
+            if start_frame > end_frame:
+                start_frame, end_frame = end_frame, start_frame
 
-            # Determine operation type
-            if delete_radio.isChecked():
-                # Get class filter
-                class_name_filter = None
-                if class_filter.currentText() != "All Classes":
-                    class_name_filter = class_filter.currentText()
-                
-                # Apply batch delete
-                self.apply_batch_delete(start_frame, end_frame, class_name_filter, prop_mode)
-            else:
-                # Get attribute values from dialog
-                attribute_values = {}
-                for attr_name, widget in dialog.attribute_widgets.items():
-                    if isinstance(widget, QComboBox):
-                        if widget.currentText() != "No Change":
-                            attribute_values[attr_name] = widget.currentText() == "True"
-                    elif isinstance(widget, QSpinBox):
-                        if widget.text() != "No Change":
-                            attribute_values[attr_name] = widget.value()
-                    elif isinstance(widget, QDoubleSpinBox):
-                        if widget.text() != "No Change":
-                            attribute_values[attr_name] = widget.value()
-                    elif isinstance(widget, QLineEdit) and widget.text():
-                        attribute_values[attr_name] = widget.text()
+            # Process based on selected action
+            if change_class_radio.isChecked():
+                # Change class
+                from_class = from_class_combo.currentText()
+                to_class = to_class_combo.currentText()
+                self.batch_change_class(start_frame, end_frame, from_class, to_class)
 
-                # Apply batch edit
-                self.apply_batch_edit(start_frame, end_frame, attribute_values, prop_mode)
+            elif delete_class_radio.isChecked():
+                # Delete annotations of class
+                class_to_delete = target_class_combo.currentText()
+                self.batch_delete_class(start_frame, end_frame, class_to_delete)
+
+            elif modify_attr_radio.isChecked():
+                # Modify attributes of a class
+                target_class = target_class_combo.currentText()
+                if target_class == "ALL":
+                    QMessageBox.warning(
+                        self.main_window,
+                        "Invalid Selection",
+                        "Cannot modify attributes for ALL classes at once. Please select a specific class.",
+                    )
+                    return
+
+                # Collect attribute values
+                attributes = {}
+                for attr_name, widget in attr_widgets.items():
+                    value = widget.text()
+                    if value:  # Only include non-empty values
+                        # Try to convert to int or float if possible
+                        if value.isdigit():
+                            value = int(value)
+                        else:
+                            try:
+                                value = float(value)
+                            except ValueError:
+                                # Keep as string if not a number
+                                pass
+                        attributes[attr_name] = value
+
+                if attributes:
+                    self.batch_modify_class_attributes(
+                        start_frame, end_frame, target_class, attributes
+                    )
+                else:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "No Attributes",
+                        "No attribute values were provided for modification.",
+                    )
+
+            elif use_current_radio.isChecked():
+                # Use current frame annotations as template
+                overwrite = overwrite_check.isChecked()
+                keep_existing = keep_existing_check.isChecked()
+                self.batch_use_current_frame(
+                    start_frame, end_frame, overwrite, keep_existing
+                )
+
+            # Update UI if we're on one of the affected frames
+            if start_frame <= self.main_window.current_frame <= end_frame:
+                self.main_window.load_current_frame_annotations()
+
+            self.main_window.statusBar.showMessage(
+                f"Batch edit completed for frames {start_frame}-{end_frame}", 5000
+            )
+
+    def batch_delete_class(self, start_frame, end_frame, class_name):
+        """
+        Delete annotations of a specific class across a range of frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            class_name (str): Class name to delete, or "ALL" to delete all annotations
+        """
+        # Create progress dialog
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Deleting Annotations")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(
+            f"Deleting {'all annotations' if class_name == 'ALL' else f'annotations of class {class_name}'} "
+            f"from frames {start_frame}-{end_frame}..."
+        )
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Delete annotations
+        deleted_count = 0
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            if frame_num in self.main_window.frame_annotations:
+                if class_name == "ALL":
+                    # Delete all annotations
+                    deleted_count += len(self.main_window.frame_annotations[frame_num])
+                    self.main_window.frame_annotations[frame_num] = []
+                else:
+                    # Delete only annotations of the specified class
+                    original_count = len(self.main_window.frame_annotations[frame_num])
+                    self.main_window.frame_annotations[frame_num] = [
+                        ann
+                        for ann in self.main_window.frame_annotations[frame_num]
+                        if ann.class_name != class_name
+                    ]
+                    deleted_count += original_count - len(
+                        self.main_window.frame_annotations[frame_num]
+                    )
+
+        # Close progress dialog
+        progress.close()
+
+        # Show result
+        self.main_window.statusBar.showMessage(
+            f"Deleted {deleted_count} annotations from frames {start_frame}-{end_frame}",
+            5000,
+        )
+
+    def batch_modify_class_attributes(
+        self, start_frame, end_frame, class_name, attributes
+    ):
+        """
+        Modify attributes of a specific class across a range of frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            class_name (str): Class name to modify
+            attributes (dict): Attributes to set/modify
+        """
+        # Create progress dialog
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Modifying Attributes")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(
+            f"Modifying attributes for class {class_name} in frames {start_frame}-{end_frame}..."
+        )
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Modify attributes
+        modified_count = 0
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            if frame_num in self.main_window.frame_annotations:
+                for ann in self.main_window.frame_annotations[frame_num]:
+                    if ann.class_name == class_name:
+                        # Initialize attributes if not present
+                        if not hasattr(ann, "attributes"):
+                            ann.attributes = {}
+
+    def batch_modify_class_attributes(
+        self, start_frame, end_frame, class_name, attributes
+    ):
+        """
+        Modify attributes of a specific class across a range of frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            class_name (str): Class name to modify
+            attributes (dict): Attributes to set/modify
+        """
+        # Create progress dialog
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Modifying Attributes")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(
+            f"Modifying attributes for class {class_name} in frames {start_frame}-{end_frame}..."
+        )
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Modify attributes
+        modified_count = 0
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            if frame_num in self.main_window.frame_annotations:
+                for ann in self.main_window.frame_annotations[frame_num]:
+                    if ann.class_name == class_name:
+                        # Initialize attributes if not present
+                        if not hasattr(ann, "attributes"):
+                            ann.attributes = {}
+
+                        # Update attributes
+                        for attr_name, attr_value in attributes.items():
+                            ann.attributes[attr_name] = attr_value
+
+                        modified_count += 1
+
+        # Close progress dialog
+        progress.close()
+
+        # Show result
+        self.main_window.statusBar.showMessage(
+            f"Modified attributes for {modified_count} annotations of class {class_name}",
+            5000,
+        )
+
+    def batch_use_current_frame(self, start_frame, end_frame, overwrite, keep_existing):
+        """
+        Apply current frame's annotations to a range of frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            overwrite (bool): Whether to overwrite existing annotations
+            keep_existing (bool): Whether to keep existing annotations
+        """
+        # Get current frame annotations
+        current_frame = self.main_window.current_frame
+        if (
+            current_frame not in self.main_window.frame_annotations
+            or not self.main_window.frame_annotations[current_frame]
+        ):
+            QMessageBox.warning(
+                self.main_window,
+                "No Annotations",
+                "Current frame has no annotations to use as template.",
+            )
+            return
+
+        current_annotations = [
+            self.main_window.clone_annotation(ann)
+            for ann in self.main_window.frame_annotations[current_frame]
+        ]
+
+        # Create progress dialog
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Applying Annotations")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(f"Applying annotations to frames {start_frame}-{end_frame}...")
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Apply to each frame in range
+        frames_modified = 0
+        for frame_num in range(start_frame, end_frame + 1):
+            # Skip current frame
+            if frame_num == current_frame:
+                continue
+
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            # Handle existing annotations based on options
+            if (
+                frame_num in self.main_window.frame_annotations
+                and self.main_window.frame_annotations[frame_num]
+            ):
+                if overwrite:
+                    # Replace all annotations
+                    self.main_window.frame_annotations[frame_num] = [
+                        self.main_window.clone_annotation(ann)
+                        for ann in current_annotations
+                    ]
+                    frames_modified += 1
+                elif keep_existing:
+                    # Add new annotations without removing existing ones
+                    existing_annotations = self.main_window.frame_annotations[frame_num]
+                    self.main_window.frame_annotations[frame_num] = (
+                        existing_annotations
+                        + [
+                            self.main_window.clone_annotation(ann)
+                            for ann in current_annotations
+                        ]
+                    )
+                    frames_modified += 1
+            else:
+                # No existing annotations, just add the current ones
+                self.main_window.frame_annotations[frame_num] = [
+                    self.main_window.clone_annotation(ann)
+                    for ann in current_annotations
+                ]
+                frames_modified += 1
+
+        # Close progress dialog
+        progress.close()
+
+        # Show result
+        annotation_count = len(current_annotations)
+        self.main_window.statusBar.showMessage(
+            f"Applied {annotation_count} annotations from current frame to {frames_modified} frames",
+            5000,
+        )
+
+    def batch_change_class(self, start_frame, end_frame, from_class, to_class):
+        """
+        Change class of annotations across a range of frames.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            from_class (str): Original class name
+            to_class (str): New class name
+        """
+        # Create progress dialog
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Changing Class")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+
+        label = QLabel(
+            f"Changing class from {from_class} to {to_class} in frames {start_frame}-{end_frame}..."
+        )
+        progress_layout.addWidget(label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+
+        # Non-blocking progress dialog
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        # Change class
+        changed_count = 0
+        for frame_num in range(start_frame, end_frame + 1):
+            # Update progress
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:  # Update UI every 5 frames
+                QApplication.processEvents()
+
+            if frame_num in self.main_window.frame_annotations:
+                for ann in self.main_window.frame_annotations[frame_num]:
+                    if ann.class_name == from_class:
+                        ann.class_name = to_class
+                        changed_count += 1
+
+        # Close progress dialog
+        progress.close()
+
+        # Show result
+        self.main_window.statusBar.showMessage(
+            f"Changed {changed_count} annotations from class {from_class} to {to_class}",
+            5000,
+        )
 
     def apply_batch_attributes_to_current_frame(self, attribute_values):
         """Apply attribute changes to all annotations in the current frame"""
@@ -882,7 +1303,9 @@ class AnnotationDock(QDockWidget):
         # Mark project as modified
         self.main_window.project_modified = True
 
-    def apply_batch_delete(self, start_frame, end_frame, class_name_filter=None, prop_mode="all"):
+    def apply_batch_delete(
+        self, start_frame, end_frame, class_name_filter=None, prop_mode="all"
+    ):
         """
         Apply batch delete to annotations across frames.
 
@@ -951,11 +1374,14 @@ class AnnotationDock(QDockWidget):
             # Delete matching annotations in this frame
             annotations_to_keep = []
             for annotation in self.main_window.frame_annotations[frame_num]:
-                if class_name_filter is None or annotation.class_name == class_name_filter:
+                if (
+                    class_name_filter is None
+                    or annotation.class_name == class_name_filter
+                ):
                     delete_count += 1
                 else:
                     annotations_to_keep.append(annotation)
-        
+
             # Update the frame annotations
             self.main_window.frame_annotations[frame_num] = annotations_to_keep
 
