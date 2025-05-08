@@ -78,6 +78,7 @@ from utils.icon_provider import IconProvider
 from natsort import natsorted
 from copy import deepcopy
 
+
 class VideoAnnotationTool(QMainWindow):
     """
     Main application window for the Video Annotation Tool.
@@ -114,6 +115,7 @@ class VideoAnnotationTool(QMainWindow):
         self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
+
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
@@ -130,11 +132,11 @@ class VideoAnnotationTool(QMainWindow):
         # Available styles
         self.duplicate_frames_enabled = True
         self.duplicate_frames_cache = {}  # Maps frame hash to list of frame numbers
-        self.frame_hashes = {}  
+        self.frame_hashes = {}
         self.undo_stack = []
-        self.redo_stack = []  
+        self.redo_stack = []
         self.max_undo_steps = 20
-        self.max_redo_steps = 20  
+        self.max_redo_steps = 20
         self.styles = {}
         self.icon_provider = IconProvider()
         self._class_refresh_scheduled = False
@@ -757,22 +759,39 @@ class VideoAnnotationTool(QMainWindow):
                 self.load_current_image()
                 self.update_frame_info()
         else:
-            
-            if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
-                # If current frame is a keyframe, go to previous frame as normal
-                if self.interpolation_manager.is_keyframe():
-                    prev_frame = self.current_frame - 1
+            if (
+                hasattr(self, "interpolation_manager")
+                and self.interpolation_manager.is_active
+            ):
+                current_frame = self.current_frame
+
+                # Check if current frame has annotations
+                current_has_annotations = (
+                    current_frame in self.frame_annotations
+                    and len(self.frame_annotations[current_frame]) > 0
+                )
+
+                if current_has_annotations:
+                    # If current frame has annotations, go to previous keyframe (current - interval)
+                    prev_frame = max(
+                        0, current_frame - self.interpolation_manager.interval
+                    )
                 else:
-                    # If not on a keyframe, go to previous keyframe
-                    prev_keyframe = self.interpolation_manager.get_prev_keyframe()
-                    if prev_keyframe is not None:
-                        prev_frame = prev_keyframe
-                    else:
-                        
-                        prev_frame = max(0,self.current_frame-1)
-            elif self.cap and self.cap.isOpened():
+                    # If current frame has no annotations, find the previous frame with annotations
+                    prev_frame = None
+                    for frame in sorted(self.frame_annotations.keys(), reverse=True):
+                        if (
+                            frame < current_frame
+                            and len(self.frame_annotations[frame]) > 0
+                        ):
+                            prev_frame = frame
+                            break
+
+                    # If no previous annotated frame found, just go to previous frame
+                    if prev_frame is None:
+                        prev_frame = max(0, current_frame - 1)
+            else:
                 prev_frame = max(0,self.current_frame-1)
-                
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, prev_frame)
             ret, frame = self.cap.read()
             if ret:
@@ -808,19 +827,30 @@ class VideoAnnotationTool(QMainWindow):
                     self.statusBar.showMessage("End of image dataset")
         else:
             if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
-                # If current frame is a keyframe, go to next frame as normal
-                if self.interpolation_manager.is_keyframe():
-                    next_frame_number = self.current_frame + 1
+                current_frame = self.current_frame
+                
+                # Check if current frame has annotations
+                current_has_annotations = (
+                    current_frame in self.frame_annotations and 
+                    len(self.frame_annotations[current_frame]) > 0
+                )
+                
+                if current_has_annotations:
+                    self.perform_interpolation()
+                    # If current frame has annotations, go to next keyframe (current + interval)
+                    next_frame_number = current_frame + self.interpolation_manager.interval
                 else:
-                    # If not on a keyframe, go to next keyframe or suggested keyframe
-                    next_keyframe = self.interpolation_manager.get_next_keyframe()
-                    if next_keyframe is not None:
-                        next_frame_number = next_keyframe
-                    else:
-                        # If no next keyframe exists, suggest one based on interval
-                        next_frame_number = self.interpolation_manager.suggest_next_keyframe()
-                        if next_frame_number is None:  # Fallback
-                            next_frame_number = self.current_frame + 1
+                    # If current frame has no annotations, find the next frame with annotations
+                    next_frame_number = None
+                    for frame in sorted(self.frame_annotations.keys()):
+                        if frame > current_frame and len(self.frame_annotations[frame]) > 0:
+                            next_frame_number = frame
+                            break
+                    
+                    # If no next annotated frame found, suggest one based on interval
+                    if next_frame_number is None:
+                        next_frame_number = current_frame + 1
+            
             elif self.cap and self.cap.isOpened():
                 # Calculate the next frame number explicitly
                 next_frame_number = self.current_frame + 1
@@ -867,8 +897,6 @@ class VideoAnnotationTool(QMainWindow):
                     ):
                         self.propagate_annotations_to_duplicate(current_hash)
 
-                # Load annotations for the new frame
-                self.load_current_frame_annotations()
 
     def play_pause_video(self):
         """Toggle between playing and pausing the video or image slideshow."""
@@ -1197,7 +1225,7 @@ class VideoAnnotationTool(QMainWindow):
     def sync_annotation_selection(self, annotation):
         """
         Synchronize annotation selection between canvas and dock.
-        
+
         Args:
             annotation: The annotation to select
         """
@@ -1207,11 +1235,10 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.selected_annotation = annotation
             self.canvas.update()
             self.canvas.blockSignals(old_block_state)
-        
+
         # Update dock selection
         if hasattr(self, "annotation_dock"):
             self.annotation_dock.select_annotation_in_list(annotation)
-
 
     def export_annotations(self):
         """Export annotations to various formats."""
@@ -1466,40 +1493,42 @@ class VideoAnnotationTool(QMainWindow):
 
     def delete_selected_annotations(self):
         """Delete all currently selected annotations."""
-        if not hasattr(self.canvas, "selected_annotations") or not self.canvas.selected_annotations:
+        if (
+            not hasattr(self.canvas, "selected_annotations")
+            or not self.canvas.selected_annotations
+        ):
             # If no multi-selection, fall back to single selection delete
             self.delete_selected_annotation()
             return
-        
+
         self.save_undo_state()
-        
+
         # Get a copy of the selected annotations to avoid modification during iteration
         annotations_to_delete = self.canvas.selected_annotations.copy()
-        
+
         # Remove all selected annotations
         for annotation in annotations_to_delete:
             if annotation in self.canvas.annotations:
                 self.canvas.annotations.remove(annotation)
-        
+
         # Clear selection
         self.canvas.selected_annotation = None
         self.canvas.selected_annotations = []
-        
+
         # Update canvas and mark project as modified
         self.canvas.update()
         self.project_modified = True
-        
+
         # Update frame_annotations dictionary
         self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
-        
+
         # Update annotation list in UI
         self.update_annotation_list()
-        
+
         # Show status message
         count = len(annotations_to_delete)
         self.statusBar.showMessage(f"Deleted {count} annotations", 3000)
 
-    
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""
         if (
@@ -1531,32 +1560,35 @@ class VideoAnnotationTool(QMainWindow):
 
     def update_annotation_list(self):
         """Update the annotation list in the UI and handle interpolation."""
-        
-        self.annotation_manager.update_annotation_list()
+        # Update the annotation dock
+        if hasattr(self, "annotation_dock"):
+            self.annotation_dock.update_annotation_list()
 
         # Save current annotations to frame_annotations
         self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
-        
+
         # Check if we're in interpolation mode and should trigger the workflow
-        if (hasattr(self, 'interpolation_manager') and 
-            self.interpolation_manager.is_active and 
-            len(self.canvas.annotations) > 0):
-            
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+            and len(self.canvas.annotations) > 0
+        ):
+
             # Notify the interpolation manager that this frame has been annotated
             self.interpolation_manager.on_frame_annotated(self.current_frame)
-        
+
         # Handle duplicate frames if enabled
-        if (self.duplicate_frames_enabled and 
-            self.current_frame in self.frame_hashes):
+        if self.duplicate_frames_enabled and self.current_frame in self.frame_hashes:
             current_hash = self.frame_hashes[self.current_frame]
-            if (current_hash in self.duplicate_frames_cache and 
-                len(self.duplicate_frames_cache[current_hash]) > 1):
+            if (
+                current_hash in self.duplicate_frames_cache
+                and len(self.duplicate_frames_cache[current_hash]) > 1
+            ):
                 # Propagate current frame annotations to all duplicates
                 self.propagate_to_duplicate_frames(current_hash)
 
         # Perform autosave if enabled
         self.perform_autosave()
-
 
     def update_annotation_attributes(self, annotation, class_attributes):
         """
@@ -1721,9 +1753,15 @@ class VideoAnnotationTool(QMainWindow):
             self.play_pause_video()
             return True
         elif event.key() == Qt.Key_Delete:
-            if hasattr(self.canvas, "selected_annotations") and self.canvas.selected_annotations:
+            if (
+                hasattr(self.canvas, "selected_annotations")
+                and self.canvas.selected_annotations
+            ):
                 self.delete_selected_annotations()
-            elif hasattr(self.canvas, "selected_annotation") and self.canvas.selected_annotation:
+            elif (
+                hasattr(self.canvas, "selected_annotation")
+                and self.canvas.selected_annotation
+            ):
                 self.delete_selected_annotation()
         # Toggle annotation method with 'M' key
         elif event.key() == Qt.Key_M:
@@ -1751,16 +1789,21 @@ class VideoAnnotationTool(QMainWindow):
         elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
             self.select_all_annotations()
         # Undo with Ctrl+Z
-        elif event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier) and not (event.modifiers() & Qt.ShiftModifier):
+        elif (
+            event.key() == Qt.Key_Z
+            and (event.modifiers() & Qt.ControlModifier)
+            and not (event.modifiers() & Qt.ShiftModifier)
+        ):
             self.undo()
         # Redo with Ctrl+Y or Ctrl+Shift+Z
-        elif (event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier)) or \
-            (event.key() == Qt.Key_Z and (event.modifiers() & Qt.ControlModifier) and (event.modifiers() & Qt.ShiftModifier)):
+        elif (event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier)) or (
+            event.key() == Qt.Key_Z
+            and (event.modifiers() & Qt.ControlModifier)
+            and (event.modifiers() & Qt.ShiftModifier)
+        ):
             self.redo()
         else:
             super().keyPressEvent(event)
-
-
 
     #
     # Class handling methods
@@ -3028,9 +3071,9 @@ class VideoAnnotationTool(QMainWindow):
         # Reset annotations
         self.canvas.annotations = []
         self.frame_annotations = {}
-        
+
         # Reset class information
-        self.canvas.class_colors = {"Quad": QColor(0, 255, 255)}  
+        self.canvas.class_colors = {"Quad": QColor(0, 255, 255)}
         if hasattr(self.canvas, "class_attributes"):
             self.canvas.class_attributes = {}
         self.canvas.current_class = "Quad"
@@ -3049,7 +3092,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Reset UI
         self.update_annotation_list()
-        
+
         # Update class-related UI
         self.refresh_class_ui()
 
@@ -3067,7 +3110,6 @@ class VideoAnnotationTool(QMainWindow):
 
         # Update status bar
         self.statusBar.showMessage("Application reset to initial state")
-
 
     def delete_history(self):
         """Delete all application history and reset to initial state."""
@@ -3587,26 +3629,32 @@ class VideoAnnotationTool(QMainWindow):
     def select_all_annotations(self):
         """Select all annotations in the current frame."""
         current_frame = self.current_frame
-        if current_frame in self.frame_annotations and self.frame_annotations[current_frame]:
+        if (
+            current_frame in self.frame_annotations
+            and self.frame_annotations[current_frame]
+        ):
             # Store all annotations in the current frame as selected
-            self.canvas.selected_annotations = self.frame_annotations[current_frame].copy()
-            
+            self.canvas.selected_annotations = self.frame_annotations[
+                current_frame
+            ].copy()
+
             # Also set the primary selected annotation if it doesn't exist
             if not self.canvas.selected_annotation and self.canvas.selected_annotations:
                 self.canvas.selected_annotation = self.canvas.selected_annotations[0]
-            
+
             # Update the canvas
             self.canvas.update()
-            
+
             # Update the annotation list in the dock if it exists
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.select_annotation_in_list(None)  # Deselect current
                 self.annotation_dock.select_all_in_list()
             count = len(self.frame_annotations[current_frame])
-            self.statusBar.showMessage(f"Selected all {count} annotations in this frame", 3000)
+            self.statusBar.showMessage(
+                f"Selected all {count} annotations in this frame", 3000
+            )
         else:
             self.statusBar.showMessage("No annotations in this frame", 2000)
-
 
     def cycle_annotation_selection(self):
         """Cycle through annotations in the current frame or deselect if only one exists."""
@@ -3655,6 +3703,7 @@ class VideoAnnotationTool(QMainWindow):
                 f"Selected annotation: {self.canvas.selected_annotation.class_name}",
                 2000,
             )
+
     #
     # Undo Handeling
     #
@@ -3664,34 +3713,44 @@ class VideoAnnotationTool(QMainWindow):
         # Create a deep copy of all frame annotations
         all_frame_annotations = {}
         for frame_num, annotations in self.frame_annotations.items():
-            all_frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in annotations]
-        
+            all_frame_annotations[frame_num] = [
+                self.clone_annotation(ann) for ann in annotations
+            ]
+
         # Create a deep copy of class colors
         class_colors = {}
         for class_name, color in self.canvas.class_colors.items():
             class_colors[class_name] = QColor(color)
-        
+
         # Create a deep copy of class attributes if they exist
         class_attributes = None
         if hasattr(self.canvas, "class_attributes"):
             class_attributes = deepcopy(self.canvas.class_attributes)
-        
+
         # Save the state
         undo_state = {
-            'frame': self.current_frame,
-            'all_annotations': all_frame_annotations,
-            'current_annotations': [self.clone_annotation(ann) for ann in self.canvas.annotations] if self.canvas.annotations else [],
-            'class_colors': class_colors,
-            'class_attributes': class_attributes,
-            'current_class': self.canvas.current_class if hasattr(self.canvas, "current_class") else None
+            "frame": self.current_frame,
+            "all_annotations": all_frame_annotations,
+            "current_annotations": (
+                [self.clone_annotation(ann) for ann in self.canvas.annotations]
+                if self.canvas.annotations
+                else []
+            ),
+            "class_colors": class_colors,
+            "class_attributes": class_attributes,
+            "current_class": (
+                self.canvas.current_class
+                if hasattr(self.canvas, "current_class")
+                else None
+            ),
         }
-        
+
         # Add to undo stack
         self.undo_stack.append(undo_state)
-        
+
         # Clear the redo stack when a new action is performed
         self.redo_stack.clear()
-        
+
         # Limit the size of the undo stack
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
@@ -3701,66 +3760,84 @@ class VideoAnnotationTool(QMainWindow):
         if not self.undo_stack:
             self.statusBar.showMessage("Nothing to undo", 3000)
             return
-        
+
         # Get the current state before undoing
         current_state = {
-            'frame': self.current_frame,
-            'all_annotations': {frame_num: [self.clone_annotation(ann) for ann in anns] 
-                            for frame_num, anns in self.frame_annotations.items()},
-            'current_annotations': [self.clone_annotation(ann) for ann in self.canvas.annotations] 
-                                if self.canvas.annotations else [],
-            'class_colors': {class_name: QColor(color) for class_name, color in self.canvas.class_colors.items()},
-            'class_attributes': deepcopy(self.canvas.class_attributes) if hasattr(self.canvas, "class_attributes") else None,
-            'current_class': self.canvas.current_class if hasattr(self.canvas, "current_class") else None
+            "frame": self.current_frame,
+            "all_annotations": {
+                frame_num: [self.clone_annotation(ann) for ann in anns]
+                for frame_num, anns in self.frame_annotations.items()
+            },
+            "current_annotations": (
+                [self.clone_annotation(ann) for ann in self.canvas.annotations]
+                if self.canvas.annotations
+                else []
+            ),
+            "class_colors": {
+                class_name: QColor(color)
+                for class_name, color in self.canvas.class_colors.items()
+            },
+            "class_attributes": (
+                deepcopy(self.canvas.class_attributes)
+                if hasattr(self.canvas, "class_attributes")
+                else None
+            ),
+            "current_class": (
+                self.canvas.current_class
+                if hasattr(self.canvas, "current_class")
+                else None
+            ),
         }
-        
+
         # Add current state to redo stack
         self.redo_stack.append(current_state)
-        
+
         # Limit the size of the redo stack
         if len(self.redo_stack) > self.max_redo_steps:
             self.redo_stack.pop(0)
-        
+
         # Get the last state
         last_state = self.undo_stack.pop()
-        frame = last_state['frame']
-        
+        frame = last_state["frame"]
+
         # Restore class information if it exists
-        if 'class_colors' in last_state and last_state['class_colors']:
-            self.canvas.class_colors = last_state['class_colors']
-        
-        if 'class_attributes' in last_state and last_state['class_attributes']:
-            self.canvas.class_attributes = last_state['class_attributes']
-        
-        if 'current_class' in last_state and last_state['current_class']:
-            self.canvas.current_class = last_state['current_class']
-        
+        if "class_colors" in last_state and last_state["class_colors"]:
+            self.canvas.class_colors = last_state["class_colors"]
+
+        if "class_attributes" in last_state and last_state["class_attributes"]:
+            self.canvas.class_attributes = last_state["class_attributes"]
+
+        if "current_class" in last_state and last_state["current_class"]:
+            self.canvas.current_class = last_state["current_class"]
+
         # Restore all frame annotations if they exist
-        if 'all_annotations' in last_state and last_state['all_annotations']:
-            self.frame_annotations = last_state['all_annotations']
-        
+        if "all_annotations" in last_state and last_state["all_annotations"]:
+            self.frame_annotations = last_state["all_annotations"]
+
         # If we're undoing a change on the current frame
         if frame == self.current_frame:
             # Restore the annotations for the current frame
-            if 'current_annotations' in last_state:
-                self.canvas.annotations = last_state['current_annotations']
+            if "current_annotations" in last_state:
+                self.canvas.annotations = last_state["current_annotations"]
             else:
                 self.canvas.annotations = self.frame_annotations.get(frame, [])
-            
+
             self.canvas.selected_annotation = None
             self.canvas.update()
-            
+
             # Update annotation list
             self.update_annotation_list()
-            
+
             # Update class UI
             self.refresh_class_ui()
-            
+
             self.statusBar.showMessage("Undo successful", 3000)
         else:
             # If the undo is for a different frame, we need to navigate to that frame first
-            self.statusBar.showMessage(f"Undo refers to frame {frame}, navigating there first", 3000)
-            
+            self.statusBar.showMessage(
+                f"Undo refers to frame {frame}, navigating there first", 3000
+            )
+
             # Navigate to the frame with the undo state
             if hasattr(self, "is_image_dataset") and self.is_image_dataset:
                 self.current_frame = frame
@@ -3773,22 +3850,22 @@ class VideoAnnotationTool(QMainWindow):
                     self.current_frame = frame
                     self.frame_slider.setValue(frame)
                     self.canvas.set_frame(frame_img)
-            
+
             # Restore the annotations for this frame
-            if 'current_annotations' in last_state:
-                self.canvas.annotations = last_state['current_annotations']
+            if "current_annotations" in last_state:
+                self.canvas.annotations = last_state["current_annotations"]
             else:
                 self.canvas.annotations = self.frame_annotations.get(frame, [])
-            
+
             self.canvas.selected_annotation = None
             self.canvas.update()
-            
+
             # Update annotation list
             self.update_annotation_list()
-            
+
             # Update class UI
             self.refresh_class_ui()
-            
+
             self.statusBar.showMessage("Undo successful", 3000)
 
     def save_undo_state_without_clearing_redo(self):
@@ -3796,31 +3873,41 @@ class VideoAnnotationTool(QMainWindow):
         # Create a deep copy of all frame annotations
         all_frame_annotations = {}
         for frame_num, annotations in self.frame_annotations.items():
-            all_frame_annotations[frame_num] = [self.clone_annotation(ann) for ann in annotations]
-        
+            all_frame_annotations[frame_num] = [
+                self.clone_annotation(ann) for ann in annotations
+            ]
+
         # Create a deep copy of class colors
         class_colors = {}
         for class_name, color in self.canvas.class_colors.items():
             class_colors[class_name] = QColor(color)
-        
+
         # Create a deep copy of class attributes if they exist
         class_attributes = None
         if hasattr(self.canvas, "class_attributes"):
             class_attributes = deepcopy(self.canvas.class_attributes)
-        
+
         # Save the state
         undo_state = {
-            'frame': self.current_frame,
-            'all_annotations': all_frame_annotations,
-            'current_annotations': [self.clone_annotation(ann) for ann in self.canvas.annotations] if self.canvas.annotations else [],
-            'class_colors': class_colors,
-            'class_attributes': class_attributes,
-            'current_class': self.canvas.current_class if hasattr(self.canvas, "current_class") else None
+            "frame": self.current_frame,
+            "all_annotations": all_frame_annotations,
+            "current_annotations": (
+                [self.clone_annotation(ann) for ann in self.canvas.annotations]
+                if self.canvas.annotations
+                else []
+            ),
+            "class_colors": class_colors,
+            "class_attributes": class_attributes,
+            "current_class": (
+                self.canvas.current_class
+                if hasattr(self.canvas, "current_class")
+                else None
+            ),
         }
-        
+
         # Add to undo stack
         self.undo_stack.append(undo_state)
-        
+
         # Limit the size of the undo stack
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
@@ -3830,50 +3917,52 @@ class VideoAnnotationTool(QMainWindow):
         if not self.redo_stack:
             self.statusBar.showMessage("Nothing to redo", 3000)
             return
-        
+
         # Save current state to undo stack before redoing
         self.save_undo_state_without_clearing_redo()
-        
+
         # Get the last state from redo stack
         redo_state = self.redo_stack.pop()
-        frame = redo_state['frame']
-        
+        frame = redo_state["frame"]
+
         # Restore class information if it exists
-        if 'class_colors' in redo_state and redo_state['class_colors']:
-            self.canvas.class_colors = redo_state['class_colors']
-        
-        if 'class_attributes' in redo_state and redo_state['class_attributes']:
-            self.canvas.class_attributes = redo_state['class_attributes']
-        
-        if 'current_class' in redo_state and redo_state['current_class']:
-            self.canvas.current_class = redo_state['current_class']
-        
+        if "class_colors" in redo_state and redo_state["class_colors"]:
+            self.canvas.class_colors = redo_state["class_colors"]
+
+        if "class_attributes" in redo_state and redo_state["class_attributes"]:
+            self.canvas.class_attributes = redo_state["class_attributes"]
+
+        if "current_class" in redo_state and redo_state["current_class"]:
+            self.canvas.current_class = redo_state["current_class"]
+
         # Restore all frame annotations if they exist
-        if 'all_annotations' in redo_state and redo_state['all_annotations']:
-            self.frame_annotations = redo_state['all_annotations']
-        
+        if "all_annotations" in redo_state and redo_state["all_annotations"]:
+            self.frame_annotations = redo_state["all_annotations"]
+
         # If we're redoing a change on the current frame
         if frame == self.current_frame:
             # Restore the annotations for the current frame
-            if 'current_annotations' in redo_state:
-                self.canvas.annotations = redo_state['current_annotations']
+            if "current_annotations" in redo_state:
+                self.canvas.annotations = redo_state["current_annotations"]
             else:
                 self.canvas.annotations = self.frame_annotations.get(frame, [])
-            
+
             self.canvas.selected_annotation = None
             self.canvas.update()
-            
+
             # Update annotation list
             self.update_annotation_list()
-            
+
             # Update class UI
             self.refresh_class_ui()
-            
+
             self.statusBar.showMessage("Redo successful", 3000)
         else:
             # If the redo is for a different frame, we need to navigate to that frame first
-            self.statusBar.showMessage(f"Redo refers to frame {frame}, navigating there first", 3000)
-            
+            self.statusBar.showMessage(
+                f"Redo refers to frame {frame}, navigating there first", 3000
+            )
+
             # Navigate to the frame with the redo state
             if hasattr(self, "is_image_dataset") and self.is_image_dataset:
                 self.current_frame = frame
@@ -3886,22 +3975,22 @@ class VideoAnnotationTool(QMainWindow):
                     self.current_frame = frame
                     self.frame_slider.setValue(frame)
                     self.canvas.set_frame(frame_img)
-            
+
             # Restore the annotations for this frame
-            if 'current_annotations' in redo_state:
-                self.canvas.annotations = redo_state['current_annotations']
+            if "current_annotations" in redo_state:
+                self.canvas.annotations = redo_state["current_annotations"]
             else:
                 self.canvas.annotations = self.frame_annotations.get(frame, [])
-            
+
             self.canvas.selected_annotation = None
             self.canvas.update()
-            
+
             # Update annotation list
             self.update_annotation_list()
-            
+
             # Update class UI
             self.refresh_class_ui()
-            
+
             self.statusBar.showMessage("Redo successful", 3000)
 
     #
@@ -3909,17 +3998,16 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Add these methods to the VideoAnnotationTool class
 
-# Add these methods to the VideoAnnotationTool class
-
+    # Add these methods to the VideoAnnotationTool class
     def toggle_interpolation_mode(self):
         """Toggle interpolation mode on/off."""
         is_active = self.toggle_interpolation_action.isChecked()
         self.interpolation_manager.set_active(is_active)
-        
+
         # Show/hide the interpolation toolbar
-        if hasattr(self, 'interpolation_toolbar'):
+        if hasattr(self, "interpolation_toolbar"):
             self.interpolation_toolbar.setVisible(is_active)
-        
+
         # Update UI
         self.update_frame_display()
 
@@ -3927,160 +4015,200 @@ class VideoAnnotationTool(QMainWindow):
         """Open dialog to set interpolation interval."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Set Keyframe Interval")
-        
+
         layout = QVBoxLayout(dialog)
-        
+
         form_layout = QFormLayout()
         interval_spinner = QSpinBox()
         interval_spinner.setRange(2, 100)
         interval_spinner.setValue(self.interpolation_manager.interval)
         form_layout.addRow("Frames between keyframes:", interval_spinner)
-        
+
         layout.addLayout(form_layout)
-        
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        
+
         if dialog.exec_() == QDialog.Accepted:
             new_interval = interval_spinner.value()
             self.interpolation_manager.set_interval(new_interval)
-            
+
             # Update spinner in toolbar if it exists
-            if hasattr(self, 'interval_spinner'):
+            if hasattr(self, "interval_spinner"):
                 self.interval_spinner.setValue(new_interval)
 
     def perform_interpolation(self):
         """Manually trigger interpolation between annotated frames."""
         if not self.interpolation_manager.is_active:
-            QMessageBox.warning(self, "Interpolation", "Interpolation mode is not active.")
-            return
-        
-        # Try to perform any pending interpolation
-        success = self.interpolation_manager.perform_pending_interpolation()
-        
-        if not success:
-            QMessageBox.information(
-                self, 
-                "Interpolation", 
-                "No pending interpolation. Annotate two frames to enable interpolation."
+            QMessageBox.warning(
+                self, "Interpolation", "Interpolation mode is not active."
             )
+            return
+        self.interpolation_manager.perform_pending_interpolation()
 
     def update_frame_display(self):
         """Update the frame display with interpolation indicators."""
         # Update indicator if interpolation is active
-        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+        ):
             # Check if this frame has annotations
             has_annotations = (
-                self.current_frame in self.frame_annotations and 
-                len(self.frame_annotations[self.current_frame]) > 0
+                self.current_frame in self.frame_annotations
+                and len(self.frame_annotations[self.current_frame]) > 0
             )
-            
+
             # Update indicator in toolbar
-            if hasattr(self, 'keyframe_indicator'):
+            if hasattr(self, "keyframe_indicator"):
                 if has_annotations:
                     # This is an annotated frame (either manually or interpolated)
-                    if self.current_frame == self.interpolation_manager.last_annotated_frame:
+                    if (
+                        self.current_frame
+                        == self.interpolation_manager.last_annotated_frame
+                    ):
                         # This is the last manually annotated frame
-                        self.keyframe_indicator.setStyleSheet("background-color: #FF5555; min-width: 16px;")
-                        self.keyframe_indicator.setToolTip("Current frame is manually annotated")
+                        self.keyframe_indicator.setStyleSheet(
+                            "background-color: #FF5555; min-width: 16px;"
+                        )
+                        self.keyframe_indicator.setToolTip(
+                            "Current frame is manually annotated"
+                        )
                     else:
                         # This is an interpolated frame or another manually annotated frame
-                        self.keyframe_indicator.setStyleSheet("background-color: #55AAFF; min-width: 16px;")
-                        self.keyframe_indicator.setToolTip("Current frame has annotations")
+                        self.keyframe_indicator.setStyleSheet(
+                            "background-color: #55AAFF; min-width: 16px;"
+                        )
+                        self.keyframe_indicator.setToolTip(
+                            "Current frame has annotations"
+                        )
                 else:
-                    self.keyframe_indicator.setStyleSheet("background-color: transparent; min-width: 16px;")
-                    self.keyframe_indicator.setToolTip("Current frame has no annotations")
-            
+                    self.keyframe_indicator.setStyleSheet(
+                        "background-color: transparent; min-width: 16px;"
+                    )
+                    self.keyframe_indicator.setToolTip(
+                        "Current frame has no annotations"
+                    )
+
             # Add visual indicator to frame display
-            if hasattr(self, 'canvas'):
+            if hasattr(self, "canvas"):
                 if has_annotations:
-                    if self.current_frame == self.interpolation_manager.last_annotated_frame:
-                        self.canvas.setStyleSheet("border: 2px solid #FF5555;")  # Red for manually annotated
+                    if (
+                        self.current_frame
+                        == self.interpolation_manager.last_annotated_frame
+                    ):
+                        self.canvas.setStyleSheet(
+                            "border: 2px solid #FF5555;"
+                        )  # Red for manually annotated
                     else:
-                        self.canvas.setStyleSheet("border: 2px solid #55AAFF;")  # Blue for other annotations
+                        self.canvas.setStyleSheet(
+                            "border: 2px solid #55AAFF;"
+                        )  # Blue for other annotations
                 else:
                     self.canvas.setStyleSheet("")
 
-    # Override the set_current_frame method to check for pending interpolation
     def set_current_frame(self, frame_num):
         """Set the current frame and update display."""
         # Check for pending interpolation before changing frames
-        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+        ):
             self.interpolation_manager.check_pending_interpolation(frame_num)
-        
+
         # Original implementation for setting the current frame
         if not self.cap:
             return
 
         # Ensure frame_num is within valid range
         frame_num = max(0, min(frame_num, self.total_frames - 1))
-        
+
         # Set the frame position
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         ret, frame = self.cap.read()
-        
+
         if not ret:
             return
-        
+
         # Update current frame
         self.current_frame = frame_num
-        
+
         # Display the frame
-        self.display_frame(frame)
-        
+        self.canvas.set_frame(frame)
+
+        self.update_frame_info()
+
+        self.load_current_frame_annotations()
         # Update timeline slider
-        if hasattr(self, 'timeline_slider'):
+        if hasattr(self, "timeline_slider"):
             self.timeline_slider.setValue(frame_num)
-        
+
         # Update frame counter
-        if hasattr(self, 'frame_counter'):
+        if hasattr(self, "frame_counter"):
             self.frame_counter.setText(f"Frame: {frame_num}/{self.total_frames-1}")
-        
+
         # Load annotations for this frame if they exist
         if frame_num in self.frame_annotations:
             self.canvas.annotations = self.frame_annotations[frame_num].copy()
         else:
             self.canvas.annotations = []
-        
+
         # Update annotation list
         self.update_annotation_list()
-        
+
         # Update frame display with indicators
         self.update_frame_display()
-
 
     def update_frame_display(self):
         """Update the frame display with keyframe and interpolation indicators."""
         # Update keyframe indicator if interpolation is active
-        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+        ):
             is_keyframe = self.interpolation_manager.is_keyframe()
-            
+
             # Update indicator in toolbar
-            if hasattr(self, 'keyframe_indicator'):
+            if hasattr(self, "keyframe_indicator"):
                 if is_keyframe:
-                    self.keyframe_indicator.setStyleSheet("background-color: #FF5555; min-width: 16px;")
+                    self.keyframe_indicator.setStyleSheet(
+                        "background-color: #FF5555; min-width: 16px;"
+                    )
                     self.keyframe_indicator.setToolTip("Current frame is a keyframe")
                 else:
                     # Check if this is an interpolated frame
                     is_interpolated = (
-                        self.current_frame in self.frame_annotations and 
-                        len(self.frame_annotations[self.current_frame]) > 0
+                        self.current_frame in self.frame_annotations
+                        and len(self.frame_annotations[self.current_frame]) > 0
                     )
-                    
+
                     if is_interpolated:
-                        self.keyframe_indicator.setStyleSheet("background-color: #55AAFF; min-width: 16px;")
-                        self.keyframe_indicator.setToolTip("Current frame has interpolated annotations")
+                        self.keyframe_indicator.setStyleSheet(
+                            "background-color: #55AAFF; min-width: 16px;"
+                        )
+                        self.keyframe_indicator.setToolTip(
+                            "Current frame has interpolated annotations"
+                        )
                     else:
-                        self.keyframe_indicator.setStyleSheet("background-color: transparent; min-width: 16px;")
-                        self.keyframe_indicator.setToolTip("Current frame is not a keyframe")
-            
+                        self.keyframe_indicator.setStyleSheet(
+                            "background-color: transparent; min-width: 16px;"
+                        )
+                        self.keyframe_indicator.setToolTip(
+                            "Current frame is not a keyframe"
+                        )
+
             # Add visual indicator to frame display
-            if hasattr(self, 'canvas'):
+            if hasattr(self, "canvas"):
                 if is_keyframe:
                     self.canvas.setStyleSheet("border: 2px solid #FF5555;")
-                elif self.current_frame in self.frame_annotations and len(self.frame_annotations[self.current_frame]) > 0:
-                    self.canvas.setStyleSheet("border: 2px solid #55AAFF;")  # Blue for interpolated frames
+                elif (
+                    self.current_frame in self.frame_annotations
+                    and len(self.frame_annotations[self.current_frame]) > 0
+                ):
+                    self.canvas.setStyleSheet(
+                        "border: 2px solid #55AAFF;"
+                    )  # Blue for interpolated frames
                 else:
                     self.canvas.setStyleSheet("")

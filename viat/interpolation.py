@@ -58,7 +58,6 @@ class InterpolationManager:
         if not self.is_active:
             return
             
-        # If this is the first annotated frame, store it and jump to the next keyframe
         if self.last_annotated_frame is None:
             self.last_annotated_frame = frame_num
             next_keyframe = frame_num + self.interval
@@ -67,8 +66,6 @@ class InterpolationManager:
             if hasattr(self.main_window, 'total_frames'):
                 next_keyframe = min(next_keyframe, self.main_window.total_frames - 1)
                 
-            # Jump to the next keyframe
-            self.main_window.set_current_frame(next_keyframe)
             self.main_window.statusBar.showMessage(
                 f"Frame {frame_num} annotated. Please annotate frame {next_keyframe} next."
             )
@@ -135,8 +132,6 @@ class InterpolationManager:
             if hasattr(self.main_window, 'total_frames'):
                 next_keyframe = min(next_keyframe, self.main_window.total_frames - 1)
                 
-            # Jump to the next keyframe
-            self.main_window.set_current_frame(next_keyframe)
             
         return success
 
@@ -362,3 +357,32 @@ class InterpolationManager:
                 interpolated_attrs[key] = end_attrs[key]
 
         return interpolated_attrs
+
+    def is_keyframe(self, frame_num=None):
+        """
+        Check if the specified frame (or current frame) is a keyframe.
+        In our simplified approach, any frame with annotations is considered a keyframe.
+        
+        Args:
+            frame_num: The frame number to check, or None for current frame
+            
+        Returns:
+            bool: True if the frame is a keyframe (has annotations), False otherwise
+        """
+        if frame_num is None:
+            frame_num = self.main_window.current_frame
+            
+        # In our simplified approach, a frame is a keyframe if:
+        # 1. It has annotations
+        # 2. It's not an interpolated frame (it was manually annotated)
+        
+        # Check if frame has annotations
+        has_annotations = (
+            frame_num in self.main_window.frame_annotations and 
+            len(self.main_window.frame_annotations[frame_num]) > 0
+        )
+        
+        # For simplicity, we'll consider the last annotated frame as a keyframe
+        is_last_annotated = frame_num == self.last_annotated_frame
+        
+        return has_annotations and is_last_annotated
