@@ -936,7 +936,7 @@ def export_standard_annotations(
 def import_coco_annotations(filename, bbox_class):
     """
     Import annotations from a COCO JSON file.
-    
+
     Args:
         filename (str): Path to the COCO JSON file
         bbox_class (class): Class to use for bounding box objects
@@ -959,6 +959,8 @@ def import_coco_annotations(filename, bbox_class):
         category_id = ann.get("category_id")
         bbox = ann.get("bbox", [0, 0, 0, 0])
         class_name = categories.get(category_id, "unknown")
+        score = ann.get("score", None)
+
         x, y, w, h = bbox
         # Create annotation object
         annotation = bbox_class(
@@ -968,6 +970,8 @@ def import_coco_annotations(filename, bbox_class):
             height=int(h),
             class_name=class_name,
             attributes=ann.get("attributes", {}),
+            source="detected",
+            score=score,
         )
         # Optionally, set frame/image info if needed
         if "frame_id" in images.get(image_id, {}):
@@ -1007,23 +1011,20 @@ def detect_annotation_format(filename):
             return "Pascal VOC"
     elif ext == ".txt":
         lines = content.strip().split("\n")
-        
+
         # More flexible Raya format detection
         if any("[" in line and "]" in line and ";" in line for line in lines):
             return "Raya"
-            
+
         # Check for RayaYOLO format
         if lines and all(
             line.strip() == "[]"
-            or (
-                line.strip().startswith("[[")
-                and line.strip().endswith("]]")
-            )
+            or (line.strip().startswith("[[") and line.strip().endswith("]]"))
             for line in lines
             if line.strip()
         ):
             return "RayaYOLO"
-            
+
         # YOLO format typically has space-separated numbers (class x y w h)
         if lines and all(
             len(line.split()) == 5 and line.split()[0].isdigit()
@@ -1036,6 +1037,7 @@ def detect_annotation_format(filename):
     if ext == ".json":
         try:
             import json
+
             data = json.loads(content)
             if isinstance(data, dict):
                 if "annotations" in data and "images" in data:
@@ -1044,6 +1046,7 @@ def detect_annotation_format(filename):
             pass
 
     return None
+
 
 def import_yolo_annotations(
     filename, image_width, image_height, bbox_class, class_colors=None
@@ -1092,6 +1095,12 @@ def import_yolo_annotations(
             y_center = float(parts[2]) * image_height
             width = float(parts[3]) * image_width
             height = float(parts[4]) * image_height
+            score = None
+            if len(parts) > 5:
+                try:
+                    score = float(parts[5])
+                except ValueError:
+                    pass
 
             # Calculate top-left corner from center
             x = x_center - (width / 2)
@@ -1119,7 +1128,9 @@ def import_yolo_annotations(
             attributes = {"Size": -1, "Quality": -1}
 
             # Create bounding box
-            bbox_obj = bbox_class(rect, class_name, attributes, color)
+            bbox_obj = bbox_class(
+                rect, class_name, attributes, color, source="detected", score=score
+            )
             annotations.append(bbox_obj)
 
         except (ValueError, IndexError) as e:
@@ -1164,7 +1175,13 @@ def import_pascal_voc_annotations(
             ymin = int(float(bndbox.find("ymin").text))
             xmax = int(float(bndbox.find("xmax").text))
             ymax = int(float(bndbox.find("ymax").text))
-
+            score = None
+            confidence = obj.find("confidence")
+            if confidence is not None:
+                try:
+                    score = float(confidence.text)
+                except (ValueError, TypeError):
+                    pass
             # Create QRect
             rect = QRect(xmin, ymin, xmax - xmin, ymax - ymin)
 
@@ -1188,13 +1205,16 @@ def import_pascal_voc_annotations(
                     attributes[name.text] = value.text
 
             # Create bounding box
-            bbox_obj = bbox_class(rect, class_name, attributes, color)
+            bbox_obj = bbox_class(
+                rect, class_name, attributes, color, source="detected", score=score
+            )
             annotations.append(bbox_obj)
 
     except Exception as e:
         raise Exception(f"Error parsing Pascal VOC XML: {str(e)}")
 
     return annotations
+
 
 def import_raya_annotations(filename, bbox_class, class_colors=None):
     """
@@ -1217,21 +1237,21 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
 
     if class_colors is None:
         class_colors = {}
-    
+
     # Ensure "Quad" class has a color
     if "Quad" not in class_colors:
         class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
-    
+
     frame_annotations = {}
-    
+
     # Track unique class numbers to determine if we have a single class
     unique_class_nums = set()
-    
+
     try:
         # First pass: scan the file to identify all unique class numbers
         with open(filename, "r") as f:
             lines = f.readlines()
-            
+
         for line in lines:
             line = line.strip()
             # Skip empty frames or frames with no detections
@@ -1239,12 +1259,12 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                 continue
             if not ("[" in line and "]" in line):
                 continue
-            
+
             start_idx = line.find("[")
             end_idx = line.rfind("]")
             if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
                 continue
-                
+
             content = line[start_idx + 1 : end_idx]
             annotations = content.split(";")
 
@@ -1253,11 +1273,11 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                     continue
                 # Parse the annotation values
                 parts = annotation.split(",")
-                
+
                 # Ensure we have at least the minimum required fields
                 if len(parts) < 6:
                     continue
-                    
+
                 try:
                     # Remove any remaining brackets
                     parts = [p.strip("[]") for p in parts]
@@ -1265,10 +1285,10 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                     unique_class_nums.add(class_num)
                 except (ValueError, IndexError):
                     continue
-        
+
         # Determine if we have a single class
         single_class_file = len(unique_class_nums) == 1
-        
+
         # Second pass: actually import the annotations
         for frame_num, line in enumerate(lines):
             frame_annots = []
@@ -1278,12 +1298,12 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                 continue
             if not ("[" in line and "]" in line):
                 continue
-            
+
             start_idx = line.find("[")
             end_idx = line.rfind("]")
             if start_idx == -1 or end_idx == -1 or start_idx >= end_idx:
                 continue
-                
+
             content = line[start_idx + 1 : end_idx]
             annotations = content.split(";")
 
@@ -1300,7 +1320,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                     # Remove any remaining brackets
                     parts = [p.strip("[]") for p in parts]
 
-                    class_num = int(parts[0]) 
+                    class_num = int(parts[0])
                     x = float(parts[1])
                     y = float(parts[2])
                     width = float(parts[3])
@@ -1314,10 +1334,10 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                         class_name = "Quad"  # Use Quad for single-class files
                     else:
                         class_name = "Quad" if class_num == 0 else f"class_{class_num}"
-                        
+
                     # Create QRect
                     rect = QRect(int(x), int(y), int(width), int(height))
-            
+
                     # Get or create color for this class
                     if class_name not in class_colors:
                         class_colors[class_name] = QColor(
@@ -1338,22 +1358,21 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                     bbox_obj = bbox_class(rect, class_name, attributes, color)
                     frame_annots.append(bbox_obj)
                 except (ValueError, IndexError) as e:
-                    print(
-                        f"Error parsing Raya annotation: {annotation}. Error: {e}"
-                    )
-                    
+                    print(f"Error parsing Raya annotation: {annotation}. Error: {e}")
+
             if frame_annots:
                 frame_annotations[frame_num] = frame_annots
-                
+
         return frame_annotations
-        
+
     except Exception as e:
         print(f"Error parsing Raya text file: {str(e)}")
         raise Exception(f"Error parsing Raya text file: {str(e)}")
 
 
-
-def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class, class_colors=None):
+def import_raya_yolo_annotations(
+    filename, image_width, image_height, bbox_class, class_colors=None
+):
     """
     Import annotations from Raya YOLO format.
 
@@ -1379,7 +1398,7 @@ def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class
     """
     if class_colors is None:
         class_colors = {}
-        
+
     # Ensure "Quad" class has a color
     if "Quad" not in class_colors:
         class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
@@ -1431,6 +1450,11 @@ def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class
                     y1 = float(parts[2])
                     x2 = float(parts[3])
                     y2 = float(parts[4])
+                    score = None
+                    try:
+                        score = float(parts[5])
+                    except:
+                        pass
 
                     # Calculate width and height
                     width = x2 - x1
@@ -1442,18 +1466,27 @@ def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class
                     # Create QRect (ensure coordinates are valid)
                     if width <= 0 or height <= 0:
                         continue
-                        
+
                     rect = QRect(int(x1), int(y1), int(width), int(height))
 
                     # Create attributes dictionary
                     attributes = {"Size": -1, "Quality": -1}
 
                     # Create bounding box
-                    bbox_obj = bbox_class(rect, class_name, attributes, class_colors[class_name])
+                    bbox_obj = bbox_class(
+                        rect,
+                        class_name,
+                        attributes,
+                        class_colors[class_name],
+                        source="detected",
+                        score=score,
+                    )
                     frame_annotations_list.append(bbox_obj)
 
                 except (ValueError, IndexError) as e:
-                    print(f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}")
+                    print(
+                        f"Error parsing Raya YOLO annotation: {annotation}. Error: {e}"
+                    )
 
             # Add to frame annotations
             if frame_annotations_list:
@@ -1463,6 +1496,7 @@ def import_raya_yolo_annotations(filename, image_width, image_height, bbox_class
         raise Exception(f"Error parsing Raya YOLO text file: {str(e)}")
 
     return frame_annotations
+
 
 def import_annotations(
     filename, bbox_class, image_width=640, image_height=480, class_colors=None
@@ -1532,7 +1566,7 @@ def import_annotations(
         frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
 
     elif format_type == "Raya":
-        frame_annotations = import_raya_annotations(filename, bbox_class,class_colors)
+        frame_annotations = import_raya_annotations(filename, bbox_class, class_colors)
         # Raya format already uses "Quad" class by default
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
@@ -1617,7 +1651,7 @@ def export_image_dataset_coco(
                 img_height, img_width = image_height, image_width
         except:
             img_height, img_width = image_height, image_width
-            
+
         # Add image info
         image_filename = os.path.basename(image_path)
         coco_data["images"].append(
@@ -1683,7 +1717,7 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
     """
     import os
     import cv2
-    
+
     # Create output directories
     labels_dir = os.path.join(output_dir, "labels")
     os.makedirs(labels_dir, exist_ok=True)
@@ -1727,28 +1761,37 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
                 y = rect.y()
                 w = rect.width()
                 h = rect.height()
-                
+
                 # Ensure values are within image bounds
-                if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > image_width or y + h > image_height:
+                if (
+                    x < 0
+                    or y < 0
+                    or w <= 0
+                    or h <= 0
+                    or x + w > image_width
+                    or y + h > image_height
+                ):
                     continue
-                    
+
                 x_center = (x + w / 2) / image_width
                 y_center = (y + h / 2) / image_height
                 norm_w = w / image_width
                 norm_h = h / image_height
-                
+
                 # Ensure normalized values are between 0 and 1
                 x_center = max(0, min(1, x_center))
                 y_center = max(0, min(1, y_center))
                 norm_w = max(0, min(1, norm_w))
                 norm_h = max(0, min(1, norm_h))
-                
+
                 f.write(
                     f"{class_id} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}\n"
                 )
 
 
-def export_image_dataset_pascal_voc(output_dir, image_files, frame_annotations, pixmap=None):
+def export_image_dataset_pascal_voc(
+    output_dir, image_files, frame_annotations, pixmap=None
+):
     """
     Export annotations for an image dataset in Pascal VOC XML format.
 
@@ -1761,7 +1804,7 @@ def export_image_dataset_pascal_voc(output_dir, image_files, frame_annotations, 
     import os
     import cv2
     from datetime import datetime
-    
+
     # Create output directories
     annotations_dir = os.path.join(output_dir, "annotations")
     os.makedirs(annotations_dir, exist_ok=True)
@@ -1804,4 +1847,3 @@ def export_image_dataset_pascal_voc(output_dir, image_files, frame_annotations, 
         # # Write to file
         # with open(xml_filename, "w") as f:
         #     f.write(xml_content)
-

@@ -26,7 +26,7 @@ class BoundingBox:
     Represents a bounding box annotation with class and attributes.
     """
 
-    def __init__(self, rect, class_name, attributes=None, color=None, source="manual"):
+    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=None):
         """
         Initialize a bounding box annotation.
 
@@ -36,6 +36,7 @@ class BoundingBox:
             attributes (dict, optional): Dictionary of attributes
             color (QColor, optional): Color for display
             source (str, optional): Source of the annotation (manual, interpolated, tracked, detected)
+            score (float, optional): Confidence score for detected annotations
         """
         self.rect = rect
         self.class_name = class_name
@@ -44,6 +45,7 @@ class BoundingBox:
         self.source = source
         self.original_source = source  # Unchangeable record of how it was first created
         self.verified = source == "manual"  # Auto-verify manual annotations
+        self.score = score  # Store confidence score for detections
 
     def to_dict(self):
         """Convert to a dictionary for serialization"""
@@ -69,7 +71,8 @@ class BoundingBox:
             ),
             "source": self.source,
             "original_source": self.original_source,
-            "verified": self.verified
+            "verified": self.verified,
+            "score": self.score
         }
 
     @classmethod
@@ -99,7 +102,9 @@ class BoundingBox:
             color = QColor(255, 0, 0)  # Default red
 
         source = data.get("source", "manual")
-        bbox = cls(rect, class_name, attributes, color, source)
+        score = data.get("score", None)
+        
+        bbox = cls(rect, class_name, attributes, color, source, score)
         bbox.verified = data.get("verified", source == "manual")
         bbox.original_source = data.get("original_source", source)
         return bbox
@@ -126,15 +131,11 @@ class BoundingBox:
         new_attributes = self.attributes.copy() if self.attributes else {}
 
         # Return a new BoundingBox with the copied properties
-        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source)
+        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score)
         bbox.verified = self.verified
         bbox.original_source = self.original_source
         return bbox
-        
-    def verify(self):
-        """Mark the annotation as verified and update source to manual"""
-        self.verified = True
-        self.source = "manual"  
+
 
 class AnnotationManager:
     """
