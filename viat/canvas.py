@@ -161,11 +161,24 @@ class VideoCanvas(QWidget):
                 if display_rect.width() <= 0 or display_rect.height() <= 0:
                     continue
 
-                # Set pen based on selection status
+                # Set pen based on selection status and source
                 if annotation == self.selected_annotation or annotation in self.selected_annotations:
                     pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
                 else:
-                    pen = QPen(annotation.color, 2)
+                    # Determine pen style based on source
+                    if hasattr(annotation, 'source'):
+                        if annotation.source == "manual":
+                            pen = QPen(annotation.color, 2, Qt.SolidLine)
+                        elif annotation.source == "interpolated":
+                            pen = QPen(annotation.color, 2, Qt.DashLine)
+                        elif annotation.source == "tracked":
+                            pen = QPen(annotation.color, 2, Qt.DotLine)
+                        elif annotation.source == "detected":
+                            pen = QPen(annotation.color, 2, Qt.DashDotLine)
+                        else:
+                            pen = QPen(annotation.color, 2)
+                    else:
+                        pen = QPen(annotation.color, 2)
 
                 painter.setPen(pen)
                 painter.drawRect(display_rect)
@@ -202,53 +215,97 @@ class VideoCanvas(QWidget):
                 text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
 
                 # Draw class label with semi-transparent background
-                painter.fillRect(
-                    text_rect,
-                    QColor(
-                        annotation.color.red(),
-                        annotation.color.green(),
-                        annotation.color.blue(),
-                        180,
-                    ),
+                # Add visual indicator for verification status
+                bg_color = QColor(
+                    annotation.color.red(),
+                    annotation.color.green(),
+                    annotation.color.blue(),
+                    180,
                 )
+                
+                # Add a border to indicate verification status
+                if hasattr(annotation, 'verified') and not annotation.verified:
+                    # Draw a warning indicator for unverified annotations
+                    painter.fillRect(
+                        text_rect,
+                        QColor(255, 165, 0, 180)  # Orange background for unverified
+                    )
+                    
+                    # Add a small verification indicator
+                    verify_rect = QRect(
+                        int(text_rect.right() - 16), 
+                        int(text_rect.top()), 
+                        16, 
+                        16
+                    )
+                    painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
+                    painter.setPen(QPen(QColor(255, 255, 255)))
+                    painter.drawText(verify_rect, Qt.AlignCenter, "!")
+                else:
+                    painter.fillRect(text_rect, bg_color)
+
+                # Draw source indicator if not manual
+                if hasattr(annotation, 'source') and annotation.source != "manual":
+                    source_text = annotation.source[:1].upper()  # First letter of source
+                    source_rect = QRect(
+                        int(text_rect.left()), 
+                        int(text_rect.top()), 
+                        16, 
+                        16
+                    )
+                    painter.fillRect(source_rect, QColor(0, 0, 0, 180))
+                    painter.setPen(QPen(QColor(255, 255, 255)))
+                    painter.drawText(source_rect, Qt.AlignCenter, source_text)
+                    
+                    # Adjust text rect to make room for source indicator
+                    text_rect.setLeft(text_rect.left() + 16)
 
                 painter.setPen(QPen(QColor(0, 0, 0)))
                 painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
 
                 # Draw attributes to the right of the box if there's space, otherwise to the left
                 if annotation.attributes:
-                    attr_text = ""
+                    # Calculate the total height needed for all attributes
+                    attr_count = len(annotation.attributes)
+                    attr_total_height = text_height * attr_count
+                    
+                    # Format each attribute on its own line
+                    attr_lines = []
                     for key, value in annotation.attributes.items():
-                        attr_text += f"{key}:{value} "
-                    attr_text = attr_text.strip()
-
-                    if attr_text:
-                        attr_width = min(80, max(60, len(attr_text) * 6))
-
-                        # Check if there's enough space to the right
-                        space_right = self.width() - display_rect.right()
-
-                        if space_right >= attr_width + 5:
-                            # Draw to the right
-                            attr_x = display_rect.right() + 5
-                        else:
-                            # Draw to the left
-                            attr_x = max(0, display_rect.left() - attr_width - 5)
-
-                        # Vertically center with the box
-                        attr_y = display_rect.center().y() - text_height // 2
-
+                        attr_lines.append(f"{key}: {value}")
+                    
+                    # Calculate width needed for the longest attribute
+                    attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
+                    
+                    # Check if there's enough space to the right
+                    space_right = self.width() - display_rect.right()
+                    
+                    if space_right >= attr_width + 5:
+                        # Draw to the right
+                        attr_x = display_rect.right() + 5
+                    else:
+                        # Draw to the left
+                        attr_x = max(0, display_rect.left() - attr_width - 5)
+                    
+                    # Vertically position attributes centered with the box
+                    # If too many attributes, start higher to fit them all
+                    if attr_total_height > display_rect.height():
+                        attr_y = max(0, display_rect.top())
+                    else:
+                        attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
+                    
+                    # Draw each attribute on its own line
+                    for i, attr_text in enumerate(attr_lines):
                         attr_rect = QRect(
                             int(attr_x),
-                            int(attr_y),
+                            int(attr_y + i * text_height),
                             attr_width,
                             text_height,
                         )
-
+                        
                         painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
                         painter.setPen(QPen(QColor(255, 255, 255)))
-                        painter.drawText(attr_rect, Qt.AlignCenter, attr_text)
-
+                        painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
             # Draw current annotation if drawing
             if self.is_drawing and self.start_point and self.current_point:
                 rect = QRect(self.start_point, self.current_point).normalized()

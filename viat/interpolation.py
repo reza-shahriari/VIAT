@@ -308,7 +308,8 @@ class InterpolationManager:
             interpolated_rect,
             start_ann.class_name,
             self._interpolate_attributes(start_ann.attributes, end_ann.attributes, alpha),
-            start_ann.color
+            start_ann.color,
+            source='interpolated'
         )
 
         return interpolated_ann

@@ -26,7 +26,7 @@ class BoundingBox:
     Represents a bounding box annotation with class and attributes.
     """
 
-    def __init__(self, rect, class_name, attributes=None, color=None):
+    def __init__(self, rect, class_name, attributes=None, color=None, source="manual"):
         """
         Initialize a bounding box annotation.
 
@@ -35,11 +35,14 @@ class BoundingBox:
             class_name (str): Class name
             attributes (dict, optional): Dictionary of attributes
             color (QColor, optional): Color for display
+            source (str, optional): Source of the annotation (manual, interpolated, tracked, detected)
         """
         self.rect = rect
         self.class_name = class_name
         self.attributes = attributes or {}
         self.color = color
+        self.source = source
+        self.verified = source == "manual"  
 
     def to_dict(self):
         """Convert to a dictionary for serialization"""
@@ -63,6 +66,8 @@ class BoundingBox:
                 if self.color
                 else None
             ),
+            "source": self.source,
+            "verified": self.verified
         }
 
     @classmethod
@@ -91,7 +96,10 @@ class BoundingBox:
         else:
             color = QColor(255, 0, 0)  # Default red
 
-        return cls(rect, class_name, attributes, color)
+        source = data.get("source", "manual")
+        bbox = cls(rect, class_name, attributes, color, source)
+        bbox.verified = data.get("verified", source == "manual")
+        return bbox
 
     def copy(self):
         """Create a deep copy of this bounding box."""
@@ -115,7 +123,9 @@ class BoundingBox:
         new_attributes = self.attributes.copy() if self.attributes else {}
 
         # Return a new BoundingBox with the copied properties
-        return BoundingBox(new_rect, self.class_name, new_attributes, new_color)
+        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source)
+        bbox.verified = self.verified
+        return bbox
 
 
 class AnnotationManager:
