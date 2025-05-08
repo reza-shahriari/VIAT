@@ -49,8 +49,6 @@ from .canvas import VideoCanvas
 from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
-from utils.dataset_manager import import_dataset_dialog, load_dataset
-from utils.dataset_manager import export_dataset_dialog, export_dataset
 
 
 import numpy as np
@@ -73,6 +71,11 @@ from utils import (
     create_thumbnail,
     import_annotations,
     UICreator,
+    export_dataset_dialog,
+    export_dataset,
+    import_dataset_dialog,
+    load_dataset,
+    PerfomanceManger,
 )
 from utils.icon_provider import IconProvider
 from natsort import natsorted
@@ -115,6 +118,7 @@ class VideoAnnotationTool(QMainWindow):
         self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
+        self.performance_manager = PerfomanceManger()
 
     def load_last_project(self):
         """Load the last project that was open."""
@@ -793,7 +797,7 @@ class VideoAnnotationTool(QMainWindow):
                     if prev_frame is None:
                         prev_frame = max(0, current_frame - 1)
             else:
-                prev_frame = max(0,self.current_frame-1)
+                prev_frame = max(0, self.current_frame - 1)
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, prev_frame)
             ret, frame = self.cap.read()
             if ret:
@@ -828,35 +832,43 @@ class VideoAnnotationTool(QMainWindow):
                     # Just show message if not playing
                     self.statusBar.showMessage("End of image dataset")
         else:
-            if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+            if (
+                hasattr(self, "interpolation_manager")
+                and self.interpolation_manager.is_active
+            ):
                 current_frame = self.current_frame
-                
+
                 # Check if current frame has annotations
                 current_has_annotations = (
-                    current_frame in self.frame_annotations and 
-                    len(self.frame_annotations[current_frame]) > 0
+                    current_frame in self.frame_annotations
+                    and len(self.frame_annotations[current_frame]) > 0
                 )
-                
+
                 if current_has_annotations:
                     self.perform_interpolation()
                     # If current frame has annotations, go to next keyframe (current + interval)
-                    next_frame_number = current_frame + self.interpolation_manager.interval
+                    next_frame_number = (
+                        current_frame + self.interpolation_manager.interval
+                    )
                 else:
                     # If current frame has no annotations, find the next frame with annotations
                     next_frame_number = None
                     for frame in sorted(self.frame_annotations.keys()):
-                        if frame > current_frame and len(self.frame_annotations[frame]) > 0:
+                        if (
+                            frame > current_frame
+                            and len(self.frame_annotations[frame]) > 0
+                        ):
                             next_frame_number = frame
                             break
-                    
+
                     # If no next annotated frame found, suggest one based on interval
                     if next_frame_number is None:
                         next_frame_number = current_frame + 1
-            
+
             elif self.cap and self.cap.isOpened():
                 # Calculate the next frame number explicitly
                 next_frame_number = self.current_frame + 1
-                
+
                 # Check if we've reached the end of the video
                 if next_frame_number >= self.total_frames:
                     # End of video
@@ -874,11 +886,11 @@ class VideoAnnotationTool(QMainWindow):
                         self.update_frame_info()
                         self.load_current_frame_annotations()
                     return
-        
+
             # Explicitly set the frame position instead of just reading the next frame
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, next_frame_number)
             ret, frame = self.cap.read()
-            
+
             if ret:
                 self.current_frame = next_frame_number
                 # Update slider position first
@@ -898,7 +910,6 @@ class VideoAnnotationTool(QMainWindow):
                         and len(self.duplicate_frames_cache[current_hash]) > 1
                     ):
                         self.propagate_annotations_to_duplicate(current_hash)
-
 
     def play_pause_video(self):
         """Toggle between playing and pausing the video or image slideshow."""
@@ -2499,8 +2510,8 @@ class VideoAnnotationTool(QMainWindow):
         ret, frame = self.cap.read()
         if ret:
             self.canvas.set_frame(frame)
-
-        # Close progress dialog
+            
+        self.frame_hashes,self.duplicate_frames_cache = self.performance_manager.optimize_frame_hashes(self.frame_hashes, self.duplicate_frames_cache)
         progress.close()
 
         # Report results
@@ -4222,21 +4233,27 @@ class VideoAnnotationTool(QMainWindow):
         """Toggle verification mode for annotations."""
         if not hasattr(self, "verification_mode_enabled"):
             self.verification_mode_enabled = False
-        
+
         self.verification_mode_enabled = not self.verification_mode_enabled
-        
+
         if self.verification_mode_enabled:
-            self.statusBar.showMessage("Verification mode enabled - unverified annotations will be deleted when changing frames", 5000)
+            self.statusBar.showMessage(
+                "Verification mode enabled - unverified annotations will be deleted when changing frames",
+                5000,
+            )
         else:
             self.statusBar.showMessage("Verification mode disabled", 3000)
-        
+
         # Update UI to show current mode
         if hasattr(self, "verify_mode_action"):
             self.verify_mode_action.setChecked(self.verification_mode_enabled)
 
     def verify_selected_annotation(self):
         """Mark the selected annotation as verified."""
-        if hasattr(self.canvas, "selected_annotation") and self.canvas.selected_annotation:
+        if (
+            hasattr(self.canvas, "selected_annotation")
+            and self.canvas.selected_annotation
+        ):
             self.save_undo_state()
             self.canvas.selected_annotation.verified = True
             self.canvas.update()
@@ -4251,40 +4268,56 @@ class VideoAnnotationTool(QMainWindow):
                 annotation.verified = True
             self.canvas.update()
             self.update_annotation_list()
-            self.statusBar.showMessage(f"All {len(self.canvas.annotations)} annotations verified", 2000)
+            self.statusBar.showMessage(
+                f"All {len(self.canvas.annotations)} annotations verified", 2000
+            )
 
     def handle_unverified_annotations(self):
         """Handle unverified annotations when changing frames."""
-        if not hasattr(self, "verification_mode_enabled") or not self.verification_mode_enabled:
+        if (
+            not hasattr(self, "verification_mode_enabled")
+            or not self.verification_mode_enabled
+        ):
             return
-        
+
         # Check if there are any unverified annotations in the current frame
         if self.current_frame in self.frame_annotations:
-            unverified = [ann for ann in self.frame_annotations[self.current_frame] if not getattr(ann, 'verified', False)]
-            
+            unverified = [
+                ann
+                for ann in self.frame_annotations[self.current_frame]
+                if not getattr(ann, "verified", False)
+            ]
+
             if unverified:
                 # Remove unverified annotations
                 self.frame_annotations[self.current_frame] = [
-                    ann for ann in self.frame_annotations[self.current_frame] 
-                    if getattr(ann, 'verified', False)
+                    ann
+                    for ann in self.frame_annotations[self.current_frame]
+                    if getattr(ann, "verified", False)
                 ]
-                
+
                 # Update canvas annotations
-                self.canvas.annotations = self.frame_annotations[self.current_frame].copy()
+                self.canvas.annotations = self.frame_annotations[
+                    self.current_frame
+                ].copy()
                 self.canvas.update()
-                
+
                 # Show message
-                self.statusBar.showMessage(f"Removed {len(unverified)} unverified annotations", 3000)
+                self.statusBar.showMessage(
+                    f"Removed {len(unverified)} unverified annotations", 3000
+                )
 
     def toggle_pan_mode(self):
         """Toggle pan mode for the canvas"""
         enabled = self.pan_tool_action.isChecked()
         self.canvas.set_pan_mode(enabled)
-        
+
         # Update cursor based on mode
         if enabled:
             self.canvas.setCursor(Qt.OpenHandCursor)
-            self.statusBar.showMessage("Pan mode enabled. Left-click and drag to pan the canvas.", 3000)
+            self.statusBar.showMessage(
+                "Pan mode enabled. Left-click and drag to pan the canvas.", 3000
+            )
         else:
             self.canvas.setCursor(Qt.ArrowCursor)
             self.statusBar.showMessage("Pan mode disabled.", 3000)

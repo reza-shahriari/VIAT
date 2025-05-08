@@ -12,7 +12,7 @@ from .file_operations import (
     export_image_dataset_yolo,
     export_image_dataset_coco,
     export_standard_annotations,
-    import_annotations
+    import_annotations,
 )
 from .im_tools import (
     calculate_frame_hash,
@@ -20,3 +20,10 @@ from .im_tools import (
     create_thumbnail,
 )
 from .ui_creator import UICreator
+from .performance import PerfomanceManger
+from .dataset_manager import (
+    import_dataset_dialog,
+    load_dataset,
+    export_dataset_dialog,
+    export_dataset,
+)
