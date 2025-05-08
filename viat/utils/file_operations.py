@@ -1498,96 +1498,6 @@ def import_raya_yolo_annotations(
     return frame_annotations
 
 
-def import_annotations(
-    filename, bbox_class, image_width=640, image_height=480, class_colors=None
-):
-    """
-    Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
-    The format is automatically detected based on file extension and content.
-
-    Args:
-        filename (str): Path to the annotation file
-        bbox_class (class): Class to use for bounding box objects
-        image_width (int, optional): Width of the image/video frame
-        image_height (int, optional): Height of the image/video frame
-        class_colors (dict, optional): Dictionary mapping class names to colors
-
-    Returns:
-        tuple: (format_type, annotations, frame_annotations)
-            - format_type (str): Detected format type
-            - annotations (list): List of annotations for current frame (if applicable)
-            - frame_annotations (dict): Dictionary mapping frame numbers to lists of annotations
-    """
-    if class_colors is None:
-        class_colors = {}
-
-    # Detect format based on file extension and content
-    format_type = detect_annotation_format(filename)
-
-    if not format_type:
-        raise ValueError(
-            "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, Raya, or Raya YOLO format."
-        )
-
-    # Initialize return values
-    annotations = []
-    frame_annotations = {}
-
-    # Import annotations based on format
-    if format_type == "COCO":
-        coco_annotations = import_coco_annotations(filename, bbox_class)
-        for ann in coco_annotations:
-            # Set class to "Quad" if we want a single class
-            ann.class_name = "Quad"
-
-            frame_num = getattr(ann, "frame", 0)
-            if frame_num not in frame_annotations:
-                frame_annotations[frame_num] = []
-            frame_annotations[frame_num].append(ann)
-            if frame_num == 0:  # Assume current frame is 0 for simplicity
-                annotations.append(ann)
-
-    elif format_type == "YOLO":
-        annotations = import_yolo_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        # Set all annotations to "Quad" class
-        for ann in annotations:
-            ann.class_name = "Quad"
-        frame_annotations[0] = annotations  # Assume frame 0 for YOLO
-
-    elif format_type == "Pascal VOC":
-        annotations = import_pascal_voc_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        # Set all annotations to "Quad" class
-        for ann in annotations:
-            ann.class_name = "Quad"
-        frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
-
-    elif format_type == "Raya":
-        frame_annotations = import_raya_annotations(filename, bbox_class, class_colors)
-        # Raya format already uses "Quad" class by default
-        if 0 in frame_annotations:
-            annotations = frame_annotations[0]
-
-    elif format_type == "RayaYOLO":
-        frame_annotations = import_raya_yolo_annotations(
-            filename, image_width, image_height, bbox_class, class_colors
-        )
-        # Set all annotations to "Quad" class
-        for frame_num, frame_anns in frame_annotations.items():
-            for ann in frame_anns:
-                ann.class_name = "Quad"
-        if 0 in frame_annotations:
-            annotations = frame_annotations[0]
-
-    # Ensure "Quad" class has a color
-    if "Quad" not in class_colors:
-        class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
-
-    return format_type, annotations, frame_annotations
-
 
 def export_image_dataset_coco(
     filename, image_files, frame_annotations, class_colors, image_width, image_height
@@ -1788,6 +1698,222 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
                     f"{class_id} {x_center:.6f} {y_center:.6f} {norm_w:.6f} {norm_h:.6f}\n"
                 )
 
+def import_annotations(
+    filename, bbox_class, image_width=640, image_height=480, class_colors=None
+):
+    """
+    Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
+    The format is automatically detected based on file extension and content.
+
+    Args:
+        filename (str): Path to the annotation file
+        bbox_class (class): Class to use for bounding box objects
+        image_width (int, optional): Width of the image/video frame
+        image_height (int, optional): Height of the image/video frame
+        class_colors (dict, optional): Dictionary mapping class names to colors
+
+    Returns:
+        tuple: (format_type, annotations, frame_annotations)
+            - format_type (str): Detected format type
+            - annotations (list): List of annotations for current frame (if applicable)
+            - frame_annotations (dict): Dictionary mapping frame numbers to lists of annotations
+    """
+    if class_colors is None:
+        class_colors = {}
+
+    # Detect format based on file extension and content
+    format_type = detect_annotation_format(filename)
+
+    if not format_type:
+        raise ValueError(
+            "Could not automatically detect the annotation format. Please ensure the file is in YOLO, Pascal VOC, COCO, Raya, or Raya YOLO format."
+        )
+
+    # Initialize return values
+    annotations = []
+    frame_annotations = {}
+
+    # Import annotations based on format
+    if format_type == "COCO":
+        coco_annotations = import_coco_annotations(filename, bbox_class)
+        for ann in coco_annotations:
+            # Set class to "Quad" if we want a single class
+            ann.class_name = "Quad"
+
+            frame_num = getattr(ann, "frame", 0)
+            if frame_num not in frame_annotations:
+                frame_annotations[frame_num] = []
+            frame_annotations[frame_num].append(ann)
+            if frame_num == 0:  # Assume current frame is 0 for simplicity
+                annotations.append(ann)
+
+    elif format_type == "YOLO":
+        annotations = import_yolo_annotations(
+            filename, image_width, image_height, bbox_class, class_colors
+        )
+        # Set all annotations to "Quad" class
+        for ann in annotations:
+            ann.class_name = "Quad"
+        frame_annotations[0] = annotations  # Assume frame 0 for YOLO
+
+    elif format_type == "Pascal VOC":
+        annotations = import_pascal_voc_annotations(
+            filename, image_width, image_height, bbox_class, class_colors
+        )
+        # Set all annotations to "Quad" class
+        for ann in annotations:
+            ann.class_name = "Quad"
+        frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
+
+    elif format_type == "Raya":
+        frame_annotations = import_raya_annotations(filename, bbox_class, class_colors)
+        # Raya format already uses "Quad" class by default
+        if 0 in frame_annotations:
+            annotations = frame_annotations[0]
+
+    elif format_type == "RayaYOLO":
+        frame_annotations = import_raya_yolo_annotations(
+            filename, image_width, image_height, bbox_class, class_colors
+        )
+        # Set all annotations to "Quad" class
+        for frame_num, frame_anns in frame_annotations.items():
+            for ann in frame_anns:
+                ann.class_name = "Quad"
+        if 0 in frame_annotations:
+            annotations = frame_annotations[0]
+
+    # Ensure "Quad" class has a color
+    if "Quad" not in class_colors:
+        class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
+    
+    _scale_annotation_scores([list(frame_annotations.values())])
+   
+    frame_annotations = _filter_overlapping_annotations(frame_annotations)
+        
+    # Update annotations list for current frame (frame 0)
+    if 0 in frame_annotations:
+        annotations = frame_annotations[0]
+
+    return format_type, annotations, frame_annotations
+
+def _calculate_iou(box1, box2):
+    """
+    Calculate IoU (Intersection over Union) between two bounding boxes.
+    
+    Args:
+        box1: First bounding box (QRect)
+        box2: Second bounding box (QRect)
+        
+    Returns:
+        float: IoU value between 0 and 1
+    """
+    # Calculate intersection area
+    x1 = max(box1.x(), box2.x())
+    y1 = max(box1.y(), box2.y())
+    x2 = min(box1.x() + box1.width(), box2.x() + box2.width())
+    y2 = min(box1.y() + box1.height(), box2.y() + box2.height())
+    
+    if x2 < x1 or y2 < y1:
+        return 0.0  # No intersection
+    
+    intersection_area = (x2 - x1) * (y2 - y1)
+    
+    # Calculate union area
+    box1_area = box1.width() * box1.height()
+    box2_area = box2.width() * box2.height()
+    union_area = box1_area + box2_area - intersection_area
+    
+    # Calculate IoU
+    iou = intersection_area / union_area if union_area > 0 else 0.0
+    return iou
+
+def _filter_overlapping_annotations(frame_annotations, iou_threshold=0.5):
+    """
+    Filter out overlapping annotations based on IoU threshold.
+    Keep only the annotation with the higher score when IoU exceeds threshold.
+    
+    Args:
+        frame_annotations (dict): Dictionary mapping frame numbers to lists of annotations
+        iou_threshold (float): IoU threshold for considering annotations as overlapping
+        
+    Returns:
+        dict: Filtered frame annotations
+    """
+    filtered_annotations = {}
+    
+    for frame_num, annotations in frame_annotations.items():
+        # Sort annotations by score (higher scores first)
+        sorted_annotations = sorted(
+            annotations, 
+            key=lambda ann: getattr(ann, 'score', 0) if hasattr(ann, 'score') and ann.score is not None else 0,
+            reverse=True
+        )
+        
+        # Filter out overlapping annotations
+        kept_annotations = []
+        for ann in sorted_annotations:
+            # Check if this annotation overlaps with any kept annotation
+            should_keep = True
+            for kept_ann in kept_annotations:
+                iou = _calculate_iou(ann.rect, kept_ann.rect)
+                if iou > iou_threshold:
+                    should_keep = False
+                    break
+            
+            if should_keep:
+                kept_annotations.append(ann)
+        
+        filtered_annotations[frame_num] = kept_annotations
+    
+    return filtered_annotations
+
+def _scale_annotation_scores(frame_annotations_list):
+    """
+    Scale the scores of annotations to a range of 0.2 to 1.0.
+    
+    Args:
+        frame_annotations_list (list): List of frame annotation lists
+    """
+    # First, collect all valid scores from all annotations
+    all_annotations = []
+    valid_scores = []
+    
+    # Flatten the list of frame annotations and collect scores
+    for frame_anns in frame_annotations_list:
+        if isinstance(frame_anns, list):
+            # If it's already a list of annotations
+            for ann in frame_anns:
+                all_annotations.append(ann)
+                if hasattr(ann, 'score') and ann.score is not None:
+                    valid_scores.append(ann.score)
+        elif isinstance(frame_anns, dict):
+            # If it's a dictionary of frame numbers to annotation lists
+            for frame_num, anns in frame_anns.items():
+                for ann in anns:
+                    all_annotations.append(ann)
+                    if hasattr(ann, 'score') and ann.score is not None:
+                        valid_scores.append(ann.score)
+    
+    # If no valid scores, return
+    if not valid_scores:
+        return
+    
+    # Find min and max scores
+    min_score = min(valid_scores)
+    max_score = max(valid_scores)
+    
+    # If all scores are the same, set them all to 1.0
+    if min_score == max_score:
+        for ann in all_annotations:
+            if hasattr(ann, 'score') and ann.score is not None:
+                ann.score = 1.0
+        return
+    
+    # Scale scores to range 0.2 to 1.0
+    for ann in all_annotations:
+        if hasattr(ann, 'score') and ann.score is not None:
+            # Linear scaling formula: new_value = new_min + (value - old_min) * (new_max - new_min) / (old_max - old_min)
+            ann.score = 0.2 + (ann.score - min_score) * 0.8 / (max_score - min_score)
 
 def export_image_dataset_pascal_voc(
     output_dir, image_files, frame_annotations, pixmap=None

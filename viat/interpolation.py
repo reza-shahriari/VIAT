@@ -285,8 +285,8 @@ class InterpolationManager:
                 start_annotations, end_annotations
             )
             
-            # Resolve conflicts between existing and interpolated annotations
-            final_annotations = self._resolve_annotation_conflicts(
+            # Resolve conflicts between existing and interpolated annotations using weighted average
+            final_annotations = self._resolve_annotation_conflicts_with_weighted_average(
                 existing_annotations, interpolated_annotations, frame_num
             )
             
@@ -551,3 +551,149 @@ class InterpolationManager:
         is_last_annotated = frame_num == self.last_annotated_frame
         
         return has_annotations and is_last_annotated
+
+    def _resolve_annotation_conflicts_with_weighted_average(self, existing_annotations, interpolated_annotations, frame_num):
+        """
+        Resolve conflicts between existing and interpolated annotations using confidence scores
+        and weighted averaging when scores are similar.
+        
+        Args:
+            existing_annotations: List of existing annotations in the frame
+            interpolated_annotations: List of newly interpolated annotations
+            frame_num: Frame number
+            
+        Returns:
+            list: Final list of annotations after conflict resolution
+        """
+        # If no existing annotations, just use interpolated ones
+        if not existing_annotations:
+            return interpolated_annotations
+            
+        # If no interpolated annotations, keep existing ones
+        if not interpolated_annotations:
+            return existing_annotations
+            
+        final_annotations = []
+        used_existing = set()
+        used_interpolated = set()
+        
+        # Compare each pair of existing and interpolated annotations
+        for i, existing in enumerate(existing_annotations):
+            for j, interpolated in enumerate(interpolated_annotations):
+                # Skip if either annotation has already been used
+                if i in used_existing or j in used_interpolated:
+                    continue
+                    
+                # Calculate IoU between annotations
+                iou = self._calculate_iou(existing.rect, interpolated.rect)
+                
+                if iou > 0.5:  # High overlap - potential conflict
+                    # Get confidence scores (default to 0.5 if not present)
+                    existing_conf = getattr(existing, 'score', 0.5)
+                    interpolated_conf = getattr(interpolated, 'score', 0.5)
+                    
+                    # If existing is manual, always keep it
+                    if getattr(existing, 'source', '') == 'manual':
+                        final_annotations.append(existing)
+                    # If interpolated is manual (unlikely), keep it
+                    elif getattr(interpolated, 'source', '') == 'manual':
+                        final_annotations.append(interpolated)
+                    # If scores are similar (within 0.2 of each other), use weighted average
+                    elif abs(existing_conf - interpolated_conf) < 0.2:
+                        # Create a weighted average annotation
+                        weighted_ann = self._create_weighted_average_annotation(
+                            existing, interpolated, existing_conf, interpolated_conf
+                        )
+                        final_annotations.append(weighted_ann)
+                    # Otherwise, use the one with higher confidence
+                    elif existing_conf >= interpolated_conf:
+                        final_annotations.append(existing)
+                    else:
+                        final_annotations.append(interpolated)
+                        
+                    used_existing.add(i)
+                    used_interpolated.add(j)
+        
+        # Add remaining existing annotations that didn't have conflicts
+        for i, annotation in enumerate(existing_annotations):
+            if i not in used_existing:
+                final_annotations.append(annotation)
+                
+        # Add remaining interpolated annotations that didn't have conflicts
+        for j, annotation in enumerate(interpolated_annotations):
+            if j not in used_interpolated:
+                final_annotations.append(annotation)
+                
+        return final_annotations
+
+    def _create_weighted_average_annotation(self, ann1, ann2, score1, score2):
+        """
+        Create a new annotation that is a weighted average of two annotations.
+        
+        Args:
+            ann1: First annotation
+            ann2: Second annotation
+            score1: Confidence score of first annotation
+            score2: Confidence score of second annotation
+            
+        Returns:
+            BoundingBox: New annotation with weighted average properties
+        """
+        # Calculate weights based on scores
+        total_score = score1 + score2
+        weight1 = score1 / total_score
+        weight2 = score2 / total_score
+        
+        # Get rectangle coordinates
+        x1, y1, w1, h1 = ann1.rect.x(), ann1.rect.y(), ann1.rect.width(), ann1.rect.height()
+        x2, y2, w2, h2 = ann2.rect.x(), ann2.rect.y(), ann2.rect.width(), ann2.rect.height()
+        
+        # Calculate weighted average coordinates
+        x = int(x1 * weight1 + x2 * weight2)
+        y = int(y1 * weight1 + y2 * weight2)
+        w = int(w1 * weight1 + w2 * weight2)
+        h = int(h1 * weight1 + h2 * weight2)
+        
+        # Create new rectangle
+        from PyQt5.QtCore import QRect
+        weighted_rect = QRect(x, y, w, h)
+        
+        # Use class name from annotation with higher score
+        class_name = ann1.class_name if score1 >= score2 else ann2.class_name
+        
+        # Merge attributes with preference to the higher-scored annotation
+        attributes = {}
+        if hasattr(ann1, 'attributes') and ann1.attributes:
+            attributes.update(ann1.attributes)
+        if hasattr(ann2, 'attributes') and ann2.attributes:
+            # For attributes in both annotations, use weighted average for numeric values
+            for key, value2 in ann2.attributes.items():
+                if key in attributes:
+                    value1 = attributes[key]
+                    if isinstance(value1, (int, float)) and isinstance(value2, (int, float)):
+                        attributes[key] = value1 * weight1 + value2 * weight2
+                        if isinstance(value1, int) and isinstance(value2, int):
+                            attributes[key] = int(round(attributes[key]))
+                    elif score2 > score1:  # For non-numeric, prefer the higher-scored annotation
+                        attributes[key] = value2
+                else:
+                    attributes[key] = value2
+        
+        # Use color from the class
+        color = ann1.color
+        
+        # Calculate combined score (slightly higher than average to reward agreement)
+        combined_score = min(1.0, (score1 + score2) / 2 * 1.1)
+        
+        # Create new annotation
+        from .annotation import BoundingBox
+        weighted_ann = BoundingBox(
+            weighted_rect,
+            class_name,
+            attributes,
+            color,
+            source='weighted_average',
+            score=combined_score
+        )
+        
+        return weighted_ann

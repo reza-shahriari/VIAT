@@ -92,6 +92,9 @@ class VideoCanvas(QWidget):
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+        
+        # Debug flag for showing scores
+        self.show_debug_scores = True
 
     def set_frame(self, frame):
         """Set the current frame to display"""
@@ -262,6 +265,19 @@ class VideoCanvas(QWidget):
 
                 painter.setPen(QPen(QColor(0, 0, 0)))
                 painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+                
+                # DEBUG: Show score if debug flag is enabled and annotation has a score
+                if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
+                    score_text = f"{annotation.score:.2f}"
+                    score_rect = QRect(
+                        int(display_rect.right() - 40),
+                        int(display_rect.top() - 16),
+                        40,
+                        16
+                    )
+                    painter.fillRect(score_rect, QColor(0, 0, 0, 180))
+                    painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
+                    painter.drawText(score_rect, Qt.AlignCenter, score_text)
 
                 # Draw attributes to the right of the box if there's space, otherwise to the left
                 if annotation.attributes:
@@ -306,87 +322,6 @@ class VideoCanvas(QWidget):
                         painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
                         painter.setPen(QPen(QColor(255, 255, 255)))
                         painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
-            # Draw current annotation if drawing
-            if self.is_drawing and self.start_point and self.current_point:
-                rect = QRect(self.start_point, self.current_point).normalized()
-                display_rect = self.image_to_display_rect(rect)
-                painter.setPen(
-                    QPen(
-                        self.class_colors.get(self.current_class, QColor(255, 0, 0)),
-                        2,
-                        Qt.DashLine,
-                    )
-                )
-                painter.drawRect(display_rect)
-
-            # Draw the first point marker in two-click mode
-            if self.annotation_method == "TwoClick" and self.two_click_first_point:
-                display_point = self.image_to_display_pos(self.two_click_first_point)
-                if display_point:
-                    # Draw a cross at the first click point
-                    marker_size = 10
-                    painter.setPen(QPen(QColor(255, 255, 0), 2))  # Yellow pen
-                    painter.drawLine(
-                        display_point.x() - marker_size,
-                        display_point.y(),
-                        display_point.x() + marker_size,
-                        display_point.y(),
-                    )
-                    painter.drawLine(
-                        display_point.x(),
-                        display_point.y() - marker_size,
-                        display_point.x(),
-                        display_point.y() + marker_size,
-                    )
-
-            # Draw edge indicators for selected annotation
-            if self.selected_annotation and not self.is_drawing:
-                display_rect = self.image_to_display_rect(self.selected_annotation.rect)
-
-                # Draw handles on the edges
-                handle_size = 8
-                painter.setPen(QPen(QColor(255, 255, 0), 1))
-                painter.setBrush(QBrush(QColor(255, 255, 0)))
-
-                # Top edge
-                painter.drawRect(
-                    QRect(
-                        display_rect.center().x() - handle_size // 2,
-                        display_rect.top() - handle_size // 2,
-                        handle_size,
-                        handle_size,
-                    )
-                )
-
-                # Right edge
-                painter.drawRect(
-                    QRect(
-                        display_rect.right() - handle_size // 2,
-                        display_rect.center().y() - handle_size // 2,
-                        handle_size,
-                        handle_size,
-                    )
-                )
-
-                # Bottom edge
-                painter.drawRect(
-                    QRect(
-                        display_rect.center().x() - handle_size // 2,
-                        display_rect.bottom() - handle_size // 2,
-                        handle_size,
-                        handle_size,
-                    )
-                )
-
-                # Left edge
-                painter.drawRect(
-                    QRect(
-                        display_rect.left() - handle_size // 2,
-                        display_rect.center().y() - handle_size // 2,
-                        handle_size,
-                        handle_size,
-                    )
-                )
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
