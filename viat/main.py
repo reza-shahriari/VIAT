@@ -49,6 +49,10 @@ from .canvas import VideoCanvas
 from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
+from .logger import VIATLogger, log_exceptions
+
+# Initialize logger early
+logger = VIATLogger()
 
 
 import numpy as np
@@ -114,12 +118,14 @@ class VideoAnnotationTool(QMainWindow):
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
 
+    @log_exceptions
     def init_managers(self):
         self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
         self.performance_manager = PerfomanceManger()
 
+    @log_exceptions
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
@@ -131,6 +137,7 @@ class VideoAnnotationTool(QMainWindow):
         if last_project and os.path.exists(last_project):
             self.load_project(last_project)
 
+    @log_exceptions
     def init_properties(self):
         """Initialize the application properties and state variables."""
         # Available styles
@@ -199,6 +206,7 @@ class VideoAnnotationTool(QMainWindow):
         self.is_image_dataset = False
         self.image_files = []
 
+    @log_exceptions
     def setup_ui(self):
         """Set up the user interface."""
         # Create UI creator
@@ -252,11 +260,13 @@ class VideoAnnotationTool(QMainWindow):
         # Set window icon
         self.setWindowIcon(self.icon_provider.get_icon("app-icon"))
 
+    @log_exceptions
     def setup_playback_timer(self):
         """Set up the timer for video playback."""
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self.next_frame)
 
+    @log_exceptions
     def toggle_attribute_dialog(self):
         """Toggle automatic attribute dialog display."""
         self.auto_show_attribute_dialog = not self.auto_show_attribute_dialog
@@ -265,6 +275,7 @@ class VideoAnnotationTool(QMainWindow):
             3000,
         )
 
+    @log_exceptions
     def toggle_previous_attributes(self):
         """Toggle using previous annotation attributes as default."""
         self.use_previous_attributes = not self.use_previous_attributes
@@ -273,6 +284,7 @@ class VideoAnnotationTool(QMainWindow):
             3000,
         )
 
+    @log_exceptions
     def toggle_autosave(self):
         """Toggle auto-save functionality."""
         self.autosave_enabled = not self.autosave_enabled
@@ -284,6 +296,7 @@ class VideoAnnotationTool(QMainWindow):
             self.autosave_timer.stop()
             self.statusBar.showMessage("Auto-save disabled", 3000)
 
+    @log_exceptions
     def toggle_smart_edge(self):
         """Toggle smart edge movement functionality."""
         is_active = self.smart_edge_action.isChecked()
@@ -296,6 +309,7 @@ class VideoAnnotationTool(QMainWindow):
         else:
             self.statusBar.showMessage("Smart Edge Movement disabled")
 
+    @log_exceptions
     def change_annotation_method(self, method_name):
         """Change the current annotation method."""
         if method_name in ["Drag", "TwoClick"]:
@@ -311,6 +325,7 @@ class VideoAnnotationTool(QMainWindow):
                     f"Annotation method changed to {method_name}"
                 )
 
+    @log_exceptions
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
         config_dir = get_config_directory()
@@ -322,6 +337,7 @@ class VideoAnnotationTool(QMainWindow):
         self.update_recent_projects_menu()
         self.statusBar.showMessage("Recent projects cleared", 3000)
 
+    @log_exceptions
     def update_recent_projects_menu(self):
         """Update the recent projects menu with the latest projects."""
         self.recent_projects_menu.clear()
@@ -347,6 +363,7 @@ class VideoAnnotationTool(QMainWindow):
         clear_action.triggered.connect(self.clear_recent_projects)
         self.recent_projects_menu.addAction(clear_action)
 
+    @log_exceptions
     def set_autosave_interval(self, interval_ms):
         """Set the auto-save interval."""
         self.autosave_interval = interval_ms
@@ -372,16 +389,19 @@ class VideoAnnotationTool(QMainWindow):
         self.zoom_level *= 1.2
         self.canvas.set_zoom(self.zoom_level)
 
+    @log_exceptions
     def zoom_out(self):
         """Zoom out on the canvas."""
         self.zoom_level /= 1.2
         self.canvas.set_zoom(self.zoom_level)
 
+    @log_exceptions
     def reset_zoom(self):
         """Reset zoom to default level."""
         self.zoom_level = 1.0
         self.canvas.set_zoom(self.zoom_level)
 
+    @log_exceptions
     def open_video(self):
         """Open a video file."""
         filename, _ = QFileDialog.getOpenFileName(
@@ -406,6 +426,7 @@ class VideoAnnotationTool(QMainWindow):
             self.duplicate_frames_cache = {}
             self.load_video_file(filename)
 
+    @log_exceptions
     def load_video_file(self, filename):
         """Load a video file and display the first frame."""
         # Close any existing video
@@ -483,6 +504,7 @@ class VideoAnnotationTool(QMainWindow):
             self.cap = None
             return False
 
+    @log_exceptions
     def check_for_annotation_files(self, video_filename):
         """
         Check if annotation files with the same base name as the video exist.
@@ -571,6 +593,7 @@ class VideoAnnotationTool(QMainWindow):
                     # Only one file found, import it directly
                     self.import_annotations(annotation_files[0])
 
+    @log_exceptions
     def show_annotation_file_selection_dialog(self, annotation_files):
         """
         Show a dialog for the user to select which annotation file(s) to import.
@@ -618,6 +641,7 @@ class VideoAnnotationTool(QMainWindow):
             if selected_files:
                 self.import_multiple_annotations(selected_files)
 
+    @log_exceptions
     def import_multiple_annotations(self, annotation_files):
         """
         Import annotations from multiple files.
@@ -664,6 +688,7 @@ class VideoAnnotationTool(QMainWindow):
             f"Successfully imported annotations from {len(annotation_files)} files.",
         )
 
+    @log_exceptions
     def update_frame_info(self):
         """Update frame information in the UI."""
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
@@ -690,6 +715,7 @@ class VideoAnnotationTool(QMainWindow):
             self.frame_slider.setValue(self.current_frame)
             self.frame_slider.blockSignals(False)
 
+    @log_exceptions
     def update_frame_annotations(self):
         """Update annotations for the current frame."""
         # Save current annotations to frame_annotations dictionary
@@ -708,6 +734,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update the canvas
         self.canvas.update()
 
+    @log_exceptions
     def load_current_frame_annotations(self):
         """Load annotations for the current frame into the canvas."""
         # Clear canvas selection
@@ -728,6 +755,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update the canvas
         self.canvas.update()
 
+    @log_exceptions
     def slider_changed(self, value):
         """Handle slider value changes."""
         # self.handle_unverified_annotations()
@@ -755,6 +783,7 @@ class VideoAnnotationTool(QMainWindow):
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
 
+    @log_exceptions
     def prev_frame(self):
         """Go to the previous frame in the video or previous image in the dataset."""
         self.handle_unverified_annotations()
@@ -808,6 +837,7 @@ class VideoAnnotationTool(QMainWindow):
                 # Load annotations for the new frame
                 self.load_current_frame_annotations()
 
+    @log_exceptions
     def next_frame(self):
         """Go to the next frame in the video or next image in the dataset."""
         self.handle_unverified_annotations()
@@ -911,6 +941,7 @@ class VideoAnnotationTool(QMainWindow):
                     ):
                         self.propagate_annotations_to_duplicate(current_hash)
 
+    @log_exceptions
     def play_pause_video(self):
         """Toggle between playing and pausing the video or image slideshow."""
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
@@ -955,6 +986,7 @@ class VideoAnnotationTool(QMainWindow):
             )
             self.statusBar.showMessage(f"Playing at {fps:.1f} FPS")
 
+    @log_exceptions
     def eventFilter(self, obj, event):
         """Global event filter to handle shortcuts regardless of focus."""
         if event.type() == QEvent.KeyPress:
@@ -989,6 +1021,8 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Project handling methods
     #
+
+    @log_exceptions
     def save_project(self, save_as=False):
         """Save the current project."""
         if not save_as and self.project_file:
@@ -1052,6 +1086,7 @@ class VideoAnnotationTool(QMainWindow):
             # Get video path if available
             video_path = getattr(self, "video_filename", None)
 
+    @log_exceptions
     def load_project(self, filename=None):
         """Load a saved project."""
         if not filename:
@@ -1169,6 +1204,7 @@ class VideoAnnotationTool(QMainWindow):
                 self._loading_from_project = False
                 QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
 
+    @log_exceptions
     def save_application_state(self):
         """Save the current application state."""
         if not hasattr(self, "project_file") or not self.project_file:
@@ -1183,6 +1219,7 @@ class VideoAnnotationTool(QMainWindow):
 
         save_last_state(state)
 
+    @log_exceptions
     def load_application_state(self):
         """Load the last application state."""
         state = load_last_state()
@@ -1253,6 +1290,7 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, "annotation_dock"):
             self.annotation_dock.select_annotation_in_list(annotation)
 
+    @log_exceptions
     def export_annotations(self):
         """Export annotations to various formats."""
         # Check if we have any annotations either in the current frame or across all frames
@@ -1274,6 +1312,7 @@ class VideoAnnotationTool(QMainWindow):
 
             self.export_annotations_with_format(format_type)
 
+    @log_exceptions
     def create_export_dialog(self):
         """Create a dialog for export options."""
         dialog = QDialog(self)
@@ -1318,6 +1357,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return dialog
 
+    @log_exceptions
     def export_annotations_with_format(self, format_type):
         """Export annotations with the specified format."""
         # Determine default directory and filename
@@ -1483,6 +1523,7 @@ class VideoAnnotationTool(QMainWindow):
 
                 traceback.print_exc()
 
+    @log_exceptions
     def edit_annotation(self, annotation, focus_first_field=False):
         """
         Edit the properties of an annotation.
@@ -1494,6 +1535,7 @@ class VideoAnnotationTool(QMainWindow):
         self.save_undo_state()
         self.annotation_manager.edit_annotation(annotation, focus_first_field)
 
+    @log_exceptions
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
         if self.annotation_manager.delete_annotation(annotation):
@@ -1504,6 +1546,7 @@ class VideoAnnotationTool(QMainWindow):
             # Update annotation list
             self.update_annotation_list()
 
+    @log_exceptions
     def delete_selected_annotations(self):
         """Delete all currently selected annotations."""
         if (
@@ -1542,6 +1585,7 @@ class VideoAnnotationTool(QMainWindow):
         count = len(annotations_to_delete)
         self.statusBar.showMessage(f"Deleted {count} annotations", 3000)
 
+    @log_exceptions
     def delete_selected_annotation(self):
         """Delete the currently selected annotation."""
         if (
@@ -1566,11 +1610,13 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "update_annotation_list"):
                 self.update_annotation_list()
 
+    @log_exceptions
     def add_empty_annotation(self):
         """Add a new empty annotation with default values."""
         self.save_undo_state()
         self.annotation_manager.add_empty_annotation()
 
+    @log_exceptions
     def update_annotation_list(self):
         """Update the annotation list in the UI and handle interpolation."""
         # Update the annotation dock
@@ -1603,6 +1649,7 @@ class VideoAnnotationTool(QMainWindow):
         # Perform autosave if enabled
         self.perform_autosave()
 
+    @log_exceptions
     def update_annotation_attributes(self, annotation, class_attributes):
         """
         Update annotation attributes based on class configuration.
@@ -1615,20 +1662,24 @@ class VideoAnnotationTool(QMainWindow):
             annotation, class_attributes
         )
 
+    @log_exceptions
     def clear_annotations(self):
         """Clear all annotations."""
         self.save_undo_state()
         self.annotation_manager.clear_annotations()
 
+    @log_exceptions
     def add_annotation(self):
         """Add annotation manually."""
         self.save_undo_state()
         self.annotation_manager.add_annotation()
 
+    @log_exceptions
     def create_annotation_dialog(self):
         """Create a dialog for adding or editing annotations."""
         return self.annotation_manager.create_annotation_dialog()
 
+    @log_exceptions
     def parse_attributes(self, text):
         """Parse attributes from text input."""
         return self.annotation_manager.parse_attributes(text)
@@ -1636,6 +1687,7 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Import handling methods
     #
+    @log_exceptions
     def update_class_ui_after_import(self):
         """Update the class-related UI components after importing annotations."""
         # Update class selector in toolbar
@@ -1657,6 +1709,7 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "class_selector") and self.class_selector.count() > 0:
                 self.class_selector.setCurrentText(first_class)
 
+    @log_exceptions
     def import_annotations(self, filename=None):
         """
         Import annotations from a file.
@@ -1749,7 +1802,7 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Input handling methods
     #
-
+    @log_exceptions
     def keyPressEvent(self, event):
         """Handle keyboard events."""
         # Handle arrow keys for frame navigation
@@ -1821,11 +1874,12 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Class handling methods
     #
-
+    @log_exceptions
     def add_class(self):
         self.save_undo_state()
         self.class_manager.add_class()
 
+    @log_exceptions
     def refresh_class_lists(self):
         """Refresh class lists in all docks with debouncing"""
         # If a refresh is already scheduled, don't schedule another one
@@ -1851,11 +1905,13 @@ class VideoAnnotationTool(QMainWindow):
         # Schedule the refresh after a short delay
         QTimer.singleShot(100, do_refresh)
 
+    @log_exceptions
     def edit_selected_class(self):
         """Edit the selected class with option to convert to another class."""
         self.save_undo_state()
         self.class_manager.edit_selected_class()
 
+    @log_exceptions
     def convert_class_with_attributes(self, old_class, new_class, keep_original=False):
         """
         Convert all annotations from one class to another with attribute handling.
@@ -1870,6 +1926,7 @@ class VideoAnnotationTool(QMainWindow):
             old_class, new_class, keep_original
         )
 
+    @log_exceptions
     def convert_class_with_attribute_mapping(self, old_class, new_class):
         """
         Convert class with custom attribute mapping.
@@ -1881,6 +1938,7 @@ class VideoAnnotationTool(QMainWindow):
         self.save_undo_state()
         self.class_manager.convert_class_with_attribute_mapping(old_class, new_class)
 
+    @log_exceptions
     def refresh_class_ui(self):
         """Refresh all UI components that display class information"""
         # Update class dock
@@ -1906,16 +1964,19 @@ class VideoAnnotationTool(QMainWindow):
         # Update canvas
         self.canvas.update()
 
+    @log_exceptions
     def convert_class(self, old_class, new_class):
         """Convert all annotations from one class to another."""
         self.save_undo_state()
         self.class_manager.convert_class(old_class, new_class)
 
+    @log_exceptions
     def update_class(self, old_name, new_name, color):
         """Update a class with new name and color."""
         self.save_undo_state()
         self.class_manager.update_class(old_name, new_name, color)
 
+    @log_exceptions
     def delete_selected_class(self):
         """Delete the selected class."""
         self.save_undo_state()
@@ -1925,6 +1986,7 @@ class VideoAnnotationTool(QMainWindow):
     # Tool methods
     #
 
+    @log_exceptions
     def auto_label(self):
         """Auto-label objects in the current frame."""
         if not self.canvas.pixmap:
@@ -1940,6 +2002,7 @@ class VideoAnnotationTool(QMainWindow):
             "to automatically detect and label objects in the current frame.",
         )
 
+    @log_exceptions
     def track_objects(self):
         """Track objects across frames."""
         if not self.canvas.pixmap or not self.canvas.annotations:
@@ -1963,6 +2026,7 @@ class VideoAnnotationTool(QMainWindow):
     # UI utility methods
     #
 
+    @log_exceptions
     def change_style(self, style_name):
         """Change the application style."""
         if style_name in self.styles:
@@ -2035,6 +2099,7 @@ class VideoAnnotationTool(QMainWindow):
 
             self.statusBar.showMessage(f"Style changed to {style_name}")
 
+    @log_exceptions
     def refresh_icons(self):
         """Refresh all icons in the UI to match the current theme."""
 
@@ -2056,6 +2121,7 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, "toolbar") and hasattr(self.toolbar, "refresh_icons"):
             self.toolbar.refresh_icons()
 
+    @log_exceptions
     def show_about(self):
         """Show about dialog."""
         QMessageBox.about(
@@ -2072,6 +2138,7 @@ class VideoAnnotationTool(QMainWindow):
             "Created as a demonstration of PyQt5 capabilities.",
         )
 
+    @log_exceptions
     def setup_autosave(self):
         """Set up auto-save functionality."""
         # Create auto-save timer
@@ -2084,6 +2151,7 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "statusBar") and self.statusBar:
                 self.statusBar.showMessage("Auto-save enabled", 3000)
 
+    @log_exceptions
     def perform_autosave(self):
         """Perform auto-save of the current project."""
         if not self.autosave_enabled:
@@ -2163,6 +2231,7 @@ class VideoAnnotationTool(QMainWindow):
         except Exception as e:
             print(f"Auto-save failed: {str(e)}")
 
+    @log_exceptions
     def update_recent_projects_menu(self):
         """Update the recent projects menu with the latest projects."""
         self.recent_projects_menu.clear()
@@ -2188,6 +2257,7 @@ class VideoAnnotationTool(QMainWindow):
         clear_action.triggered.connect(self.clear_recent_projects)
         self.recent_projects_menu.addAction(clear_action)
 
+    @log_exceptions
     def clear_recent_projects(self):
         """Clear the list of recent projects."""
 
@@ -2200,6 +2270,7 @@ class VideoAnnotationTool(QMainWindow):
         self.update_recent_projects_menu()
         self.statusBar.showMessage("Recent projects cleared", 3000)
 
+    @log_exceptions
     def get_previous_annotation_attributes(self, class_name):
         """
         Find the most recent annotation of the same class and return its attributes.
@@ -2230,6 +2301,7 @@ class VideoAnnotationTool(QMainWindow):
         # If no previous annotation found, return None
         return None
 
+    @log_exceptions
     def update_settings_menu_actions(self):
         """Update the settings menu actions to reflect current settings."""
         if not hasattr(self, "settings_menu"):
@@ -2243,6 +2315,7 @@ class VideoAnnotationTool(QMainWindow):
             elif action.text() == "Use Previous Annotation Attributes as Default":
                 action.setChecked(self.use_previous_attributes)
 
+    @log_exceptions
     def open_image_folder(self):
         """Open a folder of images."""
         folder_path = QFileDialog.getExistingDirectory(
@@ -2265,6 +2338,7 @@ class VideoAnnotationTool(QMainWindow):
             # Handle as a simple image folder
             self.open_simple_image_folder(folder_path)
 
+    @log_exceptions
     def open_simple_image_folder(self, folder_path):
         """Open a simple folder of images."""
         # Reset existing state
@@ -2323,6 +2397,7 @@ class VideoAnnotationTool(QMainWindow):
         # Check for annotation files
         self.check_for_image_annotation_files(folder_path, folder_name)
 
+    @log_exceptions
     def open_image_dataset(self, folder_path=None):
         """Open an image dataset with advanced options."""
         if folder_path is None:
@@ -2394,6 +2469,7 @@ class VideoAnnotationTool(QMainWindow):
         # Show success message
         self.statusBar.showMessage(success_message)
 
+    @log_exceptions
     def load_current_image(self):
         """Load the current image from the image dataset."""
         if not hasattr(self, "image_files") or not self.image_files:
@@ -2423,6 +2499,7 @@ class VideoAnnotationTool(QMainWindow):
                 )
                 return False
 
+    @log_exceptions
     def toggle_duplicate_frames_detection(self):
         """Toggle automatic duplicate frame detection and annotation propagation."""
         self.duplicate_frames_enabled = self.duplicate_frames_action.isChecked()
@@ -2452,6 +2529,7 @@ class VideoAnnotationTool(QMainWindow):
         # Mark project as modified
         self.project_modified = True
 
+    @log_exceptions
     def scan_video_for_duplicates(self):
         """Scan the entire video to identify duplicate frames."""
         if not self.cap or not self.cap.isOpened():
@@ -2510,8 +2588,12 @@ class VideoAnnotationTool(QMainWindow):
         ret, frame = self.cap.read()
         if ret:
             self.canvas.set_frame(frame)
-            
-        self.frame_hashes,self.duplicate_frames_cache = self.performance_manager.optimize_frame_hashes(self.frame_hashes, self.duplicate_frames_cache)
+
+        self.frame_hashes, self.duplicate_frames_cache = (
+            self.performance_manager.optimize_frame_hashes(
+                self.frame_hashes, self.duplicate_frames_cache
+            )
+        )
         progress.close()
 
         # Report results
@@ -2526,6 +2608,7 @@ class VideoAnnotationTool(QMainWindow):
             f"Found {duplicate_count} duplicate frames in {self.total_frames} total frames.",
         )
 
+    @log_exceptions
     def propagate_annotations_to_duplicate(self, frame_hash):
         """
         Propagate annotations from other frames with the same hash to the current frame.
@@ -2555,6 +2638,7 @@ class VideoAnnotationTool(QMainWindow):
                     )
                     return
 
+    @log_exceptions
     def clone_annotation(self, annotation):
         """
         Create a deep copy of an annotation.
@@ -2568,6 +2652,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return deepcopy(annotation)
 
+    @log_exceptions
     def propagate_annotations(self):
         """Propagate current frame annotations to a range of frames."""
         if not self.canvas.annotations:
@@ -2706,6 +2791,7 @@ class VideoAnnotationTool(QMainWindow):
                 f"Annotations propagated to frames {start_frame}-{end_frame}", 5000
             )
 
+    @log_exceptions
     def propagate_to_duplicate_frames(self, frame_hash):
         """
         Propagate current frame annotations to all duplicate frames with the same hash.
@@ -2743,6 +2829,7 @@ class VideoAnnotationTool(QMainWindow):
                 3000,
             )
 
+    @log_exceptions
     def detect_similar_frames(self, reference_frame, similarity_threshold=0.9):
         """
         Detect frames that are similar to the reference frame.
@@ -2817,6 +2904,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return similar_frames
 
+    @log_exceptions
     def propagate_to_similar_frames(self):
         """Propagate current frame annotations to similar frames."""
         if not self.canvas.annotations:
@@ -2935,6 +3023,7 @@ class VideoAnnotationTool(QMainWindow):
                 f"Annotations propagated to {propagated_count} similar frames", 5000
             )
 
+    @log_exceptions
     def preview_similar_frames(self, frame_numbers):
         """
         Show a preview of similar frames and let the user select which ones to include.
@@ -3043,6 +3132,7 @@ class VideoAnnotationTool(QMainWindow):
         else:
             return False
 
+    @log_exceptions
     def clear_application_history():
         """Clear all application history files."""
         config_dir = get_config_directory()
@@ -3060,6 +3150,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return deleted_files
 
+    @log_exceptions
     def reset_application_state(self):
         """Reset the application to its initial state."""
         # Reset project-related variables
@@ -3124,6 +3215,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update status bar
         self.statusBar.showMessage("Application reset to initial state")
 
+    @log_exceptions
     def delete_history(self):
         """Delete all application history and reset to initial state."""
         reply = QMessageBox.question(
@@ -3175,6 +3267,7 @@ class VideoAnnotationTool(QMainWindow):
                 self, "Error", f"An error occurred while deleting history: {str(e)}"
             )
 
+    @log_exceptions
     def load_image_dataset_from_project(self, image_dataset_info, current_frame):
         """Load an image dataset from project information."""
         base_folder = image_dataset_info.get("base_folder", "")
@@ -3264,6 +3357,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return True
 
+    @log_exceptions
     def load_video_from_project(self, video_path, current_frame):
         """Load a video from project information."""
         # Temporarily store the original method
@@ -3291,6 +3385,7 @@ class VideoAnnotationTool(QMainWindow):
 
         return success
 
+    @log_exceptions
     def scan_images_for_duplicates(self):
         """Scan all images in the dataset to identify duplicates."""
         if not hasattr(self, "image_files") or not self.image_files:
@@ -3355,6 +3450,7 @@ class VideoAnnotationTool(QMainWindow):
             f"Found {duplicate_count} duplicate images in {len(self.image_files)} total images.",
         )
 
+    @log_exceptions
     def set_slideshow_speed(self, speed_factor):
         """Set the speed of the image slideshow.
 
@@ -3372,6 +3468,7 @@ class VideoAnnotationTool(QMainWindow):
 
             self.statusBar.showMessage(f"Slideshow speed: {speed_factor}x")
 
+    @log_exceptions
     def setup_playback_timer(self):
         """Set up the timer for video playback or image slideshow."""
         self.play_timer = QTimer()
@@ -3380,6 +3477,7 @@ class VideoAnnotationTool(QMainWindow):
         # Initialize slideshow speed to 1 second per image
         self.slideshow_speed = 1.0
 
+    @log_exceptions
     def check_for_image_annotation_files(self, folder_path, folder_name):
         """
         Check if annotation files exist for this image dataset.
@@ -3482,6 +3580,7 @@ class VideoAnnotationTool(QMainWindow):
                     # Only one file found, import it directly
                     self.import_annotations(annotation_files[0])
 
+    @log_exceptions
     def reset_media_state(self):
         """Reset all state related to the current media (video or image dataset)"""
         # Reset canvas
@@ -3510,6 +3609,7 @@ class VideoAnnotationTool(QMainWindow):
         # Reset status
         self.statusBar.showMessage("Ready")
 
+    @log_exceptions
     def export_image_dataset(self):
         """Export the current image dataset with advanced options."""
         if not hasattr(self, "is_image_dataset") or not self.is_image_dataset:
@@ -3538,6 +3638,7 @@ class VideoAnnotationTool(QMainWindow):
         if result:
             self.statusBar.showMessage(result, 5000)
 
+    @log_exceptions
     def create_dataset(self):
         """Create a new dataset from the current annotations."""
         if (
@@ -3583,12 +3684,14 @@ class VideoAnnotationTool(QMainWindow):
                     f"Dataset created successfully in {config['output_dir']}",
                 )
 
+    @log_exceptions
     def copy_selected_annotation(self):
         """Copy the currently selected annotation."""
         if hasattr(self, "canvas") and self.canvas.selected_annotation:
             self.clipboard_annotation = self.canvas.selected_annotation.copy()
             self.statusBar.showMessage("Annotation copied", 2000)
 
+    @log_exceptions
     def paste_annotation(self):
         """Paste the copied annotation to the current frame."""
         if hasattr(self, "clipboard_annotation") and self.clipboard_annotation:
@@ -3612,6 +3715,7 @@ class VideoAnnotationTool(QMainWindow):
                 self.annotation_dock.update_annotation_list()
             self.statusBar.showMessage("Annotation pasted", 2000)
 
+    @log_exceptions
     def cut_selected_annotation(self):
         """Cut (copy and delete) the selected annotation."""
         if hasattr(self, "canvas") and self.canvas.selected_annotation:
@@ -3639,6 +3743,7 @@ class VideoAnnotationTool(QMainWindow):
                 self.annotation_dock.update_annotation_list()
             self.statusBar.showMessage("Annotation cut", 2000)
 
+    @log_exceptions
     def select_all_annotations(self):
         """Select all annotations in the current frame."""
         current_frame = self.current_frame
@@ -3669,6 +3774,7 @@ class VideoAnnotationTool(QMainWindow):
         else:
             self.statusBar.showMessage("No annotations in this frame", 2000)
 
+    @log_exceptions
     def cycle_annotation_selection(self):
         """Cycle through annotations in the current frame or deselect if only one exists."""
         current_frame = self.current_frame
@@ -3721,6 +3827,7 @@ class VideoAnnotationTool(QMainWindow):
     # Undo Handeling
     #
 
+    @log_exceptions
     def save_undo_state(self):
         """Save the current state for undo functionality."""
         # Create a deep copy of all frame annotations
@@ -3768,6 +3875,7 @@ class VideoAnnotationTool(QMainWindow):
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
 
+    @log_exceptions
     def undo(self):
         """Undo the last annotation or class change."""
         if not self.undo_stack:
@@ -3881,6 +3989,7 @@ class VideoAnnotationTool(QMainWindow):
 
             self.statusBar.showMessage("Undo successful", 3000)
 
+    @log_exceptions
     def save_undo_state_without_clearing_redo(self):
         """Save the current state for undo functionality without clearing the redo stack."""
         # Create a deep copy of all frame annotations
@@ -3925,6 +4034,7 @@ class VideoAnnotationTool(QMainWindow):
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
 
+    @log_exceptions
     def redo(self):
         """Redo the last undone action."""
         if not self.redo_stack:
@@ -4009,9 +4119,8 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Interpolation methods
     #
-    # Add these methods to the VideoAnnotationTool class
 
-    # Add these methods to the VideoAnnotationTool class
+    @log_exceptions
     def toggle_interpolation_mode(self):
         """Toggle interpolation mode on/off."""
         is_active = self.toggle_interpolation_action.isChecked()
@@ -4024,6 +4133,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update UI
         self.update_frame_display()
 
+    @log_exceptions
     def set_interpolation_interval(self):
         """Open dialog to set interpolation interval."""
         dialog = QDialog(self)
@@ -4052,6 +4162,7 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, "interval_spinner"):
                 self.interval_spinner.setValue(new_interval)
 
+    @log_exceptions
     def perform_interpolation(self):
         """Manually trigger interpolation between annotated frames."""
         if not self.interpolation_manager.is_active:
@@ -4061,6 +4172,7 @@ class VideoAnnotationTool(QMainWindow):
             return
         self.interpolation_manager.perform_pending_interpolation()
 
+    @log_exceptions
     def update_frame_display(self):
         """Update the frame display with interpolation indicators."""
         # Update indicator if interpolation is active
@@ -4122,6 +4234,7 @@ class VideoAnnotationTool(QMainWindow):
                 else:
                     self.canvas.setStyleSheet("")
 
+    @log_exceptions
     def set_current_frame(self, frame_num):
         """Set the current frame and update display."""
         # Check for pending interpolation before changing frames
@@ -4174,6 +4287,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update frame display with indicators
         self.update_frame_display()
 
+    @log_exceptions
     def update_frame_display(self):
         """Update the frame display with keyframe and interpolation indicators."""
         # Update keyframe indicator if interpolation is active
@@ -4229,6 +4343,8 @@ class VideoAnnotationTool(QMainWindow):
     #
     # Verifying
     #
+
+    @log_exceptions
     def toggle_verification_mode(self):
         """Toggle verification mode for annotations."""
         if not hasattr(self, "verification_mode_enabled"):
@@ -4248,6 +4364,7 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, "verify_mode_action"):
             self.verify_mode_action.setChecked(self.verification_mode_enabled)
 
+    @log_exceptions
     def verify_selected_annotation(self):
         """Mark the selected annotation as verified."""
         if (
@@ -4260,6 +4377,7 @@ class VideoAnnotationTool(QMainWindow):
             self.update_annotation_list()
             self.statusBar.showMessage("Annotation verified", 2000)
 
+    @log_exceptions
     def verify_all_annotations(self):
         """Mark all annotations in the current frame as verified."""
         if self.canvas.annotations:
@@ -4272,6 +4390,7 @@ class VideoAnnotationTool(QMainWindow):
                 f"All {len(self.canvas.annotations)} annotations verified", 2000
             )
 
+    @log_exceptions
     def handle_unverified_annotations(self):
         """Handle unverified annotations when changing frames."""
         if (
@@ -4307,6 +4426,7 @@ class VideoAnnotationTool(QMainWindow):
                     f"Removed {len(unverified)} unverified annotations", 3000
                 )
 
+    @log_exceptions
     def toggle_pan_mode(self):
         """Toggle pan mode for the canvas"""
         enabled = self.pan_tool_action.isChecked()
