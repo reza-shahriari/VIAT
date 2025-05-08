@@ -4275,3 +4275,16 @@ class VideoAnnotationTool(QMainWindow):
                 
                 # Show message
                 self.statusBar.showMessage(f"Removed {len(unverified)} unverified annotations", 3000)
+
+    def toggle_pan_mode(self):
+        """Toggle pan mode for the canvas"""
+        enabled = self.pan_tool_action.isChecked()
+        self.canvas.set_pan_mode(enabled)
+        
+        # Update cursor based on mode
+        if enabled:
+            self.canvas.setCursor(Qt.OpenHandCursor)
+            self.statusBar.showMessage("Pan mode enabled. Left-click and drag to pan the canvas.", 3000)
+        else:
+            self.canvas.setCursor(Qt.ArrowCursor)
+            self.statusBar.showMessage("Pan mode disabled.", 3000)

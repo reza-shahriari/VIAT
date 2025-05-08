@@ -22,6 +22,7 @@ class IconProvider:
             "zoom-in": "fa5s.search-plus",
             "zoom-out": "fa5s.search-minus",
             "zoom-original": "fa5s.expand",
+            "pan-tool": "fa5s.hand-paper",
             # Add more mappings as needed
         }
 
@@ -37,6 +38,7 @@ class IconProvider:
             "zoom-in": "zoom-in.png",
             "zoom-out": "zoom-out.png",
             "zoom-original": "zoom-reset.png",
+            "pan-tool": "hand.png",
         }
 
         # Determine the base path for icons

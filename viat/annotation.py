@@ -694,7 +694,6 @@ class AnnotationManager:
                 attributes[key.strip()] = value.strip()
         return attributes
 
-
 class ClassManager:
     """
     Manages class-related operations including adding, editing, and deleting classes.

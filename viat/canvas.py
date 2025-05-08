@@ -92,9 +92,17 @@ class VideoCanvas(QWidget):
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
-        
+        self.pan_mode_enabled = False
         # Debug flag for showing scores
         self.show_debug_scores = True
+
+    def set_pan_mode(self, enabled):
+        """Enable or disable pan mode"""
+        self.pan_mode_enabled = enabled
+        if enabled:
+            self.setCursor(Qt.OpenHandCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
 
     def set_frame(self, frame):
         """Set the current frame to display"""
@@ -525,7 +533,7 @@ class VideoCanvas(QWidget):
         if not self.pixmap:
             return
         # Check for panning - either middle button 
-        if event.button() == Qt.MiddleButton :
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and self.pan_mode_enabled):
             self.panning = True
             self.pan_start_pos = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
@@ -820,7 +828,7 @@ class VideoCanvas(QWidget):
         if not self.pixmap:
             return
         if self.panning and (event.button() == Qt.MiddleButton or 
-                        (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier)):
+                (event.button() == Qt.LeftButton and self.pan_mode_enabled)):
             self.panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)

@@ -294,7 +294,16 @@ class UICreator:
             self.main_window.change_annotation_method
         )
         self.main_window.toolbar.addWidget(self.main_window.method_selector)
-        
+        # Add pan tool button
+        self.pan_tool_action = QAction("Pan Tool", self.main_window)
+        self.pan_tool_action.setIcon(self.main_window.icon_provider.get_icon("pan-tool"))
+        self.pan_tool_action.setCheckable(True)
+        self.pan_tool_action.setChecked(False)
+        self.pan_tool_action.setToolTip("Enable pan mode (left-click to pan the canvas)")
+        self.pan_tool_action.triggered.connect(self.main_window.toggle_pan_mode)
+        self.main_window.toolbar.addAction(self.pan_tool_action)
+        self.main_window.pan_tool_action = self.pan_tool_action
+       
         # Add verification mode toggle
         self.verify_mode_action = QAction("Atuo Clean Mode", self.main_window)
         self.verify_mode_action.setCheckable(True)
