@@ -256,27 +256,176 @@ class InterpolationManager:
 
         return matched_pairs
 
-    def _calculate_iou(self, rect1, rect2):
+    def perform_interpolation(self, start_frame, end_frame, start_annotations, end_annotations):
         """
-        Calculate Intersection over Union (IOU) between two QRect objects.
-
+        Perform interpolation between two keyframes with conflict resolution.
+        
         Args:
-            rect1: First rectangle
-            rect2: Second rectangle
-
-        Returns:
-            float: IOU value between 0 and 1
+            start_frame: Starting keyframe number
+            end_frame: Ending keyframe number
+            start_annotations: List of annotations in the start frame
+            end_annotations: List of annotations in the end frame
         """
-        intersection = rect1.intersected(rect2)
-        if intersection.isEmpty():
-            return 0
+        # Skip if frames are adjacent
+        if end_frame - start_frame <= 1:
+            return
+            
+        # For each frame between start and end
+        for frame_num in range(start_frame + 1, end_frame):
+            # Skip if frame already has manual annotations
+            if self._has_manual_annotations(frame_num):
+                continue
+                
+            # Get existing annotations (could be detected or previously interpolated)
+            existing_annotations = self._get_frame_annotations(frame_num)
+            
+            # Create interpolated annotations for this frame
+            interpolated_annotations = self._interpolate_annotations(
+                start_frame, end_frame, frame_num, 
+                start_annotations, end_annotations
+            )
+            
+            # Resolve conflicts between existing and interpolated annotations
+            final_annotations = self._resolve_annotation_conflicts(
+                existing_annotations, interpolated_annotations, frame_num
+            )
+            
+            # Update frame with final annotations
+            self.main_window.frame_annotations[frame_num] = final_annotations
+            
+            # If current frame is being displayed, update canvas
+            if self.main_window.current_frame == frame_num:
+                self.main_window.canvas.annotations = final_annotations
+                self.main_window.canvas.update()
+                self.main_window.update_annotation_list()
 
-        intersection_area = intersection.width() * intersection.height()
-        rect1_area = rect1.width() * rect1.height()
-        rect2_area = rect2.width() * rect2.height()
-        union_area = rect1_area + rect2_area - intersection_area
+    def _has_manual_annotations(self, frame_num):
+        """
+        Check if a frame has manual annotations.
+        
+        Args:
+            frame_num: Frame number to check
+            
+        Returns:
+            bool: True if frame has manual annotations
+        """
+        # This would require tracking which annotations are manual
+        # You could add a 'source' attribute to annotations (manual, detected, interpolated)
+        if frame_num not in self.main_window.frame_annotations:
+            return False
+            
+        for annotation in self.main_window.frame_annotations[frame_num]:
+            if hasattr(annotation, 'source') and annotation.source == 'manual':
+                return True
+        return False
 
-        return intersection_area / union_area if union_area > 0 else 0
+    def _get_frame_annotations(self, frame_num):
+        """Get existing annotations for a frame."""
+        if frame_num in self.main_window.frame_annotations:
+            return self.main_window.frame_annotations[frame_num].copy()
+        return []
+
+    def _resolve_annotation_conflicts(self, existing_annotations, interpolated_annotations, frame_num):
+        """
+        Resolve conflicts between existing and interpolated annotations using confidence scores.
+        
+        Args:
+            existing_annotations: List of existing annotations in the frame
+            interpolated_annotations: List of newly interpolated annotations
+            frame_num: Frame number
+            
+        Returns:
+            list: Final list of annotations after conflict resolution
+        """
+        # If no existing annotations, just use interpolated ones
+        if not existing_annotations:
+            return interpolated_annotations
+            
+        # If no interpolated annotations, keep existing ones
+        if not interpolated_annotations:
+            return existing_annotations
+            
+        final_annotations = []
+        used_existing = set()
+        used_interpolated = set()
+        
+        # Compare each pair of existing and interpolated annotations
+        for i, existing in enumerate(existing_annotations):
+            for j, interpolated in enumerate(interpolated_annotations):
+                # Skip if either annotation has already been used
+                if i in used_existing or j in used_interpolated:
+                    continue
+                    
+                # Calculate IoU between annotations
+                iou = self._calculate_iou(existing, interpolated)
+                
+                if iou > 0.5:  # High overlap - potential conflict
+                    # Get confidence scores (default to 0.5 if not present)
+                    existing_conf = getattr(existing, 'confidence', 0.5)
+                    interpolated_conf = getattr(interpolated, 'confidence', 0.5)
+                    
+                    # If existing is manual, always keep it
+                    if getattr(existing, 'source', '') == 'manual':
+                        final_annotations.append(existing)
+                    # If interpolated is manual (unlikely), keep it
+                    elif getattr(interpolated, 'source', '') == 'manual':
+                        final_annotations.append(interpolated)
+                    # Otherwise, use the one with higher confidence
+                    elif existing_conf >= interpolated_conf:
+                        final_annotations.append(existing)
+                    else:
+                        final_annotations.append(interpolated)
+                        
+                    used_existing.add(i)
+                    used_interpolated.add(j)
+        
+        # Add remaining existing annotations that didn't have conflicts
+        for i, annotation in enumerate(existing_annotations):
+            if i not in used_existing:
+                final_annotations.append(annotation)
+                
+        # Add remaining interpolated annotations that didn't have conflicts
+        for j, annotation in enumerate(interpolated_annotations):
+            if j not in used_interpolated:
+                final_annotations.append(annotation)
+                
+        return final_annotations
+
+    def _calculate_iou(self, box1, box2):
+        """
+        Calculate Intersection over Union between two bounding boxes.
+        
+        Args:
+            box1: First annotation
+            box2: Second annotation
+            
+        Returns:
+            float: IoU value between 0 and 1
+        """
+        # Get coordinates of both boxes
+        x1, y1, w1, h1 = box1.rect.x(), box1.rect.y(), box1.rect.width(), box1.rect.height()
+        x2, y2, w2, h2 = box2.rect.x(), box2.rect.y(), box2.rect.width(), box2.rect.height()
+        
+        # Calculate coordinates of intersection
+        x_left = max(x1, x2)
+        y_top = max(y1, y2)
+        x_right = min(x1 + w1, x2 + w2)
+        y_bottom = min(y1 + h1, y2 + h2)
+        
+        # No intersection
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+            
+        # Calculate area of intersection
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        
+        # Calculate area of both boxes
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        
+        # Calculate IoU
+        iou = intersection_area / float(box1_area + box2_area - intersection_area)
+        return iou
 
     def _interpolate_annotation(self, start_ann, end_ann, alpha):
         """
@@ -303,16 +452,31 @@ class InterpolationManager:
         # Create interpolated rectangle
         interpolated_rect = QRect(x, y, width, height)
 
-        # Create new annotation with interpolated rectangle
+        # Calculate confidence score that decreases as we move away from keyframes
+        # The score will be highest at keyframes (alpha=0 or alpha=1) and lowest in the middle (alpha=0.5)
+        # Using a quadratic function: score = 1 - 4 * alpha * (1 - alpha)
+        # This gives score=0.8 at alpha=0 or alpha=1, and score=0.0 at alpha=0.5
+        confidence_score = 0.8 - 3.2 * alpha * (1.0 - alpha)
+        
+        # Get attributes from start annotation
+        interpolated_attributes = self._interpolate_attributes(start_ann.attributes, end_ann.attributes, alpha)
+        
+        # Add confidence score to attributes
+        if interpolated_attributes is None:
+            interpolated_attributes = {}
+
+        # Create new annotation with interpolated rectangle and confidence score
         interpolated_ann = BoundingBox(
             interpolated_rect,
             start_ann.class_name,
-            self._interpolate_attributes(start_ann.attributes, end_ann.attributes, alpha),
+            interpolated_attributes,
             start_ann.color,
-            source='interpolated'
+            source='interpolated',
+            score=confidence_score
         )
 
         return interpolated_ann
+
 
     def _interpolate_attributes(self, start_attrs, end_attrs, alpha):
         """

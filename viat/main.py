@@ -726,6 +726,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def slider_changed(self, value):
         """Handle slider value changes."""
+        # self.handle_unverified_annotations()
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if 0 <= value < len(self.image_files):
                 # Only update if the value actually changed
@@ -752,6 +753,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def prev_frame(self):
         """Go to the previous frame in the video or previous image in the dataset."""
+        self.handle_unverified_annotations()
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame > 0:
                 self.current_frame -= 1
@@ -804,7 +806,7 @@ class VideoAnnotationTool(QMainWindow):
 
     def next_frame(self):
         """Go to the next frame in the video or next image in the dataset."""
-        
+        self.handle_unverified_annotations()
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
                 self.current_frame += 1
@@ -4212,3 +4214,64 @@ class VideoAnnotationTool(QMainWindow):
                     )  # Blue for interpolated frames
                 else:
                     self.canvas.setStyleSheet("")
+
+    #
+    # Verifying
+    #
+    def toggle_verification_mode(self):
+        """Toggle verification mode for annotations."""
+        if not hasattr(self, "verification_mode_enabled"):
+            self.verification_mode_enabled = False
+        
+        self.verification_mode_enabled = not self.verification_mode_enabled
+        
+        if self.verification_mode_enabled:
+            self.statusBar.showMessage("Verification mode enabled - unverified annotations will be deleted when changing frames", 5000)
+        else:
+            self.statusBar.showMessage("Verification mode disabled", 3000)
+        
+        # Update UI to show current mode
+        if hasattr(self, "verify_mode_action"):
+            self.verify_mode_action.setChecked(self.verification_mode_enabled)
+
+    def verify_selected_annotation(self):
+        """Mark the selected annotation as verified."""
+        if hasattr(self.canvas, "selected_annotation") and self.canvas.selected_annotation:
+            self.save_undo_state()
+            self.canvas.selected_annotation.verified = True
+            self.canvas.update()
+            self.update_annotation_list()
+            self.statusBar.showMessage("Annotation verified", 2000)
+
+    def verify_all_annotations(self):
+        """Mark all annotations in the current frame as verified."""
+        if self.canvas.annotations:
+            self.save_undo_state()
+            for annotation in self.canvas.annotations:
+                annotation.verified = True
+            self.canvas.update()
+            self.update_annotation_list()
+            self.statusBar.showMessage(f"All {len(self.canvas.annotations)} annotations verified", 2000)
+
+    def handle_unverified_annotations(self):
+        """Handle unverified annotations when changing frames."""
+        if not hasattr(self, "verification_mode_enabled") or not self.verification_mode_enabled:
+            return
+        
+        # Check if there are any unverified annotations in the current frame
+        if self.current_frame in self.frame_annotations:
+            unverified = [ann for ann in self.frame_annotations[self.current_frame] if not getattr(ann, 'verified', False)]
+            
+            if unverified:
+                # Remove unverified annotations
+                self.frame_annotations[self.current_frame] = [
+                    ann for ann in self.frame_annotations[self.current_frame] 
+                    if getattr(ann, 'verified', False)
+                ]
+                
+                # Update canvas annotations
+                self.canvas.annotations = self.frame_annotations[self.current_frame].copy()
+                self.canvas.update()
+                
+                # Show message
+                self.statusBar.showMessage(f"Removed {len(unverified)} unverified annotations", 3000)

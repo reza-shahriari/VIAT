@@ -294,6 +294,26 @@ class UICreator:
             self.main_window.change_annotation_method
         )
         self.main_window.toolbar.addWidget(self.main_window.method_selector)
+        
+        # Add verification mode toggle
+        self.verify_mode_action = QAction("Atuo Clean Mode", self.main_window)
+        self.verify_mode_action.setCheckable(True)
+        self.verify_mode_action.setChecked(False)
+        self.verify_mode_action.setToolTip("Toggle verification mode (delete unverified annotations when changing frames)")
+        self.verify_mode_action.triggered.connect(self.main_window.toggle_verification_mode)
+        self.main_window.toolbar.addAction(self.verify_mode_action)
+        
+        # Add verify selected button
+        verify_selected_action = QAction("Verify Selected", self.main_window)
+        verify_selected_action.setToolTip("Mark selected annotation as verified")
+        verify_selected_action.triggered.connect(self.main_window.verify_selected_annotation)
+        self.main_window.toolbar.addAction(verify_selected_action)
+        
+        # Add verify all button
+        verify_all_action = QAction("Verify All", self.main_window)
+        verify_all_action.setToolTip("Mark all annotations in current frame as verified")
+        verify_all_action.triggered.connect(self.main_window.verify_all_annotations)
+        self.main_window.toolbar.addAction(verify_all_action)
 
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""

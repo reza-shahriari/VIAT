@@ -538,7 +538,7 @@ class AnnotationManager:
             color = self.canvas.class_colors.get(class_name, QColor(255, 0, 0))
 
             # Create bounding box
-            bbox = BoundingBox(rect, class_name, attributes, color)
+            bbox = BoundingBox(rect, class_name, attributes, color,source='manual')
 
             # Add to annotations
             self.canvas.annotations.append(bbox)
