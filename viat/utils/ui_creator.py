@@ -6,29 +6,38 @@ Video Image Annotation Tool, including menus, toolbars, and controls.
 """
 
 from PyQt5.QtWidgets import (
-    QAction, QActionGroup, QLabel, QComboBox, QWidget, 
-    QHBoxLayout, QPushButton, QSlider, QStatusBar
+    QAction,
+    QActionGroup,
+    QLabel,
+    QComboBox,
+    QWidget,
+    QHBoxLayout,
+    QPushButton,
+    QSlider,
+    QStatusBar,
+    QSpinBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
 import sys
 import os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
 
 
 class UICreator:
     """Class responsible for creating UI elements for the VIAT application."""
-    
+
     def __init__(self, main_window):
         """
         Initialize the UI creator with a reference to the main window.
-        
+
         Args:
             main_window: The main application window
         """
         self.main_window = main_window
-        
+
     def create_menu_bar(self):
         """Create the application menu bar and its actions."""
         menubar = self.main_window.menuBar()
@@ -85,7 +94,6 @@ class UICreator:
         load_action.setShortcut("Ctrl+L")
         load_action.triggered.connect(self.main_window.load_project)
         file_menu.addAction(load_action)
-        
 
         # Recent Projects submenu
         self.main_window.recent_projects_menu = file_menu.addMenu("Recent Projects")
@@ -94,7 +102,9 @@ class UICreator:
         # Import Annotations action
         import_action = QAction("Import Annotations", self.main_window)
         import_action.setShortcut("Ctrl+I")
-        import_action.triggered.connect(lambda: self.main_window.import_annotations(None))
+        import_action.triggered.connect(
+            lambda: self.main_window.import_annotations(None)
+        )
         file_menu.addAction(import_action)
 
         # Export Annotations action
@@ -177,8 +187,9 @@ class UICreator:
         tools_menu.addAction(track_action)
 
         # Smart Edge Movement action
-        smart_edge_action = QAction("Smart Edge Movement", self.main_window, checkable=True)
-        smart_edge_action.setShortcut("Ctrl+E")
+        smart_edge_action = QAction(
+            "Smart Edge Movement", self.main_window, checkable=True
+        )
         smart_edge_action.triggered.connect(self.main_window.toggle_smart_edge)
         tools_menu.addAction(smart_edge_action)
 
@@ -264,7 +275,9 @@ class UICreator:
 
     def create_toolbar(self):
         """Create the annotation toolbar."""
-        self.main_window.toolbar = AnnotationToolbar(self.main_window, self.main_window.icon_provider)
+        self.main_window.toolbar = AnnotationToolbar(
+            self.main_window, self.main_window.icon_provider
+        )
         self.main_window.addToolBar(self.main_window.toolbar)
         self.main_window.class_selector = self.main_window.toolbar.class_selector
 
@@ -277,18 +290,24 @@ class UICreator:
         self.main_window.method_selector.setToolTip(
             "Drag: Click and drag to create box\nTwoClick: Click two corners to create box"
         )
-        self.main_window.method_selector.currentTextChanged.connect(self.main_window.change_annotation_method)
+        self.main_window.method_selector.currentTextChanged.connect(
+            self.main_window.change_annotation_method
+        )
         self.main_window.toolbar.addWidget(self.main_window.method_selector)
 
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
         # Annotation dock
         self.main_window.annotation_dock = AnnotationDock(self.main_window)
-        self.main_window.addDockWidget(Qt.RightDockWidgetArea, self.main_window.annotation_dock)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.annotation_dock
+        )
 
         # Class dock
         self.main_window.class_dock = ClassDock(self.main_window)
-        self.main_window.addDockWidget(Qt.RightDockWidgetArea, self.main_window.class_dock)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.class_dock
+        )
 
     def create_status_bar(self):
         """Create the status bar."""
@@ -305,7 +324,9 @@ class UICreator:
 
         # Play/Pause button
         self.main_window.play_button = QPushButton()
-        self.main_window.play_button.setIcon(self.main_window.icon_provider.get_icon("media-playback-start"))
+        self.main_window.play_button.setIcon(
+            self.main_window.icon_provider.get_icon("media-playback-start")
+        )
         self.main_window.play_button.setToolTip("Play/Pause")
         self.main_window.play_button.clicked.connect(self.main_window.play_pause_video)
         self.main_window.play_button.setMaximumWidth(30)  # Make button smaller
@@ -313,7 +334,9 @@ class UICreator:
 
         # Previous frame button
         prev_button = QPushButton()
-        prev_button.setIcon(self.main_window.icon_provider.get_icon("media-skip-backward"))
+        prev_button.setIcon(
+            self.main_window.icon_provider.get_icon("media-skip-backward")
+        )
         prev_button.setToolTip("Previous Frame")
         prev_button.clicked.connect(self.main_window.prev_frame)
         prev_button.setMaximumWidth(30)  # Make button smaller
@@ -321,7 +344,9 @@ class UICreator:
 
         # Next frame button
         next_button = QPushButton()
-        next_button.setIcon(self.main_window.icon_provider.get_icon("media-skip-forward"))
+        next_button.setIcon(
+            self.main_window.icon_provider.get_icon("media-skip-forward")
+        )
         next_button.setToolTip("Next Frame")
         next_button.clicked.connect(self.main_window.next_frame)
         next_button.setMaximumWidth(30)  # Make button smaller
@@ -330,8 +355,12 @@ class UICreator:
         # Frame slider
         self.main_window.frame_slider = QSlider(Qt.Horizontal)
         self.main_window.frame_slider.setMinimum(0)
-        self.main_window.frame_slider.setMaximum(100)  # Will be updated when video is loaded
-        self.main_window.frame_slider.valueChanged.connect(self.main_window.slider_changed)
+        self.main_window.frame_slider.setMaximum(
+            100
+        )  # Will be updated when video is loaded
+        self.main_window.frame_slider.valueChanged.connect(
+            self.main_window.slider_changed
+        )
         self.main_window.frame_slider.setMaximumHeight(20)  # Make slider smaller
 
         # Frame counter label
@@ -395,18 +424,22 @@ class UICreator:
 
         # Annotation attribute settings
         attr_dialog_action = QAction(
-            "Show Attribute Dialog for New Annotations", self.main_window, checkable=True
+            "Show Attribute Dialog for New Annotations",
+            self.main_window,
+            checkable=True,
         )
         attr_dialog_action.setChecked(self.main_window.auto_show_attribute_dialog)
         attr_dialog_action.triggered.connect(self.main_window.toggle_attribute_dialog)
         attr_dialog_action.setToolTip(
             "Automatically show the attribute dialog when creating a new annotation "
         )
-        
+
         menubar.addAction(attr_dialog_action)
 
         prev_attr_action = QAction(
-            "Use Previous Annotation Attributes as Default", self.main_window, checkable=True
+            "Use Previous Annotation Attributes as Default",
+            self.main_window,
+            checkable=True,
         )
         prev_attr_action.setChecked(self.main_window.use_previous_attributes)
         prev_attr_action.triggered.connect(self.main_window.toggle_previous_attributes)
@@ -438,3 +471,76 @@ class UICreator:
             )
             speed_group.addAction(action)
             slideshow_menu.addAction(action)
+
+    def create_interpolation_ui(self,):
+        """
+        Create UI elements for interpolation feature.
+        
+        Args:
+            main_window: The main application window
+        """
+        # Create Interpolation menu
+        interpolation_menu = self.main_window.menuBar().addMenu("&Interpolation")
+        
+        # Toggle interpolation mode
+        toggle_interpolation_action = QAction("Enable Interpolation Mode", self.main_window)
+        toggle_interpolation_action.setCheckable(True)
+        toggle_interpolation_action.setChecked(False)
+        toggle_interpolation_action.triggered.connect(self.main_window.toggle_interpolation_mode)
+        interpolation_menu.addAction(toggle_interpolation_action)
+        self.main_window.toggle_interpolation_action = toggle_interpolation_action
+        
+        # Set interpolation interval
+        set_interval_action = QAction("Set Keyframe Interval...", self.main_window)
+        set_interval_action.triggered.connect(self.main_window.set_interpolation_interval)
+        interpolation_menu.addAction(set_interval_action)
+        
+        interpolation_menu.addSeparator()
+        
+        # Perform interpolation
+        interpolate_action = QAction("Interpolate Now", self.main_window)
+        interpolate_action.triggered.connect(self.main_window.perform_interpolation)
+        interpolate_action.setShortcut("Ctrl+I")
+        interpolation_menu.addAction(interpolate_action)
+        
+        # Add to toolbar
+        interpolation_toolbar = self.main_window.addToolBar("Interpolation")
+        interpolation_toolbar.setObjectName("interpolationToolbar")
+        
+        # Add keyframe indicator to toolbar
+        keyframe_indicator = QLabel("  ")
+        keyframe_indicator.setStyleSheet("background-color: transparent; min-width: 16px;")
+        keyframe_indicator.setToolTip("Annotation indicator")
+        self.main_window.keyframe_indicator = keyframe_indicator
+        interpolation_toolbar.addWidget(keyframe_indicator)
+        
+        # Add toggle button to toolbar
+        toggle_interpolation_button = QPushButton("Interpolation")
+        toggle_interpolation_button.setCheckable(True)
+        toggle_interpolation_button.setChecked(False)
+        toggle_interpolation_button.clicked.connect(self.main_window.toggle_interpolation_mode)
+        interpolation_toolbar.addWidget(toggle_interpolation_button)
+        
+        # Add interval selector
+        interval_label = QLabel("Interval:")
+        interpolation_toolbar.addWidget(interval_label)
+        
+        interval_spinner = QSpinBox()
+        interval_spinner.setRange(2, 100)
+        interval_spinner.setValue(5)  # Default interval
+        interval_spinner.valueChanged.connect(lambda v: self.main_window.interpolation_manager.set_interval(v))
+        self.main_window.interval_spinner = interval_spinner
+        interpolation_toolbar.addWidget(interval_spinner)
+        
+        # Add interpolate button
+        interpolate_button = QPushButton("Interpolate Now")
+        interpolate_button.clicked.connect(self.main_window.perform_interpolation)
+        interpolation_toolbar.addWidget(interpolate_button)
+        
+        # Make toolbar movable and floatable
+        interpolation_toolbar.setMovable(True)
+        interpolation_toolbar.setFloatable(True)
+        
+        # Initially hide the toolbar until interpolation mode is activated
+        interpolation_toolbar.setVisible(False)
+        self.main_window.interpolation_toolbar = interpolation_toolbar

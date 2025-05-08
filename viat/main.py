@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .canvas import VideoCanvas
 from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
+from .interpolation import InterpolationManager
 from utils.dataset_manager import import_dataset_dialog, load_dataset
 from utils.dataset_manager import export_dataset_dialog, export_dataset
 
@@ -102,6 +103,7 @@ class VideoAnnotationTool(QMainWindow):
         self.setup_autosave()
 
         self.init_managers()
+        self.ui_creator.create_interpolation_ui()
         # Install event filter to handle global shortcuts
         QApplication.instance().installEventFilter(self)
 
@@ -111,7 +113,7 @@ class VideoAnnotationTool(QMainWindow):
     def init_managers(self):
         self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
-
+        self.interpolation_manager = InterpolationManager(self)
     def load_last_project(self):
         """Load the last project that was open."""
         # Try to load from application state first
@@ -754,23 +756,36 @@ class VideoAnnotationTool(QMainWindow):
                 self.frame_slider.setValue(self.current_frame)
                 self.load_current_image()
                 self.update_frame_info()
-        elif self.cap and self.cap.isOpened():
+        else:
             
-            # Go back one frame
-            if self.current_frame > 1:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame - 2)
-                ret, frame = self.cap.read()
-                if ret:
-                    self.current_frame = self.current_frame - 1
-                    self.frame_slider.setValue(self.current_frame)
-                    self.canvas.set_frame(frame)
-                    self.update_frame_info()
-
-                    # Load annotations for the new frame
-                    self.load_current_frame_annotations()
+            if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+                # If current frame is a keyframe, go to previous frame as normal
+                if self.interpolation_manager.is_keyframe():
+                    prev_frame = self.current_frame - 1
+                else:
+                    # If not on a keyframe, go to previous keyframe
+                    prev_keyframe = self.interpolation_manager.get_prev_keyframe()
+                    if prev_keyframe is not None:
+                        prev_frame = prev_keyframe
+                    else:
+                        
+                        prev_frame = max(0,self.current_frame-1)
+            elif self.cap and self.cap.isOpened():
+                prev_frame = max(0,self.current_frame-1)
+                
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, prev_frame)
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame = prev_frame
+                self.frame_slider.setValue(self.current_frame)
+                self.canvas.set_frame(frame)
+                self.update_frame_info()
+                # Load annotations for the new frame
+                self.load_current_frame_annotations()
 
     def next_frame(self):
         """Go to the next frame in the video or next image in the dataset."""
+        
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
                 self.current_frame += 1
@@ -791,28 +806,43 @@ class VideoAnnotationTool(QMainWindow):
                 else:
                     # Just show message if not playing
                     self.statusBar.showMessage("End of image dataset")
-        elif self.cap and self.cap.isOpened():
-            # Calculate the next frame number explicitly
-            next_frame_number = self.current_frame + 1
-            
-            # Check if we've reached the end of the video
-            if next_frame_number >= self.total_frames:
-                # End of video
-                self.play_timer.stop()
-                self.is_playing = False
-                self.statusBar.showMessage("End of video")
-                # Rewind to beginning
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                self.current_frame = 0
-                # Update slider position first
-                self.frame_slider.setValue(self.current_frame)
-                ret, frame = self.cap.read()
-                if ret:
-                    self.canvas.set_frame(frame)
-                    self.update_frame_info()
-                    self.load_current_frame_annotations()
-                return
+        else:
+            if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+                # If current frame is a keyframe, go to next frame as normal
+                if self.interpolation_manager.is_keyframe():
+                    next_frame_number = self.current_frame + 1
+                else:
+                    # If not on a keyframe, go to next keyframe or suggested keyframe
+                    next_keyframe = self.interpolation_manager.get_next_keyframe()
+                    if next_keyframe is not None:
+                        next_frame_number = next_keyframe
+                    else:
+                        # If no next keyframe exists, suggest one based on interval
+                        next_frame_number = self.interpolation_manager.suggest_next_keyframe()
+                        if next_frame_number is None:  # Fallback
+                            next_frame_number = self.current_frame + 1
+            elif self.cap and self.cap.isOpened():
+                # Calculate the next frame number explicitly
+                next_frame_number = self.current_frame + 1
                 
+                # Check if we've reached the end of the video
+                if next_frame_number >= self.total_frames:
+                    # End of video
+                    self.play_timer.stop()
+                    self.is_playing = False
+                    self.statusBar.showMessage("End of video")
+                    # Rewind to beginning
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.current_frame = 0
+                    # Update slider position first
+                    self.frame_slider.setValue(self.current_frame)
+                    ret, frame = self.cap.read()
+                    if ret:
+                        self.canvas.set_frame(frame)
+                        self.update_frame_info()
+                        self.load_current_frame_annotations()
+                    return
+        
             # Explicitly set the frame position instead of just reading the next frame
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, next_frame_number)
             ret, frame = self.cap.read()
@@ -1500,8 +1530,33 @@ class VideoAnnotationTool(QMainWindow):
         self.annotation_manager.add_empty_annotation()
 
     def update_annotation_list(self):
-        """Update the annotation list in the UI."""
+        """Update the annotation list in the UI and handle interpolation."""
+        
         self.annotation_manager.update_annotation_list()
+
+        # Save current annotations to frame_annotations
+        self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
+        
+        # Check if we're in interpolation mode and should trigger the workflow
+        if (hasattr(self, 'interpolation_manager') and 
+            self.interpolation_manager.is_active and 
+            len(self.canvas.annotations) > 0):
+            
+            # Notify the interpolation manager that this frame has been annotated
+            self.interpolation_manager.on_frame_annotated(self.current_frame)
+        
+        # Handle duplicate frames if enabled
+        if (self.duplicate_frames_enabled and 
+            self.current_frame in self.frame_hashes):
+            current_hash = self.frame_hashes[self.current_frame]
+            if (current_hash in self.duplicate_frames_cache and 
+                len(self.duplicate_frames_cache[current_hash]) > 1):
+                # Propagate current frame annotations to all duplicates
+                self.propagate_to_duplicate_frames(current_hash)
+
+        # Perform autosave if enabled
+        self.perform_autosave()
+
 
     def update_annotation_attributes(self, annotation, class_attributes):
         """
@@ -1679,13 +1734,6 @@ class VideoAnnotationTool(QMainWindow):
         elif event.key() == Qt.Key_B:
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.batch_edit_annotations()
-        # Toggle smart edge with 'E' key
-        elif event.key() == Qt.Key_E:
-            if hasattr(self, "smart_edge_action"):
-                self.smart_edge_action.setChecked(
-                    not self.smart_edge_action.isChecked()
-                )
-                self.toggle_smart_edge()
 
         # Propagate annotations with 'P' key
         elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
@@ -3648,8 +3696,6 @@ class VideoAnnotationTool(QMainWindow):
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
 
-
-
     def undo(self):
         """Undo the last annotation or class change."""
         if not self.undo_stack:
@@ -3858,3 +3904,183 @@ class VideoAnnotationTool(QMainWindow):
             
             self.statusBar.showMessage("Redo successful", 3000)
 
+    #
+    # Interpolation methods
+    #
+    # Add these methods to the VideoAnnotationTool class
+
+# Add these methods to the VideoAnnotationTool class
+
+    def toggle_interpolation_mode(self):
+        """Toggle interpolation mode on/off."""
+        is_active = self.toggle_interpolation_action.isChecked()
+        self.interpolation_manager.set_active(is_active)
+        
+        # Show/hide the interpolation toolbar
+        if hasattr(self, 'interpolation_toolbar'):
+            self.interpolation_toolbar.setVisible(is_active)
+        
+        # Update UI
+        self.update_frame_display()
+
+    def set_interpolation_interval(self):
+        """Open dialog to set interpolation interval."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Keyframe Interval")
+        
+        layout = QVBoxLayout(dialog)
+        
+        form_layout = QFormLayout()
+        interval_spinner = QSpinBox()
+        interval_spinner.setRange(2, 100)
+        interval_spinner.setValue(self.interpolation_manager.interval)
+        form_layout.addRow("Frames between keyframes:", interval_spinner)
+        
+        layout.addLayout(form_layout)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            new_interval = interval_spinner.value()
+            self.interpolation_manager.set_interval(new_interval)
+            
+            # Update spinner in toolbar if it exists
+            if hasattr(self, 'interval_spinner'):
+                self.interval_spinner.setValue(new_interval)
+
+    def perform_interpolation(self):
+        """Manually trigger interpolation between annotated frames."""
+        if not self.interpolation_manager.is_active:
+            QMessageBox.warning(self, "Interpolation", "Interpolation mode is not active.")
+            return
+        
+        # Try to perform any pending interpolation
+        success = self.interpolation_manager.perform_pending_interpolation()
+        
+        if not success:
+            QMessageBox.information(
+                self, 
+                "Interpolation", 
+                "No pending interpolation. Annotate two frames to enable interpolation."
+            )
+
+    def update_frame_display(self):
+        """Update the frame display with interpolation indicators."""
+        # Update indicator if interpolation is active
+        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+            # Check if this frame has annotations
+            has_annotations = (
+                self.current_frame in self.frame_annotations and 
+                len(self.frame_annotations[self.current_frame]) > 0
+            )
+            
+            # Update indicator in toolbar
+            if hasattr(self, 'keyframe_indicator'):
+                if has_annotations:
+                    # This is an annotated frame (either manually or interpolated)
+                    if self.current_frame == self.interpolation_manager.last_annotated_frame:
+                        # This is the last manually annotated frame
+                        self.keyframe_indicator.setStyleSheet("background-color: #FF5555; min-width: 16px;")
+                        self.keyframe_indicator.setToolTip("Current frame is manually annotated")
+                    else:
+                        # This is an interpolated frame or another manually annotated frame
+                        self.keyframe_indicator.setStyleSheet("background-color: #55AAFF; min-width: 16px;")
+                        self.keyframe_indicator.setToolTip("Current frame has annotations")
+                else:
+                    self.keyframe_indicator.setStyleSheet("background-color: transparent; min-width: 16px;")
+                    self.keyframe_indicator.setToolTip("Current frame has no annotations")
+            
+            # Add visual indicator to frame display
+            if hasattr(self, 'canvas'):
+                if has_annotations:
+                    if self.current_frame == self.interpolation_manager.last_annotated_frame:
+                        self.canvas.setStyleSheet("border: 2px solid #FF5555;")  # Red for manually annotated
+                    else:
+                        self.canvas.setStyleSheet("border: 2px solid #55AAFF;")  # Blue for other annotations
+                else:
+                    self.canvas.setStyleSheet("")
+
+    # Override the set_current_frame method to check for pending interpolation
+    def set_current_frame(self, frame_num):
+        """Set the current frame and update display."""
+        # Check for pending interpolation before changing frames
+        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+            self.interpolation_manager.check_pending_interpolation(frame_num)
+        
+        # Original implementation for setting the current frame
+        if not self.cap:
+            return
+
+        # Ensure frame_num is within valid range
+        frame_num = max(0, min(frame_num, self.total_frames - 1))
+        
+        # Set the frame position
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = self.cap.read()
+        
+        if not ret:
+            return
+        
+        # Update current frame
+        self.current_frame = frame_num
+        
+        # Display the frame
+        self.display_frame(frame)
+        
+        # Update timeline slider
+        if hasattr(self, 'timeline_slider'):
+            self.timeline_slider.setValue(frame_num)
+        
+        # Update frame counter
+        if hasattr(self, 'frame_counter'):
+            self.frame_counter.setText(f"Frame: {frame_num}/{self.total_frames-1}")
+        
+        # Load annotations for this frame if they exist
+        if frame_num in self.frame_annotations:
+            self.canvas.annotations = self.frame_annotations[frame_num].copy()
+        else:
+            self.canvas.annotations = []
+        
+        # Update annotation list
+        self.update_annotation_list()
+        
+        # Update frame display with indicators
+        self.update_frame_display()
+
+
+    def update_frame_display(self):
+        """Update the frame display with keyframe and interpolation indicators."""
+        # Update keyframe indicator if interpolation is active
+        if hasattr(self, 'interpolation_manager') and self.interpolation_manager.is_active:
+            is_keyframe = self.interpolation_manager.is_keyframe()
+            
+            # Update indicator in toolbar
+            if hasattr(self, 'keyframe_indicator'):
+                if is_keyframe:
+                    self.keyframe_indicator.setStyleSheet("background-color: #FF5555; min-width: 16px;")
+                    self.keyframe_indicator.setToolTip("Current frame is a keyframe")
+                else:
+                    # Check if this is an interpolated frame
+                    is_interpolated = (
+                        self.current_frame in self.frame_annotations and 
+                        len(self.frame_annotations[self.current_frame]) > 0
+                    )
+                    
+                    if is_interpolated:
+                        self.keyframe_indicator.setStyleSheet("background-color: #55AAFF; min-width: 16px;")
+                        self.keyframe_indicator.setToolTip("Current frame has interpolated annotations")
+                    else:
+                        self.keyframe_indicator.setStyleSheet("background-color: transparent; min-width: 16px;")
+                        self.keyframe_indicator.setToolTip("Current frame is not a keyframe")
+            
+            # Add visual indicator to frame display
+            if hasattr(self, 'canvas'):
+                if is_keyframe:
+                    self.canvas.setStyleSheet("border: 2px solid #FF5555;")
+                elif self.current_frame in self.frame_annotations and len(self.frame_annotations[self.current_frame]) > 0:
+                    self.canvas.setStyleSheet("border: 2px solid #55AAFF;")  # Blue for interpolated frames
+                else:
+                    self.canvas.setStyleSheet("")
