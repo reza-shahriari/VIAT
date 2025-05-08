@@ -42,7 +42,8 @@ class BoundingBox:
         self.attributes = attributes or {}
         self.color = color
         self.source = source
-        self.verified = source == "manual"  
+        self.original_source = source  # Unchangeable record of how it was first created
+        self.verified = source == "manual"  # Auto-verify manual annotations
 
     def to_dict(self):
         """Convert to a dictionary for serialization"""
@@ -67,6 +68,7 @@ class BoundingBox:
                 else None
             ),
             "source": self.source,
+            "original_source": self.original_source,
             "verified": self.verified
         }
 
@@ -99,6 +101,7 @@ class BoundingBox:
         source = data.get("source", "manual")
         bbox = cls(rect, class_name, attributes, color, source)
         bbox.verified = data.get("verified", source == "manual")
+        bbox.original_source = data.get("original_source", source)
         return bbox
 
     def copy(self):
@@ -125,8 +128,13 @@ class BoundingBox:
         # Return a new BoundingBox with the copied properties
         bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source)
         bbox.verified = self.verified
+        bbox.original_source = self.original_source
         return bbox
-
+        
+    def verify(self):
+        """Mark the annotation as verified and update source to manual"""
+        self.verified = True
+        self.source = "manual"  
 
 class AnnotationManager:
     """
@@ -251,6 +259,18 @@ class AnnotationManager:
 
         layout.addLayout(form_layout)
 
+        # Add verification checkbox for machine-generated annotations
+        verification_checkbox = None
+        if hasattr(annotation, 'source') and annotation.source != "manual" and not annotation.verified:
+            verification_checkbox = QCheckBox("Verify this annotation (mark as manually confirmed)")
+            verification_checkbox.setChecked(True)  # Default to verified when editing
+            layout.addWidget(verification_checkbox)
+            
+            # Add source information
+            source_label = QLabel(f"Source: {annotation.source} (originally {annotation.original_source})")
+            source_label.setStyleSheet("color: #888888;")
+            layout.addWidget(source_label)
+
         # Add OK and Cancel buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
@@ -311,6 +331,16 @@ class AnnotationManager:
                         annotation.attributes[attr_name] = widget.value()
                     else:  # String or other
                         annotation.attributes[attr_name] = widget.text()
+
+            # Handle verification if applicable
+            if verification_checkbox and verification_checkbox.isChecked():
+                annotation.verify()
+                # Show confirmation in status bar
+                if hasattr(self.main_window, "statusBar"):
+                    self.main_window.statusBar.showMessage(
+                        f"Annotation verified and marked as manual (originally {annotation.original_source})", 
+                        3000
+                    )
 
             # Update canvas and mark project as modified
             self.canvas.update()

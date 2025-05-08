@@ -885,7 +885,7 @@ class VideoCanvas(QWidget):
         if not self.pixmap:
             return
         if self.panning and (event.button() == Qt.MiddleButton or 
-                         (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier)):
+                        (event.button() == Qt.LeftButton and event.modifiers() & Qt.ControlModifier)):
             self.panning = False
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
@@ -895,6 +895,21 @@ class VideoCanvas(QWidget):
             if self.edge_moving:
                 self.edge_moving = False
                 self.active_edge = EDGE_NONE
+                
+                # Check if the annotation was actually modified by comparing with original_rect
+                if (self.selected_annotation and self.original_rect and 
+                    (self.selected_annotation.rect != self.original_rect) and
+                    hasattr(self.selected_annotation, 'source') and 
+                    self.selected_annotation.source != "manual"):
+                    # The annotation was modified, so verify it
+                    if hasattr(self.selected_annotation, 'verify'):
+                        self.selected_annotation.verify()
+                        if self.main_window and hasattr(self.main_window, "statusBar"):
+                            self.main_window.statusBar.showMessage(
+                                f"Annotation verified and marked as manual (originally {self.selected_annotation.original_source})", 
+                                3000
+                            )
+                
                 self.edge_start_pos = None
 
                 # Update the annotation list in the main window
@@ -909,6 +924,20 @@ class VideoCanvas(QWidget):
 
             # If we were dragging an annotation
             if self.drag_start_pos and self.selected_annotation and not self.is_drawing:
+                # Check if the annotation was actually moved by comparing with original_rect
+                if (self.original_rect and 
+                    (self.selected_annotation.rect != self.original_rect) and
+                    hasattr(self.selected_annotation, 'source') and 
+                    self.selected_annotation.source != "manual"):
+                    # The annotation was moved, so verify it
+                    if hasattr(self.selected_annotation, 'verify'):
+                        self.selected_annotation.verify()
+                        if self.main_window and hasattr(self.main_window, "statusBar"):
+                            self.main_window.statusBar.showMessage(
+                                f"Annotation verified and marked as manual (originally {self.selected_annotation.original_source})", 
+                                3000
+                            )
+                
                 self.drag_start_pos = None
                 self.original_rect = None
 
@@ -952,16 +981,19 @@ class VideoCanvas(QWidget):
                         if prev_attributes:
                             default_attributes = prev_attributes
 
+                    # Create new annotation with source="manual" since it's user-drawn
                     bbox = BoundingBox(
-                        rect, self.current_class, default_attributes, color
+                        rect, self.current_class, default_attributes, color, source="manual"
                     )
+                    if hasattr(bbox, 'verify'):
+                        bbox.verify()  # Ensure it's marked as verified
 
                     # Add to annotations list
                     self.annotations.append(bbox)
                     self.selected_annotation = bbox
                     if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                         self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
-          
+        
                     # Show attribute dialog if enabled
                     if (
                         self.main_window
@@ -1003,7 +1035,7 @@ class VideoCanvas(QWidget):
             self.selected_annotation = annotation
             if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                 self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
-          
+        
             self.update()
 
             # Create context menu
@@ -1012,6 +1044,12 @@ class VideoCanvas(QWidget):
             # Add actions
             edit_action = context_menu.addAction("Edit Annotation")
             delete_action = context_menu.addAction("Delete Annotation")
+            
+            # Add verification option for machine-generated annotations
+            verify_action = None
+            if hasattr(annotation, 'source') and annotation.source != "manual" and not annotation.verified:
+                verify_action = context_menu.addAction("Verify Annotation")
+            
             change_class_menu = context_menu.addMenu("Change Class")
 
             # Add class options to submenu
@@ -1032,6 +1070,9 @@ class VideoCanvas(QWidget):
                     # Call the delete annotation method in the main window
                     if self.main_window:
                         self.main_window.delete_selected_annotation()
+                elif verify_action and action == verify_action:
+                    # Verify the annotation
+                    self.verify_annotation(self.selected_annotation)
                 elif action.parent() == change_class_menu:
                     # Change the class of the annotation
                     new_class = action.data()
@@ -1200,4 +1241,28 @@ class VideoCanvas(QWidget):
         """Reset the pan offset to center the image"""
         self.pan_offset = QPoint(0, 0)
         self.update()
-    
+   
+    def verify_annotation(self, annotation):
+        """Verify a machine-generated annotation and mark it as manual"""
+        if annotation and hasattr(annotation, 'verified'):
+            # Mark as verified and change source to manual
+            annotation.verify()
+            
+            # Update the canvas
+            self.update()
+            
+            # Update the annotation list in the main window
+            if self.main_window:
+                self.main_window.update_annotation_list()
+                # Save annotations to current frame
+                if hasattr(self.main_window, "frame_annotations"):
+                    self.main_window.frame_annotations[self.main_window.current_frame] = (
+                        self.annotations.copy()
+                    )
+                
+                # Show confirmation in status bar
+                if hasattr(self.main_window, "statusBar"):
+                    self.main_window.statusBar.showMessage(
+                        f"Annotation verified and marked as manual (originally {annotation.original_source})", 
+                        3000
+                    )
