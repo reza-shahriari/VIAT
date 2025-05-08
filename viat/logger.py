@@ -86,7 +86,9 @@ def log_exceptions(func):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logger = VIATLogger()
-            logger.log_error(e, func.__name__)
+            # Log the exception
+            logger = logging.getLogger(__name__)
+            logger.exception(f"Exception in {func.__name__}: {str(e)}")
+            # You can add additional error handling here if needed
             raise  # Re-raise the exception after logging
     return wrapper
