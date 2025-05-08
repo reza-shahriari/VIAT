@@ -51,7 +51,7 @@ from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions
 
-# Initialize logger early
+
 logger = VIATLogger()
 
 

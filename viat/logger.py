@@ -1,94 +1,85 @@
 """
-Logger module for VIAT application.
-
-Provides logging functionality to record application events and crashes.
+Logging utilities for the Video Annotation Tool.
 """
 
 import os
 import sys
 import logging
 import traceback
-from datetime import datetime
 from functools import wraps
+from datetime import datetime
+
+# Create logs directory if it doesn't exist
+logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+os.makedirs(logs_dir, exist_ok=True)
+
+# Configure the logger
+log_file = os.path.join(logs_dir, f'viat_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+
+# Set up basic logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 class VIATLogger:
-    _instance = None
+    """Logger class for the Video Annotation Tool."""
     
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(VIATLogger, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-    
-    def __init__(self, log_dir=None):
-        if self._initialized:
-            return
-            
+    def __init__(self):
         self.logger = logging.getLogger('VIAT')
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Create formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
-        # Determine log directory
-        if log_dir is None:
-            # Use the current directory as fallback
-            self.log_dir = os.path.dirname(os.path.abspath(__file__))
-        else:
-            self.log_dir = log_dir
-            
-        # Ensure log directory exists
-        os.makedirs(self.log_dir, exist_ok=True)
-        
-        # Create log file
-        self.log_file = os.path.join(self.log_dir, 'viat_errors.log')
-        
-        # Create file handler
-        file_handler = logging.FileHandler(self.log_file)
-        file_handler.setLevel(logging.ERROR)  # Only log errors and above
-        file_handler.setFormatter(formatter)
-        
-        # Add handler to logger
-        self.logger.addHandler(file_handler)
-        
-        # Set up global exception handler
-        self.setup_exception_handler()
-        
-        self._initialized = True
-        
-    def setup_exception_handler(self):
-        """Set up global exception handler to catch unhandled exceptions."""
-        def exception_hook(exctype, value, tb):
-            # Log the exception
-            exception_str = ''.join(traceback.format_exception(exctype, value, tb))
-            self.logger.critical(f"UNHANDLED EXCEPTION: {exception_str}")
-            # Call the original exception hook
-            sys.__excepthook__(exctype, value, tb)
-        
-        # Set the exception hook
-        sys.excepthook = exception_hook
+        print('Logging into: ',logs_dir)    
+    def info(self, message):
+        """Log an info message."""
+        self.logger.info(message)
     
-    def log_error(self, error, context=""):
-        """Log an error with context information."""
-        if isinstance(error, Exception):
-            tb_str = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-            self.logger.error(f"ERROR in {context}: {str(error)}\n{tb_str}")
-        else:
-            self.logger.error(f"ERROR in {context}: {str(error)}")
+    def warning(self, message):
+        """Log a warning message."""
+        self.logger.warning(message)
+    
+    def error(self, message):
+        """Log an error message."""
+        self.logger.error(message)
+    
+    def exception(self, message):
+        """Log an exception with traceback."""
+        self.logger.exception(message)
 
-# Create a decorator for logging exceptions in functions
+# Create a simpler decorator that won't break function calls
 def log_exceptions(func):
+    """
+    A decorator that logs exceptions raised by the decorated function.
+    This version handles both regular functions and class methods properly.
+    """
     @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except TypeError as e:
+            # Check if this is a "takes X positional arguments but Y were given" error
+            error_msg = str(e)
+            if "positional argument" in error_msg and "were given" in error_msg:
+                # Try to call with just the first argument (self) if it's a method
+                if len(args) > 0:
+                    try:
+                        return func(args[0])
+                    except Exception as inner_e:
+                        logger = logging.getLogger('VIAT')
+                        logger.error(f"Exception in {func.__name__}: {str(inner_e)}")
+                        logger.error(traceback.format_exc())
+                        raise
+            # If not a positional argument error or the retry failed, log and re-raise
+            logger = logging.getLogger('VIAT')
+            logger.error(f"Exception in {func.__name__}: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
         except Exception as e:
-            # Log the exception
-            logger = logging.getLogger(__name__)
-            logger.exception(f"Exception in {func.__name__}: {str(e)}")
-            # You can add additional error handling here if needed
-            raise  # Re-raise the exception after logging
+            logger = logging.getLogger('VIAT')
+            logger.error(f"Exception in {func.__name__}: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Re-raise the exception to maintain original behavior
+            raise
     return wrapper
