@@ -6,7 +6,7 @@ dependencies:
   - python=3.9
   - pip:
       - pyqt5==5.12.3
-      - opencv==4.11.0.*
+      - opencv-python==4.11.0.*
       - pyinstaller
       - pillow
       - natsort

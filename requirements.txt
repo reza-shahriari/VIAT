@@ -1,6 +1,6 @@
 # Core dependencies
 PyQt5==5.12.3
-opencv-python==4.11.0
+opencv-python==4.11.0.*
 pillow==9.2.0
 pyinstaller
 natsort

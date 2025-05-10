@@ -343,8 +343,11 @@ class VideoAnnotationTool(QMainWindow):
 
             # Set up auto-save for this video
             self.video_filename = filename
-            video_base = os.path.splitext(filename)[0]
-            self.autosave_file = f"{video_base}_autosave.json"
+            video_base = os.path.dirname(filename)
+            video_name = os.path.splitext(os.path.basename(filename))[0]
+            auto_save_folder = os.path.join(video_base,'autosaves')
+            os.makedirs(auto_save_folder,exist_ok=True)
+            self.autosave_file = os.path.join(auto_save_folder,video_name+'_autosave.json')
 
             # Start auto-save timer
             if self.autosave_enabled and not self.autosave_timer.isActive():
@@ -3791,8 +3794,12 @@ class VideoAnnotationTool(QMainWindow):
                     )
                 elif hasattr(self, "video_filename") and self.video_filename:
                     # For videos, use the video filename
-                    video_base = os.path.splitext(self.video_filename)[0]
-                    self.autosave_file = f"{video_base}_autosave.json"
+                    video_base = os.path.dirname(self.video_filename)
+                    video_name = os.path.splitext(os.path.basename(self.video_filename))[0]
+                    auto_save_folder = os.path.join(video_base,'autosaves')
+                    os.makedirs(auto_save_folder,exist_ok=True)
+                    self.autosave_file = os.path.join(auto_save_folder,video_name+'_autosave.json')
+
                 else:
                     # No valid source to auto-save
                     return

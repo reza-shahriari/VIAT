@@ -2,12 +2,105 @@ import os
 import json
 import cv2
 import numpy as np
-from PyQt5.QtCore import QRect
+from PyQt5.QtCore import QRect, QSaveFile, QIODevice
 from PyQt5.QtGui import QColor
+import shutil
 import datetime
 import random
 import xml.dom.minidom as minidom
 import xml.etree.ElementTree as ET
+import glob
+
+def load_project_with_backup(filename):
+    """
+    Loads a JSON project file, falling back to the most recent backup if needed.
+
+    Args:
+        filename (str): Path to the main project file.
+
+    Returns:
+        dict or None: The loaded project data, or None if all attempts fail.
+    """
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[Warning] Failed to load main file: {e}")
+
+        # Try to load most recent backup
+        base_dir = os.path.dirname(filename)
+        name, ext = os.path.splitext(os.path.basename(filename))
+        backup_pattern = os.path.join(base_dir, f"{name}_backup_*{ext}")
+        backups = sorted(glob.glob(backup_pattern), reverse=True)
+
+        for backup_file in backups:
+            try:
+                with open(backup_file, 'r') as f:
+                    print(f"[Info] Loaded backup file: {backup_file}")
+                    return json.load(f)
+            except Exception as e:
+                print(f"[Warning] Failed to load backup {backup_file}: {e}")
+
+        print("[Error] No valid project or backup files could be loaded.")
+        return None
+
+def backup_before_save(filename, use_timestamp=True, backup_limit=5):
+    """
+    Create a backup of the given file before overwriting it.
+
+    Args:
+        filename (str): Path of the file to back up
+        use_timestamp (bool): Whether to append a timestamp to the backup file
+        backup_limit (int): Max number of backup files to keep
+    """
+    if not os.path.exists(filename):
+        return  # Nothing to back up
+
+    base_dir = os.path.dirname(filename)
+    base_name = os.path.basename(filename)
+    name, ext = os.path.splitext(base_name)
+
+    if use_timestamp:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"{name}_backup_{timestamp}{ext}"
+    else:
+        backup_name = f"{name}.bak{ext}"
+
+    backup_path = os.path.join(base_dir, backup_name)
+
+    try:
+        shutil.copy2(filename, backup_path)  # includes metadata
+    except Exception as e:
+        print(f"Warning: Failed to create backup: {e}")
+
+    # Cleanup old backups (optional)
+    if backup_limit > 0:
+        backups = sorted(
+            [f for f in os.listdir(base_dir) if f.startswith(name + "_backup_")],
+            reverse=True
+        )
+        for old_backup in backups[backup_limit:]:
+            try:
+                os.remove(os.path.join(base_dir, old_backup))
+            except Exception as e:
+                print(f"Warning: Could not remove old backup {old_backup}: {e}")
+
+def save_json_atomically(filename, data):
+    file = QSaveFile(filename)
+    if file.open(QIODevice.WriteOnly | QIODevice.Text):
+        try:
+            json_str = json.dumps(data, indent=2)
+            file.write(bytes(json_str, encoding='utf-8'))
+        except Exception as e:
+            print("Error while saving JSON:", e)
+            file.cancelWriting()
+            return
+        if not file.commit():
+            print("Failed to commit file")
+        else:
+            backup_before_save(filename)
+    else:
+        print("Could not open file for writing")
 
 
 def save_project(
@@ -95,8 +188,7 @@ def save_project(
         project_data["image_dataset_info"] = image_dataset_info
 
     # Save to file
-    with open(filename, "w") as f:
-        json.dump(project_data, f, indent=2)
+    save_json_atomically(filename, project_data)
 
     # Update recent projects list
     update_recent_projects(filename)
@@ -246,8 +338,7 @@ def update_recent_projects(project_file, max_projects=10):
     recent_projects = recent_projects[:max_projects]
 
     # Save updated list
-    with open(recent_projects_file, "w") as f:
-        json.dump(recent_projects, f)
+    save_json_atomically(recent_projects_file,recent_projects)
 
 
 def get_last_project():
@@ -296,8 +387,9 @@ def save_last_state(state_data):
         os.makedirs(config_dir)
 
     # Save state data
-    with open(state_file, "w") as f:
-        json.dump(state_data, f, indent=2)
+
+    save_json_atomically(state_file, state_data)
+
 
 
 def load_last_state():
@@ -401,8 +493,8 @@ def export_coco(filename, annotations, image_width, image_height):
         annotation_id += 1
 
     # Save to file
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
+    update_recent_projects(filename,data)
+    
 
 
 def export_yolo(filename, annotations, image_width, image_height):
@@ -466,8 +558,7 @@ def export_yolo(filename, annotations, image_width, image_height):
                 }
 
     if attributes_data:
-        with open(attributes_file, "w") as f:
-            json.dump(attributes_data, f, indent=2)
+        update_recent_projects(attributes_file,attributes_data)
 
 
 def export_pascal_voc(filename, annotations, image_width, image_height):
@@ -894,8 +985,8 @@ def export_image_dataset_coco(
                 annotation_id += 1
 
     # Write to file
-    with open(filename, "w") as f:
-        json.dump(coco_data, f, indent=2)
+    save_json_atomically(filename,coco_data)
+    
 
 
 def export_standard_annotations(
@@ -1611,8 +1702,7 @@ def export_image_dataset_coco(
                 annotation_id += 1
 
     # Write to file
-    with open(filename, "w") as f:
-        json.dump(coco_data, f, indent=2)
+    save_json_atomically(filename,coco_data)
 
 
 def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_colors):
