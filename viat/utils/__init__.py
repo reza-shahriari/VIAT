@@ -13,6 +13,8 @@ from .file_operations import (
     export_image_dataset_coco,
     export_standard_annotations,
     import_annotations,
+    backup_before_save,
+    load_project_with_backup
 )
 from .im_tools import (
     calculate_frame_hash,

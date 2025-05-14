@@ -118,6 +118,9 @@ def save_project(
     frame_hashes=None,
     duplicate_frames_cache=None,
     image_dataset_info=None,
+    tracking_mode_enabled=False,
+    interpolation_mode_active=False,
+    verification_mode_enabled=False,
 ):
     """
     Save project to a JSON file.
@@ -137,6 +140,9 @@ def save_project(
         frame_hashes (dict, optional): Dictionary mapping frame numbers to hash values
         duplicate_frames_cache (dict, optional): Dictionary mapping hash values to lists of frame numbers
         image_dataset_info (dict, optional): Information about image dataset if applicable
+        tracking_mode_enabled (bool, optional): Whether tracking mode is enabled
+        interpolation_mode_active (bool, optional): Whether interpolation mode is active
+        verification_mode_enabled (bool, optional): Whether verification mode is enabled
     """
     # Convert annotations to serializable format
     serialized_annotations = []
@@ -171,6 +177,9 @@ def save_project(
         "use_previous_attributes": use_previous_attributes,
         "duplicate_frames_enabled": duplicate_frames_enabled,
         "timestamp": datetime.datetime.now().isoformat(),
+        "tracking_mode_enabled": tracking_mode_enabled,
+        "interpolation_mode_active": interpolation_mode_active,
+        "verification_mode_enabled": verification_mode_enabled,
     }
 
     # Add frame hashes if available
@@ -193,7 +202,6 @@ def save_project(
     # Update recent projects list
     update_recent_projects(filename)
 
-
 def load_project(filename, bbox_class):
     """
     Load project from a JSON file.
@@ -205,7 +213,8 @@ def load_project(filename, bbox_class):
     Returns:
         tuple: (annotations, class_colors, video_path, current_frame, frame_annotations,
                 class_attributes, current_style, auto_show_attribute_dialog, use_previous_attributes,
-                duplicate_frames_enabled, frame_hashes, duplicate_frames_cache, image_dataset_info)
+                duplicate_frames_enabled, frame_hashes, duplicate_frames_cache, image_dataset_info,
+                tracking_mode_enabled, interpolation_mode_active, verification_mode_enabled)
     """
     with open(filename, "r") as f:
         project_data = json.load(f)
@@ -237,6 +246,7 @@ def load_project(filename, bbox_class):
         frame_annotations[int(frame_num)] = [
             bbox_class.from_dict(ann_data) for ann_data in frame_anns
         ]
+    
     # Load class attributes
     class_attributes = project_data.get("class_attributes", {})
 
@@ -261,6 +271,11 @@ def load_project(filename, bbox_class):
     # Load image dataset info
     image_dataset_info = project_data.get("image_dataset_info", None)
 
+    # Load mode states
+    tracking_mode_enabled = project_data.get("tracking_mode_enabled", False)
+    interpolation_mode_active = project_data.get("interpolation_mode_active", False)
+    verification_mode_enabled = project_data.get("verification_mode_enabled", False)
+
     # Update recent projects list
     update_recent_projects(filename)
 
@@ -278,8 +293,10 @@ def load_project(filename, bbox_class):
         frame_hashes,
         duplicate_frames_cache,
         image_dataset_info,
+        tracking_mode_enabled,
+        interpolation_mode_active,
+        verification_mode_enabled,
     )
-
 
 def get_recent_projects():
     """

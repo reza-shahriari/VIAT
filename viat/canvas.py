@@ -95,7 +95,7 @@ class VideoCanvas(QWidget):
         self.customContextMenuRequested.connect(self.show_context_menu)
         self.pan_mode_enabled = False
         # Debug flag for showing scores
-        self.show_debug_scores = True
+        self.show_debug_scores = False
         self._display_rect_cache = {}  # Cache for display rectangles
         self._last_display_rect = None  # Cache the last display rectangle
         self._last_zoom_level = 1.0    # Track zoom level for cache invalidation
@@ -225,20 +225,36 @@ class VideoCanvas(QWidget):
             if annotation == self.selected_annotation or annotation in self.selected_annotations:
                 pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
             else:
+                # Get base color for the class
+                base_color = annotation.color
+                
+                # Check if annotation has a track_id and modify color slightly based on it
+                if hasattr(annotation, 'attributes') and 'track_id' in annotation.attributes:
+                    track_id = annotation.attributes['track_id']
+                    if isinstance(track_id, int):
+                        # Use the track_id to create a slight variation of the base color
+                        # This ensures different tracks of the same class have slightly different colors
+                        h, s, v, _ = base_color.getHsvF()
+                        # Modify hue based on track_id, keeping it within the same general color family
+                        h_offset = (track_id * 0.05) % 0.2  # Small offset to keep colors similar but distinct
+                        new_h = (h + h_offset) % 1.0
+                        # Create a new color with the modified hue
+                        modified_color = QColor.fromHsvF(new_h, s, v)
+                        base_color = modified_color
                 # Determine pen style based on source
                 if hasattr(annotation, 'source'):
                     if annotation.source == "manual":
-                        pen = QPen(annotation.color, 2, Qt.SolidLine)
+                        pen = QPen(base_color, 2, Qt.SolidLine)
                     elif annotation.source == "interpolated":
-                        pen = QPen(annotation.color, 2, Qt.DashLine)
+                        pen = QPen(base_color, 2, Qt.DashLine)
                     elif annotation.source == "tracked":
-                        pen = QPen(annotation.color, 2, Qt.DotLine)
+                        pen = QPen(base_color, 2, Qt.DotLine)
                     elif annotation.source == "detected":
-                        pen = QPen(annotation.color, 2, Qt.DashDotLine)
+                        pen = QPen(base_color, 2, Qt.DashDotLine)
                     else:
-                        pen = QPen(annotation.color, 2)
+                        pen = QPen(base_color, 2)
                 else:
-                    pen = QPen(annotation.color, 2)
+                    pen = QPen(base_color, 2)
 
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)

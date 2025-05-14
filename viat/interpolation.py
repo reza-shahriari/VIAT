@@ -1152,16 +1152,20 @@ class InterpolationManager:
                 kfs = state["keyframes"]
                 
                 if len(kfs) == 2:  # We have frame and frame+2
-                    # Jump to frame+interval
-                    next_frame = kfs[0] + interval
-                    if next_frame < total_frames:
-                        state["last_jump_from"] = current_frame
-                        return next_frame
+                    # CHANGE: First interpolate and review frame+1 before jumping to frame+interval
+                    self._interpolate_and_queue_review(state)
+                    if state["review_queue"]:
+                        state["phase"] = "review_interpolated"
+                        return state["review_queue"][0]
                     else:
-                        # Not enough frames, interpolate what we have
-                        self._interpolate_and_queue_review(state)
-                        return state["review_queue"][0] if state["review_queue"] else current_frame + 1
-                        
+                        # If no frames to review (unlikely), jump to frame+interval
+                        next_frame = kfs[0] + interval
+                        if next_frame < total_frames:
+                            state["last_jump_from"] = current_frame
+                            return next_frame
+                        else:
+                            # Not enough frames, stay in current phase
+                            return current_frame + 1
                 elif len(kfs) == 3:  # We have frame, frame+2, and frame+interval
                     # Jump to frame+interval+2
                     next_frame = kfs[2] + 2
@@ -1229,9 +1233,20 @@ class InterpolationManager:
                 # Go to next frame in review queue
                 return state["review_queue"][0]
             else:
-                # All frames reviewed, jump to next set of frames
+                # All frames reviewed, determine next step based on keyframe count
                 kfs = state["keyframes"]
-                if kfs:
+                if len(kfs) == 2:
+                    # CHANGE: After reviewing frame+1, jump to frame+interval
+                    next_frame = kfs[0] + interval
+                    if next_frame < total_frames:
+                        state["phase"] = "collect_keyframes"
+                        state["last_jump_from"] = current_frame
+                        return next_frame
+                    else:
+                        # End of video
+                        state["phase"] = "done"
+                        return current_frame + 1
+                elif kfs:
                     # Jump to frame+interval+interval from the last keyframe
                     next_frame = kfs[-1] + interval
                     if next_frame < total_frames:

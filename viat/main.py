@@ -8,6 +8,7 @@ different components of the application.
 
 import os
 import random
+import math
 import cv2
 from PyQt5.QtWidgets import (
     QMainWindow,
@@ -80,6 +81,8 @@ from utils import (
     import_dataset_dialog,
     load_dataset,
     PerfomanceManger,
+    load_project_with_backup,
+    backup_before_save,
 )
 from utils.icon_provider import IconProvider
 from natsort import natsorted
@@ -1591,6 +1594,9 @@ class VideoAnnotationTool(QMainWindow):
                 frame_hashes=self.frame_hashes,
                 duplicate_frames_cache=self.duplicate_frames_cache,
                 image_dataset_info=image_dataset_info,
+                tracking_mode_enabled=self.tracking_mode_enabled,
+                interpolation_mode_active=self.interpolation_manager.is_active,
+                verification_mode_enabled=self.verification_mode_enabled,
             )
 
             self.project_file = filename
@@ -1658,123 +1664,159 @@ class VideoAnnotationTool(QMainWindow):
                 self, "Error", f"An error occurred while deleting history: {str(e)}"
             )
 
+    
+    @log_exceptions
+    def save_project(self, filename=None):
+        """Save the current project to a file."""
+        if not filename:
+            if self.project_path:
+                # Use existing project path
+                filename = self.project_path
+            else:
+                # Ask for a file name
+                filename, _ = QFileDialog.getSaveFileName(
+                    self, "Save Project", "", "VIAT Project Files (*.viat)"
+                )
+                if not filename:
+                    return False  # User cancelled
+
+        # Ensure it has the correct extension
+        if not filename.endswith(".viat"):
+            filename += ".viat"
+
+        # Create a backup of the existing file if it exists
+        backup_before_save(filename)
+
+        # Set the current project path
+        self.project_path = filename
+        self.setWindowTitle(f"Video Annotation Tool - {os.path.basename(filename)}")
+
+        # Check if we're in the middle of annotation editing
+        if self.annotation_dock.editing_annotation:
+            self.annotation_dock.apply_changes()
+
+        try:
+            save_project(
+                filename,
+                self.canvas.annotations,
+                self.class_colors,
+                self.video_filename if hasattr(self, "video_filename") else None,
+                self.current_frame,
+                self.frame_annotations,
+                self.class_attributes,
+                self.current_style,
+                self.auto_show_attribute_dialog,
+                self.use_previous_attributes,
+                self.duplicate_frames_enabled,
+                self.frame_hashes if hasattr(self, "frame_hashes") else None,
+                self.duplicate_frames_cache if hasattr(self, "duplicate_frames_cache") else None,
+                self.image_dataset_info if hasattr(self, "image_dataset_info") else None,
+                # Add mode states
+                self.tracking_mode_enabled if hasattr(self, "tracking_mode_enabled") else False,
+                self.interpolation_manager.is_active if hasattr(self.interpolation_manager, "is_active") else False,
+                self.verification_mode if hasattr(self, "verification_mode") else False,
+            )
+            self.statusBar.showMessage(f"Project saved to {filename}", 5000)
+            self.project_modified = False
+            return True
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Saving Project",
+                f"Could not save project:\n{str(e)}",
+            )
+            return False
+
     @log_exceptions
     def load_project(self, filename=None):
-        """Load a saved project."""
+        """Load a project from a file."""
         if not filename:
+            # Ask for a file name
             filename, _ = QFileDialog.getOpenFileName(
-                self, "Load Project", "", "JSON Files (*.json);;All Files (*)"
+                self, "Load Project", "", "VIAT Project Files (*.viat)"
             )
+            if not filename:
+                return False  # User cancelled
 
-        if filename and os.path.exists(filename):
-            try:
-                self._loading_from_project = True
-                # Load project with additional data
-                (
-                    annotations,
-                    class_colors,
-                    video_path,
-                    current_frame,
-                    frame_annotations,
-                    class_attributes,
-                    current_style,
-                    auto_show_attribute_dialog,
-                    use_previous_attributes,
-                    duplicate_frames_enabled,
-                    frame_hashes,
-                    duplicate_frames_cache,
-                    image_dataset_info,
-                ) = load_project(filename, BoundingBox)
-
-                # Update canvas
-                self.reset_media_state()
-                self.canvas.annotations = annotations
-                self.canvas.class_colors = class_colors
-
-                # Update class attributes if available
-                if class_attributes:
-                    self.canvas.class_attributes = class_attributes
-
-                # Apply the saved style if available
-                if current_style and current_style in self.styles:
-                    self.current_style = current_style
-                    self.styles[current_style]()
-
-                    # Update style menu to show the correct checked item
-                    for action in self.style_menu.actions():
-                        if action.text() == current_style:
-                            action.setChecked(True)
-                        else:
-                            action.setChecked(False)
-
-                # Store frame annotations
-                self.frame_annotations = frame_annotations
-
-                # Update annotation settings
-                self.auto_show_attribute_dialog = auto_show_attribute_dialog
-                self.use_previous_attributes = use_previous_attributes
-
-                # Update duplicate frame detection settings
-                self.duplicate_frames_enabled = duplicate_frames_enabled
-                if hasattr(self, "duplicate_frames_action"):
-                    self.duplicate_frames_action.setChecked(duplicate_frames_enabled)
-
-                # Load frame hashes and duplicate frames cache
-                self.frame_hashes = frame_hashes if frame_hashes else {}
-                self.duplicate_frames_cache = (
-                    duplicate_frames_cache if duplicate_frames_cache else {}
+        try:
+            # Use load_project_with_backup for safer loading
+            project_data = load_project_with_backup(filename)
+            if not project_data:
+                QMessageBox.critical(
+                    self,
+                    "Error Loading Project",
+                    "Failed to load project file and no valid backups found.",
                 )
+                return False
+                
+            # Extract data from project_data
+            (
+                annotations,
+                class_colors,
+                video_path,
+                current_frame,
+                frame_annotations,
+                class_attributes,
+                current_style,
+                auto_show_attribute_dialog,
+                use_previous_attributes,
+                duplicate_frames_enabled,
+                frame_hashes,
+                duplicate_frames_cache,
+                image_dataset_info,
+                tracking_mode_enabled,
+                interpolation_mode_active,
+                verification_mode_enabled,
+            ) = load_project(filename, BoundingBox)
+            
+            # Set up the application with the loaded data
+            self.canvas.annotations = annotations
+            self.class_colors = class_colors
+            self.current_frame = current_frame
+            self.frame_annotations = frame_annotations
+            self.class_attributes = class_attributes
+            self.current_style = current_style
+            self.auto_show_attribute_dialog = auto_show_attribute_dialog
+            self.use_previous_attributes = use_previous_attributes
+            self.duplicate_frames_enabled = duplicate_frames_enabled
+            
+            if frame_hashes:
+                self.frame_hashes = frame_hashes
+            if duplicate_frames_cache:
+                self.duplicate_frames_cache = duplicate_frames_cache
+            if image_dataset_info:
+                self.image_dataset_info = image_dataset_info
+                
+            # Set mode states
+            self.toggle_tracking_mode(tracking_mode_enabled)
+            if hasattr(self.interpolation_manager, "set_active"):
+                self.interpolation_manager.set_active(interpolation_mode_active)
+            self.verification_mode = verification_mode_enabled
 
-                # Handle image dataset if present
-                if image_dataset_info and image_dataset_info.get(
-                    "is_image_dataset", False
-                ):
-                    self.load_image_dataset_from_project(
-                        image_dataset_info, current_frame
-                    )
-                # Otherwise load video if path is available
-                elif video_path and os.path.exists(video_path):
-                    self.load_video_from_project(video_path, current_frame)
-
-                # Update UI
-                self.update_settings_menu_actions()
-
-                # Update class dock
-                if hasattr(self, "class_dock"):
-                    self.class_dock.update_class_list()
-
-                # Update annotation dock
-                if hasattr(self, "annotation_dock"):
-                    self.annotation_dock.update_class_selector()
-
-                # Update toolbar class selector
-                if hasattr(self, "toolbar") and hasattr(
-                    self.toolbar, "update_class_selector"
-                ):
-                    self.toolbar.update_class_selector()
-
-                # Update annotation list
-                self.update_annotation_list()
-
-                self.project_file = filename
-                self.project_modified = False
-                self.canvas.update()
-
-                # Update recent projects menu
-                self.update_recent_projects_menu()
-
-                # Save application state
-                self.save_application_state()
-
-                self.statusBar.showMessage(
-                    f"Project loaded from {os.path.basename(filename)}"
-                )
-
-                self._loading_from_project = False
-
-            except Exception as e:
-                self._loading_from_project = False
-                QMessageBox.critical(self, "Error", f"Failed to load project: {str(e)}")
+            # Load the video if specified
+            if video_path and os.path.exists(video_path):
+                self.load_video_file(video_path)
+            elif image_dataset_info:
+                self.load_image_dataset_from_project(image_dataset_info)
+                
+            # Update UI
+            self.update_frame_display()
+            self.update_annotation_list()
+            
+            # Set project path
+            self.project_path = filename
+            self.setWindowTitle(f"Video Annotation Tool - {os.path.basename(filename)}")
+            self.project_modified = False
+            self.statusBar.showMessage(f"Project loaded from {filename}", 5000)
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Project",
+                f"Could not load project:\n{str(e)}",
+            )
+            return False
 
     @log_exceptions
     def save_application_state(self):
@@ -1783,10 +1825,14 @@ class VideoAnnotationTool(QMainWindow):
             return
 
         state = {
-            "last_project": self.project_file,
-            "current_style": self.current_style,
-            "autosave_enabled": self.autosave_enabled,
-            "autosave_interval": self.autosave_interval,
+                    'project_path': self.project_path,
+                    'video_filename': self.video_filename,
+                    'current_frame': self.current_frame,
+                    'zoom_level': self.canvas.zoom_level if hasattr(self.canvas, 'zoom_level') else 1.0,
+                    # Save mode states
+                    'tracking_mode_enabled': self.tracking_mode_enabled,
+                    'interpolation_mode_active': self.interpolation_manager.is_active if hasattr(self.interpolation_manager, 'is_active') else False,
+                    'verification_mode_enabled': self.verification_mode if hasattr(self, 'verification_mode') else False
         }
 
         save_last_state(state)
@@ -3535,7 +3581,10 @@ class VideoAnnotationTool(QMainWindow):
                 for ann in self.frame_annotations[self.current_frame]
                 if not getattr(ann, "verified", False)
             ]
-
+            for ann in unverified:
+                if ann.get("source",'')=='interpolated':
+                    ann['source'] = 'manual'
+                    ann['verified'] = True
             if unverified:
                 # Remove unverified annotations
                 self.frame_annotations[self.current_frame] = [
@@ -4395,40 +4444,243 @@ class VideoAnnotationTool(QMainWindow):
         self.update_annotation_list()
         self.canvas.update()
 
-    @log_exceptions
     def add_track_id_to_bboxes(self):
         """
-        Add a 'track_id' attribute to all bounding box annotations in all frames.
-        If already present, do nothing.
+        Add a 'track_id' attribute to all bounding boxes in all frames.
+        Uses IoU tracking to maintain consistent IDs across frames, even when
+        objects disappear and reappear later.
         """
-        track_id_counter = 1
-        updated_count = 0
-
+        # First, count max objects per class in any single frame
+        class_counts = {}
+        for frame_num, annotations in self.frame_annotations.items():
+            frame_class_counts = {}
+            for ann in annotations:
+                if hasattr(ann, "rect"):  # Only count bounding boxes
+                    class_name = getattr(ann, "class_name", "unknown")
+                    frame_class_counts[class_name] = frame_class_counts.get(class_name, 0) + 1
+            
+            # Update the max count for each class
+            for class_name, count in frame_class_counts.items():
+                class_counts[class_name] = max(class_counts.get(class_name, 0), count)
+        
+        # Reset all track IDs
         for frame_num, annotations in self.frame_annotations.items():
             for ann in annotations:
-                # Only add to bounding boxes (not polygons/points)
-                if hasattr(ann, "rect"):  # Assuming BoundingBox has 'rect'
+                if hasattr(ann, "rect"):
                     if not hasattr(ann, "attributes"):
                         ann.attributes = {}
-                    if "track_id" not in ann.attributes:
-                        ann.attributes["track_id"] = track_id_counter
-                        track_id_counter += 1
-                        updated_count += 1
-
-        # Also update current frame's annotations on the canvas
+                    if "track_id" in ann.attributes:
+                        del ann.attributes["track_id"]
+        
+        # Also reset current frame's annotations on the canvas
         for ann in self.canvas.annotations:
             if hasattr(ann, "rect"):
                 if not hasattr(ann, "attributes"):
                     ann.attributes = {}
-                if "track_id" not in ann.attributes:
-                    ann.attributes["track_id"] = track_id_counter
-                    track_id_counter += 1
+                if "track_id" in ann.attributes:
+                    del ann.attributes["track_id"]
+        
+        # Track object history across frames - keep objects' data even if they temporarily disappear
+        # Format: {class_name: [{"track_id": id, "rect": QRect, "last_seen": frame_num, "active": bool}]}
+        tracked_objects = {}
+        updated_count = 0
+        
+        # Sort frames to ensure we start from the first frame
+        sorted_frames = sorted(self.frame_annotations.keys())
+        
+        # Memory window: how many frames to remember disappeared objects for potential reappearance
+        memory_window = 30  # Remember objects for 30 frames
+        
+        # Process frames in chronological order
+        for frame_num in sorted_frames:
+            annotations = self.frame_annotations[frame_num]
+            
+            # Group annotations by class
+            class_annotations = {}
+            for ann in annotations:
+                if hasattr(ann, "rect"):  # Only process bounding boxes
+                    if not hasattr(ann, "attributes"):
+                        ann.attributes = {}
+                    
+                    class_name = getattr(ann, "class_name", "unknown")
+                    if class_name not in class_annotations:
+                        class_annotations[class_name] = []
+                    class_annotations[class_name].append(ann)
+                    
+                    # Initialize tracking for new classes
+                    if class_name not in tracked_objects:
+                        tracked_objects[class_name] = []
+                        if class_name not in class_counts:
+                            class_counts[class_name] = 1  # At least 1 for new classes
+            
+            # Process each class separately
+            for class_name, anns in class_annotations.items():
+                # Mark all objects as unmatched initially
+                matched_objs = set()
+                matched_anns = set()
+                
+                # First pass: Match current annotations with recently active tracked objects
+                # This prioritizes maintaining active tracks
+                for i, obj in enumerate(tracked_objects[class_name]):
+                    if not obj["active"]:
+                        continue  # Skip inactive objects in first pass
+                        
+                    best_iou = 0.5  # IoU threshold
+                    best_ann = None
+                    best_ann_idx = -1
+                    
+                    for j, ann in enumerate(anns):
+                        if j in matched_anns:
+                            continue  # Skip already matched annotations
+                        
+                        iou_val = self.iou(ann.rect, obj["rect"])
+                        if iou_val > best_iou:
+                            best_iou = iou_val
+                            best_ann = ann
+                            best_ann_idx = j
+                    
+                    if best_ann is not None:
+                        # Match found - update track
+                        matched_objs.add(i)
+                        matched_anns.add(best_ann_idx)
+                        # Assign track_id to annotation
+                        best_ann.attributes["track_id"] = obj["track_id"]
+                        # Update the tracked object
+                        obj["rect"] = best_ann.rect
+                        obj["last_seen"] = frame_num
+                        obj["active"] = True
+                        updated_count += 1
+                
+                # Deactivate objects not seen in this frame
+                for i, obj in enumerate(tracked_objects[class_name]):
+                    if i not in matched_objs and obj["active"]:
+                        obj["active"] = False
+                
+                # Second pass: Try to match remaining annotations with inactive objects (recently disappeared)
+                for j, ann in enumerate(anns):
+                    if j in matched_anns:
+                        continue  # Skip already matched annotations
+                    
+                    best_iou = 0.4  # Lower threshold for reappearing objects
+                    best_obj_idx = -1
+                    
+                    for i, obj in enumerate(tracked_objects[class_name]):
+                        if i in matched_objs or obj["active"]:
+                            continue  # Skip already matched or active objects
+                        
+                        # Only consider recently disappeared objects
+                        if frame_num - obj["last_seen"] > memory_window:
+                            continue
+                        
+                        iou_val = self.iou(ann.rect, obj["rect"])
+                        if iou_val > best_iou:
+                            best_iou = iou_val
+                            best_obj_idx = i
+                    
+                    if best_obj_idx != -1:
+                        # Found a reappearing object
+                        matched_objs.add(best_obj_idx)
+                        matched_anns.add(j)
+                        # Assign track_id to annotation
+                        ann.attributes["track_id"] = tracked_objects[class_name][best_obj_idx]["track_id"]
+                        # Update the tracked object
+                        tracked_objects[class_name][best_obj_idx]["rect"] = ann.rect
+                        tracked_objects[class_name][best_obj_idx]["last_seen"] = frame_num
+                        tracked_objects[class_name][best_obj_idx]["active"] = True
+                        updated_count += 1
+                
+                # Third pass: Create new tracks for unmatched annotations
+                for j, ann in enumerate(anns):
+                    if j in matched_anns:
+                        continue  # Skip already matched annotations
+                    
+                    # Find an available track_id
+                    available_ids = set(range(class_counts[class_name]))
+                    used_ids = {obj["track_id"] for obj in tracked_objects[class_name]}
+                    available_ids -= used_ids
+                    
+                    if available_ids:
+                        # Use first available ID
+                        track_id = min(available_ids)
+                    elif len(tracked_objects[class_name]) < class_counts[class_name]:
+                        # If we haven't reached max objects yet, create a new ID
+                        track_id = len(tracked_objects[class_name])
+                    else:
+                        # Recycle oldest inactive ID if no IDs are available
+                        oldest_frame = float('inf')
+                        oldest_idx = 0
+                        for i, obj in enumerate(tracked_objects[class_name]):
+                            if not obj["active"] and obj["last_seen"] < oldest_frame:
+                                oldest_frame = obj["last_seen"]
+                                oldest_idx = i
+                        
+                        # If we found an inactive object to recycle its ID
+                        if not math.isinf(oldest_frame):
+                            track_id = tracked_objects[class_name][oldest_idx]["track_id"]
+                            tracked_objects[class_name].pop(oldest_idx)
+                        else:
+                            # Last resort: use ID 0 (should rarely happen)
+                            track_id = 0
+                    
+                    # Create new tracked object
+                    tracked_objects[class_name].append({
+                        "track_id": track_id,
+                        "rect": ann.rect,
+                        "last_seen": frame_num,
+                        "active": True
+                    })
+                    
+                    # Assign track_id to annotation
+                    ann.attributes["track_id"] = track_id
+                    updated_count += 1
+        
+        # Update current frame's annotations on the canvas to match assigned IDs
+        if self.current_frame in self.frame_annotations:
+            for ann in self.canvas.annotations:
+                if hasattr(ann, "rect"):
+                    if not hasattr(ann, "attributes"):
+                        ann.attributes = {}
+                    
+                    # Try to find matching annotation in current frame
+                    for frame_ann in self.frame_annotations[self.current_frame]:
+                        if hasattr(frame_ann, "rect") and self.iou(ann.rect, frame_ann.rect) > 0.9:
+                            if "track_id" in frame_ann.attributes:
+                                ann.attributes["track_id"] = frame_ann.attributes["track_id"]
+                                break
+
+        # Add IoU calculation method if needed
+        if not hasattr(self, 'iou'):
+            self.iou = lambda rect1, rect2: self.calculate_iou(rect1, rect2)
 
         self.update_annotation_list()
         self.canvas.update()
-        QMessageBox.information(self, "Track ID", f"Added 'track_id' to {updated_count} bounding boxes.")
+        QMessageBox.information(self, "Track ID", f"Added 'track_id' to {updated_count} bounding boxes using intelligent tracking.")
 
-    
+    def calculate_iou(self, rect1, rect2):
+        """
+        Calculate Intersection over Union between two QRect objects.
+        """
+        # Calculate intersection area
+        x_left = max(rect1.left(), rect2.left())
+        y_top = max(rect1.top(), rect2.top())
+        x_right = min(rect1.right(), rect2.right())
+        y_bottom = min(rect1.bottom(), rect2.bottom())
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0  # No intersection
+        
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        
+        # Calculate union area
+        rect1_area = rect1.width() * rect1.height()
+        rect2_area = rect2.width() * rect2.height()
+        union_area = rect1_area + rect2_area - intersection_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        return intersection_area / union_area
+
     def assign_track_id_to_new_bbox(self, new_bbox):
         """
         Assigns a track_id to new_bbox based on IoU with previous frame's bboxes.
@@ -4443,7 +4695,13 @@ class VideoAnnotationTool(QMainWindow):
             new_bbox.attributes['track_id'] = new_id
             return
 
-        prev_bboxes = [ann for ann in self.frame_annotations[prev_frame] if hasattr(ann, 'rect')]
+        # Get class name of the new bbox
+        class_name = getattr(new_bbox, "class_name", "unknown")
+        
+        # Only consider previous bboxes of the same class
+        prev_bboxes = [ann for ann in self.frame_annotations[prev_frame] 
+                    if hasattr(ann, 'rect') and getattr(ann, "class_name", "unknown") == class_name]
+        
         best_iou = 0
         best_ann = None
         for ann in prev_bboxes:
@@ -4459,15 +4717,46 @@ class VideoAnnotationTool(QMainWindow):
 
     def get_next_track_id(self):
         # Find the max track_id used so far
-        max_id = 0
+        max_id = -1  # Start from -1 so first ID will be 0
         for anns in self.frame_annotations.values():
             for ann in anns:
                 tid = ann.attributes.get('track_id') if hasattr(ann, 'attributes') else None
                 if tid is not None and isinstance(tid, int):
                     max_id = max(max_id, tid)
         return max_id + 1
+    
+    def iou(self, rect1, rect2):
+        """
+        Calculate Intersection over Union between two QRect objects.
+        
+        Args:
+            rect1: First QRect
+            rect2: Second QRect
+            
+        Returns:
+            float: IoU value between 0 and 1
+        """
+        # Calculate intersection area
+        x_left = max(rect1.left(), rect2.left())
+        y_top = max(rect1.top(), rect2.top())
+        x_right = min(rect1.right(), rect2.right())
+        y_bottom = min(rect1.bottom(), rect2.bottom())
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0  # No intersection
+        
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        
+        # Calculate union area
+        rect1_area = rect1.width() * rect1.height()
+        rect2_area = rect2.width() * rect2.height()
+        union_area = rect1_area + rect2_area - intersection_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        return intersection_area / union_area
 
-    def iou(self,rect1, rect2):
         # rect: (x, y, w, h)
         x1, y1, w1, h1 = rect1
         x2, y2, w2, h2 = rect2
