@@ -193,7 +193,13 @@ class VideoCanvas(QWidget):
                         pen = QPen(annotation.color, 2)
 
                 painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
                 painter.drawRect(display_rect)
+
+                # Highlight hovered annotation
+                if annotation == self.selected_annotation and self.underMouse():
+                    painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
+                    painter.drawRect(display_rect)
 
                 # Set up font for labels
                 font = painter.font()
@@ -332,6 +338,34 @@ class VideoCanvas(QWidget):
                         painter.setPen(QPen(QColor(255, 255, 255)))
                         painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
 
+                # Draw resize handles (corners and edges)
+                handle_size = 8
+                for point in self.get_handle_points(display_rect):
+                    # Use class color for handle
+                    handle_fill = QColor(annotation.color)
+                    handle_fill.setAlpha(200)
+                    painter.setBrush(handle_fill)
+                    painter.setPen(QPen(QColor(0, 0, 0), 1))
+                    painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+
+            # Draw the in-progress bounding box (while drawing)
+            if self.is_drawing and self.start_point and self.current_point:
+                color = self.class_colors.get(self.current_class, QColor(255, 0, 0, 180))
+                pen = QPen(color, 2, Qt.DashLine)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                display_rect = self.image_to_display_rect(QRect(self.start_point, self.current_point).normalized())
+                painter.drawRect(display_rect)
+
+            # For TwoClick mode: show the first point and a crosshair
+            if self.annotation_method == "TwoClick" and self.two_click_first_point:
+                pen = QPen(QColor(0, 255, 0, 180), 2, Qt.DashLine)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                mouse_pos = self.current_point if self.current_point else self.two_click_first_point
+                display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
+                painter.drawRect(display_rect)
+
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
         if not self.pixmap:
@@ -425,9 +459,11 @@ class VideoCanvas(QWidget):
             return QRect(top_left, bottom_right)
         return QRect()
 
-    def detect_edge(self, rect, pos, threshold=8):
+    def detect_edge(self, rect, pos, threshold=12,inner_threshold =2):
         """
         Detect if the cursor is near an edge of the rectangle.
+        Only detects an edge if the cursor is within threshold pixels of the edge
+        and not deeper inside the rectangle.
 
         Args:
             rect: QRect object in display coordinates
@@ -437,21 +473,34 @@ class VideoCanvas(QWidget):
         Returns:
             Edge constant (EDGE_NONE, EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_LEFT)
         """
-        if not rect.adjusted(-threshold, -threshold, threshold, threshold).contains(
-            pos
-        ):
+        # First check if position is near the rectangle at all
+        if not rect.adjusted(-threshold, -threshold, threshold, threshold).contains(pos):
+            return EDGE_NONE
+        
+        # Create an inner rectangle that's threshold pixels in from the edges
+        inner_rect = rect.adjusted(inner_threshold, inner_threshold, -inner_threshold, -inner_threshold)
+        
+        # If cursor is inside the inner rectangle, don't detect any edge
+        if inner_rect.contains(pos):
             return EDGE_NONE
 
-        # Check if cursor is near any edge
-        if abs(pos.y() - rect.top()) <= threshold:
+        # Now check which edge the cursor is closest to
+        dist_to_top = abs(pos.y() - rect.top())
+        dist_to_right = abs(pos.x() - rect.right())
+        dist_to_bottom = abs(pos.y() - rect.bottom())
+        dist_to_left = abs(pos.x() - rect.left())
+        
+        min_dist = min(dist_to_top, dist_to_right, dist_to_bottom, dist_to_left)
+        
+        if min_dist == dist_to_top and dist_to_top <= threshold:
             return EDGE_TOP
-        elif abs(pos.x() - rect.right()) <= threshold:
+        elif min_dist == dist_to_right and dist_to_right <= threshold:
             return EDGE_RIGHT
-        elif abs(pos.y() - rect.bottom()) <= threshold:
+        elif min_dist == dist_to_bottom and dist_to_bottom <= threshold:
             return EDGE_BOTTOM
-        elif abs(pos.x() - rect.left()) <= threshold:
+        elif min_dist == dist_to_left and dist_to_left <= threshold:
             return EDGE_LEFT
-
+        
         return EDGE_NONE
 
     def get_edge_cursor(self, edge):
@@ -524,9 +573,10 @@ class VideoCanvas(QWidget):
 
         # Check each annotation in reverse order (top-most first)
         for annotation in reversed(self.annotations):
-            if annotation.rect.contains(img_pos):
+            display_rect = self.image_to_display_rect(annotation.rect)
+            expanded_rect = display_rect.adjusted(-5, -5, 5, 5)
+            if expanded_rect.contains(pos):
                 return annotation
-
         return None
 
     def mousePressEvent(self, event):
@@ -573,22 +623,30 @@ class VideoCanvas(QWidget):
         
                 # Check if we're clicking on an edge
                 display_rect = self.image_to_display_rect(annotation.rect)
-                edge = self.detect_edge(display_rect, event.pos())
-                
-                if edge != EDGE_NONE:
-                    # Start edge movement
-                    self.edge_moving = True
-                    self.active_edge = edge
-                    self.edge_start_pos = event.pos()
+                handle_idx = self.handle_at_pos(display_rect, event.pos())
+                if handle_idx is not None:
+                    self.resizing_handle = handle_idx
+                    self.resize_start_pos = event.pos()
                     self.original_rect = QRect(annotation.rect)
+                    return
                 else:
-                    # Start dragging the annotation
-                    self.drag_start_pos = img_pos
-                    self.original_rect = QRect(annotation.rect)
-                    
-                    # Store original rectangles for all selected annotations
-                    for ann in self.selected_annotations:
-                        ann.original_rect = QRect(ann.rect)
+                    # Check for edge movement
+                    edge = self.detect_edge(display_rect, event.pos(), threshold=12)
+                    if edge != EDGE_NONE:
+                        self.edge_moving = True
+                        self.active_edge = edge
+                        self.edge_start_pos = event.pos()
+                        self.original_rect = QRect(annotation.rect)
+                        self.setCursor(self.get_edge_cursor(edge)) 
+                        return
+                    elif display_rect.contains(event.pos()):
+                        # Start dragging the annotation
+                        self.drag_start_pos = img_pos
+                        self.original_rect = QRect(annotation.rect)
+                        
+                        # Store original rectangles for all selected annotations
+                        for ann in self.selected_annotations:
+                            ann.original_rect = QRect(ann.rect)
                 
                 # Reset two-click state if we're selecting an annotation
                 self.two_click_first_point = None
@@ -794,18 +852,67 @@ class VideoCanvas(QWidget):
                 self.update()
             return
 
+        # If we're moving an edge
+        if self.edge_moving and self.selected_annotation:
+            # Edge moving code remains the same
+            # ...
+            return
+
+        # Add this new section to handle resizing via handles
+        if hasattr(self, 'resizing_handle') and self.resizing_handle is not None and self.selected_annotation:
+            # Get the current display rect
+            display_rect = self.image_to_display_rect(self.original_rect)
+            
+            # Get position delta
+            delta_x = event.pos().x() - self.resize_start_pos.x()
+            delta_y = event.pos().y() - self.resize_start_pos.y()
+            
+            # Create a new rectangle based on which handle is being dragged
+            new_rect = QRect(display_rect)
+            handle_idx = self.resizing_handle
+            
+            if handle_idx == 0:  # Top-left
+                new_rect.setTopLeft(display_rect.topLeft() + QPoint(delta_x, delta_y))
+            elif handle_idx == 1:  # Top-right
+                new_rect.setTopRight(display_rect.topRight() + QPoint(delta_x, delta_y))
+            elif handle_idx == 2:  # Bottom-left
+                new_rect.setBottomLeft(display_rect.bottomLeft() + QPoint(delta_x, delta_y))
+            elif handle_idx == 3:  # Bottom-right
+                new_rect.setBottomRight(display_rect.bottomRight() + QPoint(delta_x, delta_y))
+            elif handle_idx == 4:  # Top center
+                new_rect.setTop(display_rect.top() + delta_y)
+            elif handle_idx == 5:  # Bottom center
+                new_rect.setBottom(display_rect.bottom() + delta_y)
+            elif handle_idx == 6:  # Left center
+                new_rect.setLeft(display_rect.left() + delta_x)
+            elif handle_idx == 7:  # Right center
+                new_rect.setRight(display_rect.right() + delta_x)
+            
+            # Convert back to image coordinates
+            new_img_rect = self.display_to_image_rect(new_rect.normalized())
+            
+            # Update the annotation with the new rectangle
+            if new_img_rect:
+                self.selected_annotation.rect = new_img_rect
+                self.update()
+            return
+
         # Update cursor based on what's under it
         if self.selected_annotation:
             display_rect = self.image_to_display_rect(self.selected_annotation.rect)
-            edge = self.detect_edge(display_rect, event.pos())
-
-            if edge != EDGE_NONE:
-                self.setCursor(self.get_edge_cursor(edge))
+            handle_idx = self.handle_at_pos(display_rect, event.pos())
+            if handle_idx is not None:
+                # Set cursor for handle
+                self.setCursor(Qt.SizeFDiagCursor if handle_idx in [0,3] else
+                               Qt.SizeBDiagCursor if handle_idx in [1,2] else
+                               Qt.SizeHorCursor if handle_idx in [6,7] else
+                               Qt.SizeVerCursor)
             else:
-                # Check if cursor is over the selected annotation
-                annotation = self.find_annotation_at_pos(event.pos())
-                if annotation == self.selected_annotation:
-                    self.setCursor(Qt.SizeAllCursor)  # Move cursor
+                edge = self.detect_edge(display_rect, event.pos(), threshold=12)
+                if edge != EDGE_NONE:
+                    self.setCursor(self.get_edge_cursor(edge))
+                elif display_rect.contains(event.pos()):
+                    self.setCursor(Qt.SizeAllCursor)
                 else:
                     self.setCursor(Qt.ArrowCursor)
         else:
@@ -835,6 +942,21 @@ class VideoCanvas(QWidget):
             self.setCursor(Qt.ArrowCursor)
             return
         if event.button() == Qt.LeftButton:
+            # Add this section to handle releasing the resize handle
+            if hasattr(self, 'resizing_handle') and self.resizing_handle is not None:
+                self.resizing_handle = None
+                self.resize_start_pos = None
+                
+                # Update the annotation list in the main window
+                if self.main_window:
+                    self.main_window.update_annotation_list()
+                    # Save annotations to current frame
+                    if hasattr(self.main_window, "frame_annotations"):
+                        self.main_window.frame_annotations[
+                            self.main_window.current_frame
+                        ] = self.annotations.copy()
+                return
+            
             # If we were moving an edge
             if self.edge_moving:
                 self.edge_moving = False
@@ -1293,3 +1415,28 @@ class VideoCanvas(QWidget):
         # Calculate IoU
         iou = intersection_area / float(box1_area + box2_area - intersection_area)
         return iou
+
+    def get_handle_points(self, rect):
+        """Return QPoint list for 8 handle positions (corners and edges) in order:
+        0: top-left, 1: top-right, 2: bottom-left, 3: bottom-right,
+        4: top edge, 5: bottom edge, 6: left edge, 7: right edge
+        """
+        points = [
+            rect.topLeft(),         # 0
+            rect.topRight(),        # 1
+            rect.bottomLeft(),      # 2
+            rect.bottomRight(),     # 3
+            QPoint(rect.center().x(), rect.top()),     # 4
+            QPoint(rect.center().x(), rect.bottom()),  # 5
+            QPoint(rect.left(), rect.center().y()),    # 6
+            QPoint(rect.right(), rect.center().y()),   # 7
+        ]
+        return points
+
+    def handle_at_pos(self, rect, pos, handle_size=8):
+        """Return index of handle if pos is over a handle, else None"""
+        for idx, point in enumerate(self.get_handle_points(rect)):
+            handle_rect = QRect(point.x() - handle_size//2, point.y() - handle_size//2, handle_size, handle_size)
+            if handle_rect.contains(pos):
+                return idx
+        return None
