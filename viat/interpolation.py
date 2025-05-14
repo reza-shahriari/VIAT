@@ -1087,131 +1087,220 @@ class InterpolationManager:
                 return f
         return None
 
-    # --- Main workflow function ---
     def get_next_frame_for_workflow(self, current_frame):
+        """
+        Improved workflow for interpolation that follows a more intuitive pattern:
+        
+        1. Start with annotating key frames (frame, frame+2, frame+interval, frame+interval+2)
+        2. Interpolate intermediate frames (frame+1, frame+interval+1)
+        3. Review interpolated frames one by one
+        4. Jump to next set of frames to annotate (frame+interval+interval)
+        5. Handle cases where frames have no annotations by searching backward
+        
+        Args:
+            current_frame: The current frame number
+            
+        Returns:
+            int: The next frame to navigate to
+        """
         state = self.workflow_state
         interval = self.interval
         total_frames = getattr(self.main_window, "total_frames", 999999)
-
-        # 1. Search for the first keyframe
-        if state["state"] == "search_first_keyframe":
+        
+        # Initialize workflow state if needed
+        if "phase" not in state:
+            state["phase"] = "search_first_keyframe"
+            state["keyframes"] = []
+            state["interpolated_frames"] = []
+            state["review_queue"] = []
+            state["last_jump_from"] = None
+        
+        # 1. Search for the first keyframe with annotation
+        if state["phase"] == "search_first_keyframe":
             # Find the first frame with annotation
             f = current_frame
             while f < total_frames and not self.has_annotation(f):
                 f += 1
+            
             if f >= total_frames:
                 # No annotations in the video, just go to next frame
                 return current_frame + 1
+                
+            # Found first keyframe with annotation
             state["keyframes"] = [f]
-            state["state"] = "annotate_keyframe"
-            state["step"] = 0
+            state["phase"] = "collect_keyframes"
             state["current_frame"] = f
-            return f
-
-        # 2. Annotate keyframes and handle missing annotations
-        if state["state"] == "annotate_keyframe":
-            kfs = state["keyframes"]
-            step = state.get("step", 0)
-            frame_start = kfs[0]
-
-            if step == 0:
-                # After first keyframe, go to frame_start+2
-                next_kf = frame_start + 2
-                if next_kf >= total_frames:
-                    state["state"] = "done"
-                    return current_frame + 1
-                state["step"] = 1
-                state["current_frame"] = next_kf
-                return next_kf
-
-            elif step == 1:
-                # After user attempts to annotate frame_start+2
-                if self.has_annotation(current_frame):
-                    kfs.append(current_frame)
-                    # Interpolate frame_start+1
-                    interp_frame = frame_start + 1
-                    self.interpolate_annotations(frame_start, current_frame)
-                    state["state"] = "review_interpolated"
-                    state["review_queue"] = [interp_frame]
-                    state["step"] = 2
-                    state["current_frame"] = interp_frame
-                    return interp_frame
-                else:
-                    # No annotation in frame_start+2, try frame_start+1
-                    prev_frame = frame_start + 1
-                    if self.has_annotation(prev_frame):
-                        # Use frame_start and frame_start+1 as keyframes, jump to frame_start+1+interval
-                        kfs.append(prev_frame)
-                        next_kf = prev_frame + interval
-                        if next_kf < total_frames and self.has_annotation(next_kf):
-                            kfs.append(next_kf)
-                            state["step"] = 3
-                            state["current_frame"] = next_kf
-                            return next_kf
-                        else:
-                            # Search backwards from next_kf to prev_frame+1 for annotation
-                            found = False
-                            for f in range(next_kf - 1, prev_frame, -1):
-                                if self.has_annotation(f):
-                                    kfs.append(f)
-                                    state["step"] = 3
-                                    state["current_frame"] = f
-                                    found = True
-                                    return f
-                            # If not found, jump to prev_frame + interval + 1 and reinitialize
-                            state["state"] = "search_first_keyframe"
-                            state["keyframes"] = []
-                            return prev_frame + interval + 1
-                    else:
-                        # No annotation in frame_start+1, skip ahead and reinitialize
-                        state["state"] = "search_first_keyframe"
-                        state["keyframes"] = []
-                        return frame_start + 3
-
-            elif step == 3:
-                # After user annotates next_kf (from above), interpolate between previous keyframes
-                if self.has_annotation(current_frame):
-                    kfs.append(current_frame)
-                    interp_start = kfs[-3]
-                    interp_end = kfs[-1]
-                    self.interpolate_annotations(interp_start, interp_end)
-                    # Collect all interpolated frames (excluding keyframes)
-                    all_interp = [f for f in range(interp_start + 1, interp_end) if f not in kfs]
-                    state["state"] = "review_interpolated"
-                    state["review_queue"] = all_interp
-                    state["current_frame"] = all_interp[0] if all_interp else interp_end
-                    return state["current_frame"]
-                else:
-                    # No annotation, skip ahead and reinitialize
-                    state["state"] = "search_first_keyframe"
-                    state["keyframes"] = []
-                    return current_frame + 1
-
-        # 3. Review interpolated frames
-        if state["state"] == "review_interpolated":
-            queue = state["review_queue"]
-            if queue:
-                # Remove current frame from queue if present
-                if current_frame in queue:
-                    queue.remove(current_frame)
-                if queue:
-                    state["current_frame"] = queue[0]
-                    return queue[0]
-                else:
-                    # Done reviewing, restart or finish
-                    state["state"] = "done"
-                    return current_frame + 1
+            
+            # Jump to frame+2 to collect second keyframe
+            next_frame = f + 2
+            if next_frame < total_frames:
+                state["last_jump_from"] = f
+                return next_frame
             else:
-                state["state"] = "done"
+                # Not enough frames left, just move forward
+                state["phase"] = "done"
                 return current_frame + 1
-
-        # 4. Done phase: fallback to next frame or restart workflow as needed
-        if state["state"] == "done":
-            # Optionally, you can restart the workflow for the next segment
-            # For now, just move to next frame
-            state["state"] = "search_first_keyframe"
+        
+        # 2. Collect keyframes for interpolation
+        elif state["phase"] == "collect_keyframes":
+            # Check if current frame has annotation
+            if self.has_annotation(current_frame):
+                # Add to keyframes
+                state["keyframes"].append(current_frame)
+                
+                # Determine next frame to jump to based on how many keyframes we have
+                kfs = state["keyframes"]
+                
+                if len(kfs) == 2:  # We have frame and frame+2
+                    # Jump to frame+interval
+                    next_frame = kfs[0] + interval
+                    if next_frame < total_frames:
+                        state["last_jump_from"] = current_frame
+                        return next_frame
+                    else:
+                        # Not enough frames, interpolate what we have
+                        self._interpolate_and_queue_review(state)
+                        return state["review_queue"][0] if state["review_queue"] else current_frame + 1
+                        
+                elif len(kfs) == 3:  # We have frame, frame+2, and frame+interval
+                    # Jump to frame+interval+2
+                    next_frame = kfs[2] + 2
+                    if next_frame < total_frames:
+                        state["last_jump_from"] = current_frame
+                        return next_frame
+                    else:
+                        # Not enough frames, interpolate what we have
+                        self._interpolate_and_queue_review(state)
+                        return state["review_queue"][0] if state["review_queue"] else current_frame + 1
+                        
+                elif len(kfs) >= 4:  # We have enough keyframes for full interpolation
+                    # We have frame, frame+2, frame+interval, frame+interval+2
+                    # Interpolate and queue frames for review
+                    self._interpolate_and_queue_review(state)
+                    
+                    # Go to first interpolated frame for review
+                    if state["review_queue"]:
+                        return state["review_queue"][0]
+                    else:
+                        # Jump to next set (frame+interval+interval)
+                        next_frame = kfs[-1] + interval
+                        if next_frame < total_frames:
+                            # Reset for next set of keyframes
+                            state["phase"] = "collect_keyframes"
+                            state["keyframes"] = [kfs[-1]]  # Start with last keyframe
+                            state["last_jump_from"] = current_frame
+                            return next_frame
+                        else:
+                            # End of video
+                            state["phase"] = "done"
+                            return current_frame + 1
+            else:
+                # Current frame has no annotation, try to find a nearby frame with annotation
+                # First, check if we should go back one frame at a time
+                if state["last_jump_from"] is not None:
+                    # Go back one frame from current position
+                    prev_frame = current_frame - 1
+                    
+                    # Don't go before the frame we jumped from
+                    if prev_frame > state["last_jump_from"]:
+                        return prev_frame
+                    else:
+                        # We've gone back to where we started, try to use what we have
+                        if len(state["keyframes"]) >= 2:
+                            # We have at least 2 keyframes, interpolate what we have
+                            self._interpolate_and_queue_review(state)
+                            return state["review_queue"][0] if state["review_queue"] else current_frame + 1
+                        else:
+                            # Not enough keyframes, jump ahead and restart
+                            state["phase"] = "search_first_keyframe"
+                            return current_frame + interval
+                else:
+                    # No record of where we jumped from, move forward
+                    return current_frame + 1
+        
+        # 3. Review interpolated frames
+        elif state["phase"] == "review_interpolated":
+            # Mark current frame as reviewed
+            if current_frame in state["review_queue"]:
+                state["review_queue"].remove(current_frame)
+            
+            # Check if there are more frames to review
+            if state["review_queue"]:
+                # Go to next frame in review queue
+                return state["review_queue"][0]
+            else:
+                # All frames reviewed, jump to next set of frames
+                kfs = state["keyframes"]
+                if kfs:
+                    # Jump to frame+interval+interval from the last keyframe
+                    next_frame = kfs[-1] + interval
+                    if next_frame < total_frames:
+                        # Reset for next set of keyframes
+                        state["phase"] = "collect_keyframes"
+                        state["keyframes"] = [kfs[-1]]  # Start with last keyframe
+                        state["last_jump_from"] = current_frame
+                        return next_frame
+                    else:
+                        # End of video
+                        state["phase"] = "done"
+                        return current_frame + 1
+                else:
+                    # No keyframes (shouldn't happen), restart
+                    state["phase"] = "search_first_keyframe"
+                    return current_frame + 1
+        
+        # 4. Done or fallback
+        else:  # "done" or any other state
+            # Reset workflow and move to next frame
+            state["phase"] = "search_first_keyframe"
             state["keyframes"] = []
+            state["interpolated_frames"] = []
+            state["review_queue"] = []
+            state["last_jump_from"] = None
             return current_frame + 1
-
+        
         # Defensive fallback
         return current_frame + 1
+
+    def _interpolate_and_queue_review(self, state):
+        """
+        Helper method to interpolate between keyframes and queue frames for review.
+        
+        Args:
+            state: The workflow state dictionary
+        """
+        kfs = state["keyframes"]
+        if len(kfs) < 2:
+            return
+        
+        # Clear previous review queue
+        state["review_queue"] = []
+        state["interpolated_frames"] = []
+        
+        # Interpolate between pairs of keyframes
+        for i in range(len(kfs) - 1):
+            start_frame = kfs[i]
+            end_frame = kfs[i + 1]
+            
+            # Skip if frames are adjacent
+            if end_frame - start_frame <= 1:
+                continue
+                
+            # Interpolate between these keyframes
+            self.interpolate_annotations(start_frame, end_frame)
+            
+            # Add interpolated frames to review queue
+            for frame in range(start_frame + 1, end_frame):
+                if frame not in kfs and frame not in state["interpolated_frames"]:
+                    state["interpolated_frames"].append(frame)
+                    state["review_queue"].append(frame)
+        
+        # Sort review queue
+        state["review_queue"].sort()
+        
+        # Update phase
+        if state["review_queue"]:
+            state["phase"] = "review_interpolated"
+        else:
+            # No frames to review, stay in collect_keyframes phase
+            state["phase"] = "collect_keyframes"
