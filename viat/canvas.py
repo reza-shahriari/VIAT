@@ -452,7 +452,9 @@ class VideoCanvas(QWidget):
 
         # Check if point is within display area
         if not display_rect.contains(pos):
-            return None
+            x = min(max(pos.x(), display_rect.left()), display_rect.right())
+            y = min(max(pos.y(), display_rect.top()), display_rect.bottom())
+            pos = QPoint(x, y)
 
         # Calculate relative position within display rect
         rel_x = (pos.x() - display_rect.left()) / display_rect.width()
@@ -838,10 +840,12 @@ class VideoCanvas(QWidget):
             return
         # Handle panning
         if self.panning and self.pan_start_pos:
-            # Calculate the delta movement
             delta = event.pos() - self.pan_start_pos
             self.pan_offset += delta
             self.pan_start_pos = event.pos()
+            # Clear display rect cache because pan offset changed!
+            if hasattr(self, '_display_rect_cache'):
+                self._display_rect_cache.clear()
             self.update()
             return
         # If we're moving an edge
@@ -936,9 +940,10 @@ class VideoCanvas(QWidget):
         # If we're drawing a new annotation
         if self.is_drawing:
             img_pos = self.display_to_image_pos(event.pos())
-            if img_pos:
-                self.current_point = img_pos
-                self.update()
+            img_x = min(max(img_pos.x(), 0), self.pixmap.width() - 1)
+            img_y = min(max(img_pos.y(), 0), self.pixmap.height() - 1)
+            self.current_point = QPoint(img_x, img_y)
+            self.update()
             return
 
         # If we're moving an edge
@@ -1231,7 +1236,7 @@ class VideoCanvas(QWidget):
                     # Verify the annotation
                     self.verify_annotation(self.selected_annotation)
                 elif action.parent() == change_class_menu:
-                    # Change the class of the annotation
+                    # Change the class of the2 annotation
                     new_class = action.data()
                     if new_class in self.class_colors:
                         self.selected_annotation.class_name = new_class
@@ -1395,11 +1400,13 @@ class VideoCanvas(QWidget):
             self.update()
 
     def reset_pan(self):
-        """Reset the pan offset to center the image"""
+
         self.pan_offset = QPoint(0, 0)
-        # Force recalculation of display rectangle
-        if hasattr(self, '_last_display_rect'):
-            self._last_display_rect = None
+
+
+
+        if hasattr(self, '_display_rect_cache'):
+            self._display_rect_cache.clear()
         self.update()
    
     def verify_annotation(self, annotation):
