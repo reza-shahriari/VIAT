@@ -181,10 +181,6 @@ class UICreator:
         auto_label_action.triggered.connect(self.main_window.auto_label)
         tools_menu.addAction(auto_label_action)
 
-        # Track Objects action
-        track_action = QAction("Track Objects", self.main_window)
-        track_action.triggered.connect(self.main_window.track_objects)
-        tools_menu.addAction(track_action)
 
         # Smart Edge Movement action
         smart_edge_action = QAction(
@@ -323,6 +319,14 @@ class UICreator:
         verify_all_action.setToolTip("Mark all annotations in current frame as verified")
         verify_all_action.triggered.connect(self.main_window.verify_all_annotations)
         self.main_window.toolbar.addAction(verify_all_action)
+
+        # Add Track ID button
+        self.tracking_toggle_btn = QPushButton("Tracking Mode")
+        self.tracking_toggle_btn.setCheckable(True)
+        self.tracking_toggle_btn.setToolTip("Toggle automatic tracking ID assignment")
+        self.tracking_toggle_btn.toggled.connect(self.main_window.toggle_tracking_mode)
+        self.main_window.toolbar.addWidget(self.tracking_toggle_btn)
+        self.main_window.tracking_toggle_btn = self.tracking_toggle_btn
 
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
@@ -573,3 +577,4 @@ class UICreator:
         # Initially hide the toolbar until interpolation mode is activated
         interpolation_toolbar.setVisible(False)
         self.main_window.interpolation_toolbar = interpolation_toolbar
+
