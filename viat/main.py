@@ -980,34 +980,7 @@ class VideoAnnotationTool(QMainWindow):
                 hasattr(self, "interpolation_manager")
                 and self.interpolation_manager.is_active
             ):
-                current_frame = self.current_frame
-
-                # Check if current frame has annotations
-                current_has_annotations = (
-                    current_frame in self.frame_annotations
-                    and len(self.frame_annotations[current_frame]) > 0
-                )
-
-                if current_has_annotations:
-                    self.perform_interpolation()
-                    # If current frame has annotations, go to next keyframe (current + interval)
-                    next_frame_number = (
-                        current_frame + self.interpolation_manager.interval
-                    )
-                else:
-                    # If current frame has no annotations, find the next frame with annotations
-                    next_frame_number = None
-                    for frame in sorted(self.frame_annotations.keys()):
-                        if (
-                            frame > current_frame
-                            and len(self.frame_annotations[frame]) > 0
-                        ):
-                            next_frame_number = frame
-                            break
-
-                    # If no next annotated frame found, suggest one based on interval
-                    if next_frame_number is None:
-                        next_frame_number = current_frame + 1
+                next_frame_number = self.interpolation_manager.get_next_frame_for_workflow(self.current_frame)
 
             elif self.cap and self.cap.isOpened():
                 # Calculate the next frame number explicitly
