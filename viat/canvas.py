@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .annotation import BoundingBox
 import random
+import numpy as np
 
 # Edge detection constants
 EDGE_NONE = 0
@@ -928,6 +929,8 @@ class VideoCanvas(QWidget):
                     bbox = BoundingBox(
                         rect, self.current_class, default_attributes, color, source="manual"
                     )
+                    self.assign_track_id_to_new_bbox(bbox)
+
                     if hasattr(bbox, 'verify'):
                         bbox.verify()  # Ensure it's marked as verified
 
@@ -1209,3 +1212,84 @@ class VideoCanvas(QWidget):
                         f"Annotation verified and marked as manual (originally {annotation.original_source})", 
                         3000
                     )
+
+    def get_current_frame(self):
+        """Get the current frame as a numpy array."""
+        if hasattr(self, "pixmap") and self.pixmap:
+            # Convert QPixmap to QImage
+            qimg = self.pixmap.toImage()
+        
+            # Convert QImage to numpy array
+            width, height = qimg.width(), qimg.height()
+            ptr = qimg.bits()
+            ptr.setsize(qimg.byteCount())
+            arr = np.array(ptr).reshape(height, width, 4)  # RGBA
+        
+            # Convert RGBA to BGR (OpenCV format)
+            return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        return None
+
+    def assign_track_id_to_new_bbox(self, new_bbox):
+        """
+        Assigns a track_id to new_bbox based on IoU with previous frame's bboxes.
+        """
+        # Only assign if tracking mode is enabled
+        if not getattr(self.main_window, "tracking_mode_enabled", False):
+            return
+
+        prev_frame = self.main_window.current_frame - 1
+        if prev_frame < 0 or prev_frame not in self.main_window.frame_annotations:
+            # No previous frame, assign new id
+            new_id = self.get_next_track_id()
+            new_bbox.attributes['track_id'] = new_id
+            return
+
+        prev_bboxes = [ann for ann in self.main_window.frame_annotations[prev_frame] if hasattr(ann, 'rect')]
+        best_iou = 0
+        best_ann = None
+        for ann in prev_bboxes:
+            iou_val = self.iou(new_bbox.rect, ann.rect)
+            if iou_val > best_iou:
+                best_iou = iou_val
+                best_ann = ann
+
+        if best_iou > 0.5 and best_ann and 'track_id' in best_ann.attributes:
+            new_bbox.attributes['track_id'] = best_ann.attributes['track_id']
+        else:
+            new_bbox.attributes['track_id'] = self.get_next_track_id()
+
+    def get_next_track_id(self):
+        # Find the max track_id used so far
+        max_id = 0
+        for anns in self.main_window.frame_annotations.values():
+            for ann in anns:
+                tid = ann.attributes.get('track_id') if hasattr(ann, 'attributes') else None
+                if tid is not None and isinstance(tid, int):
+                    max_id = max(max_id, tid)
+        return max_id + 1
+
+    def iou(self, rect1, rect2):
+               # Get coordinates of both boxes
+        x1, y1, w1, h1 = rect1.x(), rect1.y(), rect1.width(), rect1.height()
+        x2, y2, w2, h2 = rect2.x(), rect2.y(), rect2.width(), rect2.height()
+        
+        # Calculate coordinates of intersection
+        x_left = max(x1, x2)
+        y_top = max(y1, y2)
+        x_right = min(x1 + w1, x2 + w2)
+        y_bottom = min(y1 + h1, y2 + h2)
+        
+        # No intersection
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+            
+        # Calculate area of intersection
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        
+        # Calculate area of both boxes
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        
+        # Calculate IoU
+        iou = intersection_area / float(box1_area + box2_area - intersection_area)
+        return iou

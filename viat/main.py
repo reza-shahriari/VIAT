@@ -204,7 +204,7 @@ class VideoAnnotationTool(QMainWindow):
         self.autosave_interval = 5000
         self.autosave_file = None
         self.last_autosave_time = None
-
+        self.tracking_mode_enabled = False
         # Add image dataset flag
         self.is_image_dataset = False
         self.image_files = []
@@ -4406,3 +4406,104 @@ class VideoAnnotationTool(QMainWindow):
                 deleted_files.append(filename)
 
         return deleted_files
+
+    #
+    # Tracking Methods
+    #
+    @log_exceptions
+    def toggle_tracking_mode(self, enabled):
+        self.tracking_mode_enabled = enabled
+        if enabled:
+            self.add_track_id_to_bboxes()
+            self.statusBar.showMessage("Tracking mode enabled: track_id will be auto-assigned", 3000)
+        else:
+            self.statusBar.showMessage("Tracking mode disabled: track_id hidden from UI", 3000)
+        # Update UI to hide/show track_id
+        self.update_annotation_list()
+        self.canvas.update()
+        
+    @log_exceptions
+    def add_track_id_to_bboxes(self):
+        """
+        Add a 'track_id' attribute to all bounding box annotations in all frames.
+        If already present, do nothing.
+        """
+        track_id_counter = 1
+        updated_count = 0
+
+        for frame_num, annotations in self.frame_annotations.items():
+            for ann in annotations:
+                # Only add to bounding boxes (not polygons/points)
+                if hasattr(ann, "rect"):  # Assuming BoundingBox has 'rect'
+                    if not hasattr(ann, "attributes"):
+                        ann.attributes = {}
+                    if "track_id" not in ann.attributes:
+                        ann.attributes["track_id"] = track_id_counter
+                        track_id_counter += 1
+                        updated_count += 1
+
+        # Also update current frame's annotations on the canvas
+        for ann in self.canvas.annotations:
+            if hasattr(ann, "rect"):
+                if not hasattr(ann, "attributes"):
+                    ann.attributes = {}
+                if "track_id" not in ann.attributes:
+                    ann.attributes["track_id"] = track_id_counter
+                    track_id_counter += 1
+
+        self.update_annotation_list()
+        self.canvas.update()
+        QMessageBox.information(self, "Track ID", f"Added 'track_id' to {updated_count} bounding boxes.")
+
+    
+    def assign_track_id_to_new_bbox(self, new_bbox):
+        """
+        Assigns a track_id to new_bbox based on IoU with previous frame's bboxes.
+        """
+        if not self.tracking_mode_enabled:
+            return
+
+        prev_frame = self.current_frame - 1
+        if prev_frame < 0 or prev_frame not in self.frame_annotations:
+            # No previous frame, assign new id
+            new_id = self.get_next_track_id()
+            new_bbox.attributes['track_id'] = new_id
+            return
+
+        prev_bboxes = [ann for ann in self.frame_annotations[prev_frame] if hasattr(ann, 'rect')]
+        best_iou = 0
+        best_ann = None
+        for ann in prev_bboxes:
+            iou_val = self.iou(new_bbox.rect, ann.rect)
+            if iou_val > best_iou:
+                best_iou = iou_val
+                best_ann = ann
+
+        if best_iou > 0.5 and best_ann and 'track_id' in best_ann.attributes:
+            new_bbox.attributes['track_id'] = best_ann.attributes['track_id']
+        else:
+            new_bbox.attributes['track_id'] = self.get_next_track_id()
+
+    def get_next_track_id(self):
+        # Find the max track_id used so far
+        max_id = 0
+        for anns in self.frame_annotations.values():
+            for ann in anns:
+                tid = ann.attributes.get('track_id') if hasattr(ann, 'attributes') else None
+                if tid is not None and isinstance(tid, int):
+                    max_id = max(max_id, tid)
+        return max_id + 1
+
+    def iou(self,rect1, rect2):
+        # rect: (x, y, w, h)
+        x1, y1, w1, h1 = rect1
+        x2, y2, w2, h2 = rect2
+        xi1 = max(x1, x2)
+        yi1 = max(y1, y2)
+        xi2 = min(x1 + w1, x2 + w2)
+        yi2 = min(y1 + h1, y2 + h2)
+        inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        union_area = box1_area + box2_area - inter_area
+        return inter_area / union_area if union_area > 0 else 0

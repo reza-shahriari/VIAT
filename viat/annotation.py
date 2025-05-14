@@ -26,7 +26,7 @@ class BoundingBox:
     Represents a bounding box annotation with class and attributes.
     """
 
-    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=None):
+    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=1.0,):
         """
         Initialize a bounding box annotation.
 
@@ -194,7 +194,9 @@ class AnnotationManager:
         attribute_widgets = {}
         first_widget = None
 
-        for attr_name, attr_value in sorted(annotation.attributes.items()):
+        for attr_name, attr_value in annotation.attributes.items():
+            if attr_name == "track_id" and not self.main_window.tracking_mode_enabled:
+                continue  # Hide track_id if tracking mode is off
             # Get attribute type from class configuration or infer from value
             attr_type = "string"
             attr_min = None
