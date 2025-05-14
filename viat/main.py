@@ -50,7 +50,7 @@ from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions
-
+from .tracking.nossort import NOCSORT
 
 logger = VIATLogger()
 
@@ -4421,7 +4421,7 @@ class VideoAnnotationTool(QMainWindow):
         # Update UI to hide/show track_id
         self.update_annotation_list()
         self.canvas.update()
-        
+
     @log_exceptions
     def add_track_id_to_bboxes(self):
         """

@@ -4,3 +4,7 @@ opencv-python==4.11.0.*
 pillow==9.2.0
 pyinstaller
 natsort
+# tracker
+scikit-learn
+loguru
+filterpy
