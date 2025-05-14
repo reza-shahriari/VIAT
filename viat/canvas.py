@@ -96,6 +96,10 @@ class VideoCanvas(QWidget):
         self.pan_mode_enabled = False
         # Debug flag for showing scores
         self.show_debug_scores = True
+        self._display_rect_cache = {}  # Cache for display rectangles
+        self._last_display_rect = None  # Cache the last display rectangle
+        self._last_zoom_level = 1.0    # Track zoom level for cache invalidation
+        self._last_image_size = None   # Track image size for cache invalidation
 
     def set_pan_mode(self, enabled):
         """Enable or disable pan mode"""
@@ -106,30 +110,47 @@ class VideoCanvas(QWidget):
             self.setCursor(Qt.ArrowCursor)
 
     def set_frame(self, frame):
-        """Set the current frame to display"""
+        """Set the current frame to display with optimized image conversion"""
         if frame is None:
             return
 
-        # Convert OpenCV BGR format to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_frame.shape
+        # Get frame dimensions before conversion to check if we need to update aspect ratio
+        h, w = frame.shape[:2]
+        new_aspect_ratio = w / h
+        
+        # Only update aspect ratio if it changed
+        if abs(self.aspect_ratio - new_aspect_ratio) > 0.001:
+            self.aspect_ratio = new_aspect_ratio
+            # Clear cache when aspect ratio changes
+            self._display_rect_cache.clear()
 
-        # Update aspect ratio based on the frame
-        self.aspect_ratio = w / h
-
-        # Create QImage from numpy array
-        bytes_per_line = ch * w
+        # Convert OpenCV BGR format to RGB (optimize with shared memory if possible)
+        if frame.strides[0] == frame.shape[1] * 3:  # Continuous in memory
+            # Use faster conversion for continuous arrays
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        else:
+            # Make continuous if not already
+            rgb_frame = cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2RGB)
+        
+        # Create QImage without copying data when possible
+        bytes_per_line = 3 * w
         q_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-
-        # Convert to QPixmap for display
+        
+        # Convert to QPixmap
+        old_size = (self.pixmap.width(), self.pixmap.height()) if self.pixmap else None
         self.pixmap = QPixmap.fromImage(q_img)
         
-        # Reset panning when a new frame is loaded
+        # Reset panning when a new frame is loaded only if at default zoom
         if self.zoom_level == 1.0:
             self.reset_pan()
+        
+        # Clear caches if image size changed
+        new_size = (self.pixmap.width(), self.pixmap.height())
+        if old_size != new_size:
+            self._display_rect_cache.clear()
+            self._last_image_size = new_size
             
         self.update()
-
     def set_current_class(self, class_name):
         """Set the current annotation class"""
         if class_name in self.class_colors:
@@ -138,233 +159,260 @@ class VideoCanvas(QWidget):
     def paintEvent(self, event):
         """Paint the canvas with the current frame and annotations"""
         painter = QPainter(self)
+        update_rect = event.rect()
+        painter.setClipRect(update_rect)
+
         painter.setRenderHint(QPainter.Antialiasing)
 
         # Fill background with dark color
         painter.fillRect(self.rect(), QColor(40, 40, 40))
-
-        if self.pixmap:
-            # Calculate display rectangle maintaining aspect ratio
-            display_rect = self.get_display_rect()
-
-            # Draw the image
+        if not self.pixmap:
+            return
+        
+        # Calculate display rectangle maintaining aspect ratio
+        display_rect = self.get_display_rect()
+        self._last_display_rect = display_rect
+        if not display_rect.intersects(update_rect):
+            return 
+        if update_rect.contains(display_rect):
+            # Full image is visible in update region
             painter.drawPixmap(display_rect, self.pixmap)
+        else:
+            # Only part of the image needs redrawing - calculate source rectangle
+            intersection = display_rect.intersected(update_rect)
+            source_x = (intersection.x() - display_rect.x()) * self.pixmap.width() / display_rect.width()
+            source_y = (intersection.y() - display_rect.y()) * self.pixmap.height() / display_rect.height()
+            source_w = intersection.width() * self.pixmap.width() / display_rect.width()
+            source_h = intersection.height() * self.pixmap.height() / display_rect.height()
+            
+            source_rect = QRect(int(source_x), int(source_y), int(source_w), int(source_h))
+            painter.drawPixmap(intersection, self.pixmap, source_rect)
+        
+        # Only draw annotations that intersect with the update area
+        for annotation in self.annotations:
+            display_rect = self.image_to_display_rect(annotation.rect)
+            
+            # Skip annotations outside the update area
+            if not display_rect.intersects(update_rect):
+                continue
+        # # Draw the image
+        # painter.drawPixmap(display_rect, self.pixmap)
 
-            # Draw smart edge indicator if enabled
-            if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
-                painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
-                painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
+        # Draw smart edge indicator if enabled
+        if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
+            painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
+            painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
 
-                # Draw "Smart Edge" text in the top-right corner
-                font = painter.font()
-                font.setPointSize(10)
-                font.setBold(True)
-                painter.setFont(font)
-                painter.setPen(QPen(QColor(0, 255, 0)))
-                painter.drawText(
-                    display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
-                )
-            # Draw annotations
-            for annotation in self.annotations:
-                # Convert annotation rectangle to display coordinates
-                display_rect = self.image_to_display_rect(annotation.rect)
+            # Draw "Smart Edge" text in the top-right corner
+            font = painter.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QPen(QColor(0, 255, 0)))
+            painter.drawText(
+                display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
+            )
+        # Draw annotations
+        for annotation in self.annotations:
+            # Convert annotation rectangle to display coordinates
+            display_rect = self.image_to_display_rect(annotation.rect)
 
-                # Skip if the rectangle is invalid or too small
-                if display_rect.width() <= 0 or display_rect.height() <= 0:
-                    continue
+            # Skip if the rectangle is invalid or too small
+            if display_rect.width() <= 0 or display_rect.height() <= 0:
+                continue
 
-                # Set pen based on selection status and source
-                if annotation == self.selected_annotation or annotation in self.selected_annotations:
-                    pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
-                else:
-                    # Determine pen style based on source
-                    if hasattr(annotation, 'source'):
-                        if annotation.source == "manual":
-                            pen = QPen(annotation.color, 2, Qt.SolidLine)
-                        elif annotation.source == "interpolated":
-                            pen = QPen(annotation.color, 2, Qt.DashLine)
-                        elif annotation.source == "tracked":
-                            pen = QPen(annotation.color, 2, Qt.DotLine)
-                        elif annotation.source == "detected":
-                            pen = QPen(annotation.color, 2, Qt.DashDotLine)
-                        else:
-                            pen = QPen(annotation.color, 2)
+            # Set pen based on selection status and source
+            if annotation == self.selected_annotation or annotation in self.selected_annotations:
+                pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
+            else:
+                # Determine pen style based on source
+                if hasattr(annotation, 'source'):
+                    if annotation.source == "manual":
+                        pen = QPen(annotation.color, 2, Qt.SolidLine)
+                    elif annotation.source == "interpolated":
+                        pen = QPen(annotation.color, 2, Qt.DashLine)
+                    elif annotation.source == "tracked":
+                        pen = QPen(annotation.color, 2, Qt.DotLine)
+                    elif annotation.source == "detected":
+                        pen = QPen(annotation.color, 2, Qt.DashDotLine)
                     else:
                         pen = QPen(annotation.color, 2)
+                else:
+                    pen = QPen(annotation.color, 2)
 
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(display_rect)
+
+            # Highlight hovered annotation
+            if annotation == self.selected_annotation and self.underMouse():
+                painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
                 painter.drawRect(display_rect)
 
-                # Highlight hovered annotation
-                if annotation == self.selected_annotation and self.underMouse():
-                    painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
-                    painter.drawRect(display_rect)
+            # Set up font for labels
+            font = painter.font()
+            font.setPointSize(8)
+            painter.setFont(font)
 
-                # Set up font for labels
-                font = painter.font()
-                font.setPointSize(8)
-                painter.setFont(font)
+            # Standard text height for all labels
+            text_height = 16
 
-                # Standard text height for all labels
-                text_height = 16
+            # Determine if we should draw the class label above or below the box
+            # Check if there's more space above than below
+            space_above = display_rect.top()
+            space_below = self.height() - display_rect.bottom()
+            draw_above = space_above >= space_below
 
-                # Determine if we should draw the class label above or below the box
-                # Check if there's more space above than below
-                space_above = display_rect.top()
-                space_below = self.height() - display_rect.bottom()
-                draw_above = space_above >= space_below
+            # Calculate class label width and position
+            text_width = min(
+                max(60, display_rect.width()), 120
+            )  # Min 60px, max 120px
 
-                # Calculate class label width and position
-                text_width = min(
-                    max(60, display_rect.width()), 120
-                )  # Min 60px, max 120px
+            # Position the class label centered horizontally with the box
+            text_x = display_rect.left() + (display_rect.width() - text_width) / 2
 
-                # Position the class label centered horizontally with the box
-                text_x = display_rect.left() + (display_rect.width() - text_width) / 2
+            if draw_above:
+                # Draw above the box with a small gap
+                text_y = max(0, display_rect.top() - text_height - 2)
+            else:
+                # Draw below the box with a small gap
+                text_y = min(self.height() - text_height, display_rect.bottom() + 2)
 
-                if draw_above:
-                    # Draw above the box with a small gap
-                    text_y = max(0, display_rect.top() - text_height - 2)
-                else:
-                    # Draw below the box with a small gap
-                    text_y = min(self.height() - text_height, display_rect.bottom() + 2)
+            text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
 
-                text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
-
-                # Draw class label with semi-transparent background
-                # Add visual indicator for verification status
-                bg_color = QColor(
-                    annotation.color.red(),
-                    annotation.color.green(),
-                    annotation.color.blue(),
-                    180,
+            # Draw class label with semi-transparent background
+            # Add visual indicator for verification status
+            bg_color = QColor(
+                annotation.color.red(),
+                annotation.color.green(),
+                annotation.color.blue(),
+                180,
+            )
+            
+            # Add a border to indicate verification status
+            if hasattr(annotation, 'verified') and not annotation.verified:
+                # Draw a warning indicator for unverified annotations
+                painter.fillRect(
+                    text_rect,
+                    QColor(255, 165, 0, 180)  # Orange background for unverified
                 )
                 
-                # Add a border to indicate verification status
-                if hasattr(annotation, 'verified') and not annotation.verified:
-                    # Draw a warning indicator for unverified annotations
-                    painter.fillRect(
-                        text_rect,
-                        QColor(255, 165, 0, 180)  # Orange background for unverified
-                    )
-                    
-                    # Add a small verification indicator
-                    verify_rect = QRect(
-                        int(text_rect.right() - 16), 
-                        int(text_rect.top()), 
-                        16, 
-                        16
-                    )
-                    painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
-                    painter.setPen(QPen(QColor(255, 255, 255)))
-                    painter.drawText(verify_rect, Qt.AlignCenter, "!")
-                else:
-                    painter.fillRect(text_rect, bg_color)
+                # Add a small verification indicator
+                verify_rect = QRect(
+                    int(text_rect.right() - 16), 
+                    int(text_rect.top()), 
+                    16, 
+                    16
+                )
+                painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
+                painter.setPen(QPen(QColor(255, 255, 255)))
+                painter.drawText(verify_rect, Qt.AlignCenter, "!")
+            else:
+                painter.fillRect(text_rect, bg_color)
 
-                # Draw source indicator if not manual
-                if hasattr(annotation, 'source') and annotation.source != "manual":
-                    source_text = annotation.source[:1].upper()  # First letter of source
-                    source_rect = QRect(
-                        int(text_rect.left()), 
-                        int(text_rect.top()), 
-                        16, 
-                        16
-                    )
-                    painter.fillRect(source_rect, QColor(0, 0, 0, 180))
-                    painter.setPen(QPen(QColor(255, 255, 255)))
-                    painter.drawText(source_rect, Qt.AlignCenter, source_text)
-                    
-                    # Adjust text rect to make room for source indicator
-                    text_rect.setLeft(text_rect.left() + 16)
-
-                painter.setPen(QPen(QColor(0, 0, 0)))
-                painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+            # Draw source indicator if not manual
+            if hasattr(annotation, 'source') and annotation.source != "manual":
+                source_text = annotation.source[:1].upper()  # First letter of source
+                source_rect = QRect(
+                    int(text_rect.left()), 
+                    int(text_rect.top()), 
+                    16, 
+                    16
+                )
+                painter.fillRect(source_rect, QColor(0, 0, 0, 180))
+                painter.setPen(QPen(QColor(255, 255, 255)))
+                painter.drawText(source_rect, Qt.AlignCenter, source_text)
                 
-                # DEBUG: Show score if debug flag is enabled and annotation has a score
-                if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
-                    score_text = f"{annotation.score:.2f}"
-                    score_rect = QRect(
-                        int(display_rect.right() - 40),
-                        int(display_rect.top() - 16),
-                        40,
-                        16
+                # Adjust text rect to make room for source indicator
+                text_rect.setLeft(text_rect.left() + 16)
+
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
+            
+            # DEBUG: Show score if debug flag is enabled and annotation has a score
+            if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
+                score_text = f"{annotation.score:.2f}"
+                score_rect = QRect(
+                    int(display_rect.right() - 40),
+                    int(display_rect.top() - 16),
+                    40,
+                    16
+                )
+                painter.fillRect(score_rect, QColor(0, 0, 0, 180))
+                painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
+                painter.drawText(score_rect, Qt.AlignCenter, score_text)
+
+            # Draw attributes to the right of the box if there's space, otherwise to the left
+            if annotation.attributes:
+                # Calculate the total height needed for all attributes
+                attr_count = len(annotation.attributes)
+                attr_total_height = text_height * attr_count
+                
+                # Format each attribute on its own line
+                attr_lines = []
+                for key, value in annotation.attributes.items():
+                    attr_lines.append(f"{key}: {value}")
+                
+                # Calculate width needed for the longest attribute
+                attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
+                
+                # Check if there's enough space to the right
+                space_right = self.width() - display_rect.right()
+                
+                if space_right >= attr_width + 5:
+                    # Draw to the right
+                    attr_x = display_rect.right() + 5
+                else:
+                    # Draw to the left
+                    attr_x = max(0, display_rect.left() - attr_width - 5)
+                
+                # Vertically position attributes centered with the box
+                # If too many attributes, start higher to fit them all
+                if attr_total_height > display_rect.height():
+                    attr_y = max(0, display_rect.top())
+                else:
+                    attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
+                
+                # Draw each attribute on its own line
+                for i, attr_text in enumerate(attr_lines):
+                    attr_rect = QRect(
+                        int(attr_x),
+                        int(attr_y + i * text_height),
+                        attr_width,
+                        text_height,
                     )
-                    painter.fillRect(score_rect, QColor(0, 0, 0, 180))
-                    painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
-                    painter.drawText(score_rect, Qt.AlignCenter, score_text)
+                    
+                    painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                    painter.setPen(QPen(QColor(255, 255, 255)))
+                    painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
 
-                # Draw attributes to the right of the box if there's space, otherwise to the left
-                if annotation.attributes:
-                    # Calculate the total height needed for all attributes
-                    attr_count = len(annotation.attributes)
-                    attr_total_height = text_height * attr_count
-                    
-                    # Format each attribute on its own line
-                    attr_lines = []
-                    for key, value in annotation.attributes.items():
-                        attr_lines.append(f"{key}: {value}")
-                    
-                    # Calculate width needed for the longest attribute
-                    attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
-                    
-                    # Check if there's enough space to the right
-                    space_right = self.width() - display_rect.right()
-                    
-                    if space_right >= attr_width + 5:
-                        # Draw to the right
-                        attr_x = display_rect.right() + 5
-                    else:
-                        # Draw to the left
-                        attr_x = max(0, display_rect.left() - attr_width - 5)
-                    
-                    # Vertically position attributes centered with the box
-                    # If too many attributes, start higher to fit them all
-                    if attr_total_height > display_rect.height():
-                        attr_y = max(0, display_rect.top())
-                    else:
-                        attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
-                    
-                    # Draw each attribute on its own line
-                    for i, attr_text in enumerate(attr_lines):
-                        attr_rect = QRect(
-                            int(attr_x),
-                            int(attr_y + i * text_height),
-                            attr_width,
-                            text_height,
-                        )
-                        
-                        painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
-                        painter.setPen(QPen(QColor(255, 255, 255)))
-                        painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
+            # Draw resize handles (corners and edges)
+            handle_size = 8
+            for point in self.get_handle_points(display_rect):
+                # Use class color for handle
+                handle_fill = QColor(annotation.color)
+                handle_fill.setAlpha(200)
+                painter.setBrush(handle_fill)
+                painter.setPen(QPen(QColor(0, 0, 0), 1))
+                painter.drawEllipse(point, handle_size // 2, handle_size // 2)
 
-                # Draw resize handles (corners and edges)
-                handle_size = 8
-                for point in self.get_handle_points(display_rect):
-                    # Use class color for handle
-                    handle_fill = QColor(annotation.color)
-                    handle_fill.setAlpha(200)
-                    painter.setBrush(handle_fill)
-                    painter.setPen(QPen(QColor(0, 0, 0), 1))
-                    painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+        # Draw the in-progress bounding box (while drawing)
+        if self.is_drawing and self.start_point and self.current_point:
+            color = self.class_colors.get(self.current_class, QColor(255, 0, 0, 180))
+            pen = QPen(color, 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            display_rect = self.image_to_display_rect(QRect(self.start_point, self.current_point).normalized())
+            painter.drawRect(display_rect)
 
-            # Draw the in-progress bounding box (while drawing)
-            if self.is_drawing and self.start_point and self.current_point:
-                color = self.class_colors.get(self.current_class, QColor(255, 0, 0, 180))
-                pen = QPen(color, 2, Qt.DashLine)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                display_rect = self.image_to_display_rect(QRect(self.start_point, self.current_point).normalized())
-                painter.drawRect(display_rect)
-
-            # For TwoClick mode: show the first point and a crosshair
-            if self.annotation_method == "TwoClick" and self.two_click_first_point:
-                pen = QPen(QColor(0, 255, 0, 180), 2, Qt.DashLine)
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                mouse_pos = self.current_point if self.current_point else self.two_click_first_point
-                display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
-                painter.drawRect(display_rect)
+        # For TwoClick mode: show the first point and a crosshair
+        if self.annotation_method == "TwoClick" and self.two_click_first_point:
+            pen = QPen(QColor(0, 255, 0, 180), 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            mouse_pos = self.current_point if self.current_point else self.two_click_first_point
+            display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
+            painter.drawRect(display_rect)
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
@@ -434,31 +482,72 @@ class VideoCanvas(QWidget):
         return QPoint(disp_x, disp_y)
 
     def image_to_display_rect(self, rect):
-        """Convert image rectangle to display rectangle"""
+        """Convert image rectangle to display rectangle with caching"""
         if not self.pixmap:
             return rect
-
+            
+        # Check cache first - use rect id as key
+        cache_key = id(rect)
+        
+        # If zoom level or image size changed, invalidate the whole cache
+        current_image_size = (self.pixmap.width(), self.pixmap.height()) if self.pixmap else None
+        if self._last_zoom_level != self.zoom_level or self._last_image_size != current_image_size:
+            self._display_rect_cache.clear()
+            self._last_zoom_level = self.zoom_level
+            self._last_image_size = current_image_size
+        
+        # Return cached value if available and valid
+        if cache_key in self._display_rect_cache:
+            # Verify the rect hasn't changed (could have been modified externally)
+            cached_input, cached_output = self._display_rect_cache[cache_key]
+            if (cached_input.x() == rect.x() and cached_input.y() == rect.y() and
+                cached_input.width() == rect.width() and cached_input.height() == rect.height()):
+                return cached_output
+        
         # Convert top-left and bottom-right points
         top_left = self.image_to_display_pos(rect.topLeft())
         bottom_right = self.image_to_display_pos(rect.bottomRight())
 
         if top_left and bottom_right:
-            return QRect(top_left, bottom_right)
+            result = QRect(top_left, bottom_right)
+            # Store in cache (store both input and output to verify later)
+            self._display_rect_cache[cache_key] = (QRect(rect), result)
+            return result
         return QRect()
 
     def display_to_image_rect(self, rect):
-        """Convert display rectangle to image rectangle"""
+        """Convert display rectangle to image rectangle with caching"""
         if not self.pixmap:
             return rect
-
+            
+        # Check cache first - use rect id as key
+        cache_key = id(rect)
+        
+        # If zoom level or image size changed, invalidate the whole cache
+        current_image_size = (self.pixmap.width(), self.pixmap.height()) if self.pixmap else None
+        if self._last_zoom_level != self.zoom_level or self._last_image_size != current_image_size:
+            self._display_rect_cache.clear()
+            self._last_zoom_level = self.zoom_level
+            self._last_image_size = current_image_size
+        
+        # Return cached value if available and valid
+        if cache_key in self._display_rect_cache:
+            # Verify the rect hasn't changed (could have been modified externally)
+            cached_input, cached_output = self._display_rect_cache[cache_key]
+            if (cached_input.x() == rect.x() and cached_input.y() == rect.y() and
+                cached_input.width() == rect.width() and cached_input.height() == rect.height()):
+                return cached_output
+        
         # Convert top-left and bottom-right points
         top_left = self.display_to_image_pos(rect.topLeft())
         bottom_right = self.display_to_image_pos(rect.bottomRight())
 
         if top_left and bottom_right:
-            return QRect(top_left, bottom_right)
+            result = QRect(top_left, bottom_right)
+            # Store in cache (store both input and output to verify later)
+            self._display_rect_cache[cache_key] = (QRect(rect), result)
+            return result
         return QRect()
-
     def detect_edge(self, rect, pos, threshold=12,inner_threshold =2):
         """
         Detect if the cursor is near an edge of the rectangle.
@@ -1308,6 +1397,9 @@ class VideoCanvas(QWidget):
     def reset_pan(self):
         """Reset the pan offset to center the image"""
         self.pan_offset = QPoint(0, 0)
+        # Force recalculation of display rectangle
+        if hasattr(self, '_last_display_rect'):
+            self._last_display_rect = None
         self.update()
    
     def verify_annotation(self, annotation):
@@ -1440,3 +1532,94 @@ class VideoCanvas(QWidget):
             if handle_rect.contains(pos):
                 return idx
         return None
+
+    def update_annotation(self, annotation):
+        """Update a specific annotation with minimal redrawing"""
+        if not self.pixmap:
+            return
+            
+        # Calculate the display rectangle for the annotation
+        display_rect = self.image_to_display_rect(annotation.rect)
+        
+        # Create a larger region that includes handles, labels, etc.
+        padding = 40  # Enough padding for labels, handles, attributes
+        update_region = display_rect.adjusted(-padding, -padding, padding, padding)
+        
+        # Update only that region
+        self.update(update_region)
+
+    def update_annotations(self, annotations=None):
+        """Update multiple annotations with optimized redrawing"""
+        if not self.pixmap:
+            return
+            
+        if annotations is None:
+            # Update all annotations
+            self.update()
+            return
+            
+        # Calculate the combined region that needs updating
+        update_region = None
+        padding = 40  # For handles, labels, etc.
+        
+        # Optimize rendering based on number of annotations
+        self.optimize_rendering(len(annotations))
+        
+        for annotation in annotations:
+            display_rect = self.image_to_display_rect(annotation.rect)
+            padded_rect = display_rect.adjusted(-padding, -padding, padding, padding)
+            
+            if update_region is None:
+                update_region = padded_rect
+            else:
+                # Union with existing region
+                update_region = update_region.united(padded_rect)
+        
+        if update_region:
+            self.update(update_region)
+        else:
+            # Fallback if no annotations provided
+            self.update()
+
+    def resizeEvent(self, event):
+        """Handle resize events to maintain proper image position"""
+        if not self.pixmap:
+            super().resizeEvent(event)
+            return
+            
+        # Get old and new sizes
+        old_size = event.oldSize()
+        new_size = event.size()
+        
+        # Only process if we have valid old size
+        if old_size.width() > 0 and old_size.height() > 0:
+            # Calculate the scale factor for the widget resize
+            width_scale = new_size.width() / old_size.width()
+            height_scale = new_size.height() / old_size.height()
+            
+            # Calculate central point before resize
+            old_center_x = old_size.width() / 2 + self.pan_offset.x() / self.zoom_level
+            old_center_y = old_size.height() / 2 + self.pan_offset.y() / self.zoom_level
+            
+            # Calculate what the new center should be
+            new_center_x = old_center_x * width_scale
+            new_center_y = old_center_y * height_scale
+            
+            # Calculate new pan offset
+            new_offset_x = new_center_x - new_size.width() / 2
+            new_offset_y = new_center_y - new_size.height() / 2
+            
+            # Apply new pan offset adjusted for zoom
+            self.pan_offset = QPoint(int(new_offset_x * self.zoom_level), 
+                                    int(new_offset_y * self.zoom_level))
+            
+            # If at default zoom level with no panning, reset pan to center
+            if abs(self.zoom_level - 1.0) < 0.01 and (
+                abs(self.pan_offset.x()) < 10 and abs(self.pan_offset.y()) < 10):
+                self.reset_pan()
+        
+        # Clear any cached rectangles since canvas size changed
+        if hasattr(self, '_display_rect_cache'):
+            self._display_rect_cache.clear()
+        
+        super().resizeEvent(event)
