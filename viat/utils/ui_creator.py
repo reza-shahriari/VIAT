@@ -560,7 +560,7 @@ class UICreator:
         
         interval_spinner = QSpinBox()
         interval_spinner.setRange(2, 100)
-        interval_spinner.setValue(5)  # Default interval
+        interval_spinner.setValue(10)  # Default interval
         interval_spinner.valueChanged.connect(lambda v: self.main_window.interpolation_manager.set_interval(v))
         self.main_window.interval_spinner = interval_spinner
         interpolation_toolbar.addWidget(interval_spinner)
