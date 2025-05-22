@@ -3582,9 +3582,9 @@ class VideoAnnotationTool(QMainWindow):
                 if not getattr(ann, "verified", False)
             ]
             for ann in unverified:
-                if ann.get("source",'')=='interpolated':
-                    ann['source'] = 'manual'
-                    ann['verified'] = True
+                if ann.source == 'interpolated':
+                    ann.source = 'manual'
+                    ann.verified = True
             if unverified:
                 # Remove unverified annotations
                 self.frame_annotations[self.current_frame] = [
