@@ -121,6 +121,8 @@ def save_project(
     tracking_mode_enabled=False,
     interpolation_mode_active=False,
     verification_mode_enabled=False,
+    annotations_imported_list=None,
+
 ):
     """
     Save project to a JSON file.
@@ -180,6 +182,7 @@ def save_project(
         "tracking_mode_enabled": tracking_mode_enabled,
         "interpolation_mode_active": interpolation_mode_active,
         "verification_mode_enabled": verification_mode_enabled,
+        "annotations_imported_list": annotations_imported_list,
     }
 
     # Add frame hashes if available
@@ -275,6 +278,7 @@ def load_project(filename, bbox_class):
     tracking_mode_enabled = project_data.get("tracking_mode_enabled", False)
     interpolation_mode_active = project_data.get("interpolation_mode_active", False)
     verification_mode_enabled = project_data.get("verification_mode_enabled", False)
+    annotations_imported_list = project_data.get("annotations_imported_list", [])
 
     # Update recent projects list
     update_recent_projects(filename)
@@ -296,6 +300,7 @@ def load_project(filename, bbox_class):
         tracking_mode_enabled,
         interpolation_mode_active,
         verification_mode_enabled,
+        annotations_imported_list
     )
 
 def get_recent_projects():
@@ -1806,7 +1811,8 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
                 )
 
 def import_annotations(
-    filename, bbox_class, image_width=640, image_height=480, class_colors=None
+    filename, bbox_class, image_width=640, image_height=480, class_colors=None,
+    existing_annotations=None
 ):
     """
     Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
@@ -1818,6 +1824,7 @@ def import_annotations(
         image_width (int, optional): Width of the image/video frame
         image_height (int, optional): Height of the image/video frame
         class_colors (dict, optional): Dictionary mapping class names to colors
+        existing_annotations (dict, optional): Dictionary mapping frame numbers to existing annotations
 
     Returns:
         tuple: (format_type, annotations, frame_annotations)
@@ -1895,13 +1902,58 @@ def import_annotations(
     
     _scale_annotation_scores([list(frame_annotations.values())])
    
+    # Filter out overlapping annotations among the new ones
     frame_annotations = _filter_overlapping_annotations(frame_annotations)
+    
+    # Filter out annotations that significantly overlap with existing annotations
+    if existing_annotations:
+        frame_annotations = _filter_against_existing_annotations(frame_annotations, existing_annotations)
         
     # Update annotations list for current frame (frame 0)
     if 0 in frame_annotations:
         annotations = frame_annotations[0]
 
     return format_type, annotations, frame_annotations
+
+def _filter_against_existing_annotations(new_annotations, existing_annotations, iou_threshold=0.8):
+    """
+    Filter out new annotations that have significant overlap (IoU > threshold) with existing annotations.
+    
+    Args:
+        new_annotations (dict): Dictionary mapping frame numbers to lists of new annotations
+        existing_annotations (dict): Dictionary mapping frame numbers to lists of existing annotations
+        iou_threshold (float): IoU threshold above which annotations are considered duplicates (default: 0.8)
+        
+    Returns:
+        dict: Filtered frame annotations
+    """
+    filtered_annotations = {}
+    
+    for frame_num, new_anns in new_annotations.items():
+        # Get existing annotations for this frame if available
+        existing_anns = existing_annotations.get(frame_num, [])
+        
+        # Filter out annotations with high IoU with existing ones
+        kept_annotations = []
+        for new_ann in new_anns:
+            # Check if this annotation overlaps with any existing annotation
+            is_duplicate = False
+            for existing_ann in existing_anns:
+                iou = _calculate_iou(new_ann.rect, existing_ann.rect)
+                if iou > iou_threshold:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                kept_annotations.append(new_ann)
+        
+        if kept_annotations:
+            filtered_annotations[frame_num] = kept_annotations
+        elif frame_num in new_annotations:
+            # Keep the frame key in the dictionary even if all annotations were filtered out
+            filtered_annotations[frame_num] = []
+    
+    return filtered_annotations
 
 def _calculate_iou(box1, box2):
     """

@@ -566,7 +566,8 @@ class VideoCanvas(QWidget):
             self._display_rect_cache[cache_key] = (QRect(rect), result)
             return result
         return QRect()
-    def detect_edge(self, rect, pos, threshold=12,inner_threshold =2):
+
+    def detect_edge(self, rect, pos, threshold=12, inner_threshold=2):
         """
         Detect if the cursor is near an edge of the rectangle.
         Only detects an edge if the cursor is within threshold pixels of the edge
@@ -576,6 +577,7 @@ class VideoCanvas(QWidget):
             rect: QRect object in display coordinates
             pos: QPoint cursor position
             threshold: Distance threshold to consider cursor near an edge
+            inner_threshold: Minimum distance from other edges
 
         Returns:
             Edge constant (EDGE_NONE, EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_LEFT)
@@ -584,31 +586,68 @@ class VideoCanvas(QWidget):
         if not rect.adjusted(-threshold, -threshold, threshold, threshold).contains(pos):
             return EDGE_NONE
         
-        # Create an inner rectangle that's threshold pixels in from the edges
-        inner_rect = rect.adjusted(inner_threshold, inner_threshold, -inner_threshold, -inner_threshold)
-        
-        # If cursor is inside the inner rectangle, don't detect any edge
-        if inner_rect.contains(pos):
-            return EDGE_NONE
-
-        # Now check which edge the cursor is closest to
+        # Calculate distance to each edge
         dist_to_top = abs(pos.y() - rect.top())
         dist_to_right = abs(pos.x() - rect.right())
         dist_to_bottom = abs(pos.y() - rect.bottom())
         dist_to_left = abs(pos.x() - rect.left())
         
-        min_dist = min(dist_to_top, dist_to_right, dist_to_bottom, dist_to_left)
+        # Check if any distance is within threshold
+        candidates = []
+        if dist_to_top <= threshold:
+            candidates.append((EDGE_TOP, dist_to_top))
+        if dist_to_right <= threshold:
+            candidates.append((EDGE_RIGHT, dist_to_right))
+        if dist_to_bottom <= threshold:
+            candidates.append((EDGE_BOTTOM, dist_to_bottom))
+        if dist_to_left <= threshold:
+            candidates.append((EDGE_LEFT, dist_to_left))
         
-        if min_dist == dist_to_top and dist_to_top <= threshold:
-            return EDGE_TOP
-        elif min_dist == dist_to_right and dist_to_right <= threshold:
-            return EDGE_RIGHT
-        elif min_dist == dist_to_bottom and dist_to_bottom <= threshold:
-            return EDGE_BOTTOM
-        elif min_dist == dist_to_left and dist_to_left <= threshold:
-            return EDGE_LEFT
+        if not candidates:
+            return EDGE_NONE
         
-        return EDGE_NONE
+        # Sort by distance (closest first)
+        candidates.sort(key=lambda x: x[1])
+        
+        # Prevent corner ambiguity by checking if we're near a corner
+        # and choosing the closest edge when ambiguous
+        if len(candidates) > 1:
+            # If we're in a corner, check if the cursor is closer to one edge
+            # For example, for top-left corner, check if cursor is closer to top or left
+            edge1, dist1 = candidates[0]
+            edge2, dist2 = candidates[1]
+            
+            # If the distances are very close, prioritize based on position
+            if abs(dist1 - dist2) < inner_threshold:
+                # For corners, determine which edge based on position relative to corner diagonal
+                if (edge1 == EDGE_TOP and edge2 == EDGE_LEFT) or (edge1 == EDGE_LEFT and edge2 == EDGE_TOP):
+                    # Top-left corner
+                    if pos.x() - rect.left() < pos.y() - rect.top():
+                        return EDGE_LEFT
+                    else:
+                        return EDGE_TOP
+                elif (edge1 == EDGE_TOP and edge2 == EDGE_RIGHT) or (edge1 == EDGE_RIGHT and edge2 == EDGE_TOP):
+                    # Top-right corner
+                    if rect.right() - pos.x() < pos.y() - rect.top():
+                        return EDGE_RIGHT
+                    else:
+                        return EDGE_TOP
+                elif (edge1 == EDGE_BOTTOM and edge2 == EDGE_LEFT) or (edge1 == EDGE_LEFT and edge2 == EDGE_BOTTOM):
+                    # Bottom-left corner
+                    if pos.x() - rect.left() < rect.bottom() - pos.y():
+                        return EDGE_LEFT
+                    else:
+                        return EDGE_BOTTOM
+                elif (edge1 == EDGE_BOTTOM and edge2 == EDGE_RIGHT) or (edge1 == EDGE_RIGHT and edge2 == EDGE_BOTTOM):
+                    # Bottom-right corner
+                    if rect.right() - pos.x() < rect.bottom() - pos.y():
+                        return EDGE_RIGHT
+                    else:
+                        return EDGE_BOTTOM
+        
+        # Return the closest edge
+        return candidates[0][0]
+
 
     def get_edge_cursor(self, edge):
         """Return the appropriate cursor for the given edge"""
@@ -1288,6 +1327,7 @@ class VideoCanvas(QWidget):
             self.update()
         #  Ctrl+Arrow keys to move the selected annotation
         elif self.selected_annotation:
+        
             # Move annotation with keys
             if (event.key() == Qt.Key_Up and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move up
                 # Move primary selected annotation
@@ -1358,6 +1398,9 @@ class VideoCanvas(QWidget):
                     self.selected_annotation.rect.right() - 1
                 )
                 self.update_annotation_after_edit()
+            elif event.key() == Qt.Key_M and self.selected_annotation:
+                if hasattr(self.selected_annotation, 'verified') and not self.selected_annotation.verified:
+                        self.verify_annotation(self.selected_annotation)
             else:
                 super().keyPressEvent(event)
 

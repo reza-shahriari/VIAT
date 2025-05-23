@@ -59,7 +59,7 @@ class IconProvider:
     def get_icon(self, icon_name):
         """Get an icon by name, using QtAwesome icons with fallback to custom icons"""
         # Determine icon color based on theme
-        icon_color = "orange"
+        icon_color = "#20BAD9"  
 
         # Try to get icon from QtAwesome with theme-appropriate color
         if icon_name in self.fa_icon_map:

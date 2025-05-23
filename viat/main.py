@@ -87,7 +87,7 @@ from utils import (
 from utils.icon_provider import IconProvider
 from natsort import natsorted
 from copy import deepcopy
-
+from pathlib import Path
 
 class VideoAnnotationTool(QMainWindow):
     """
@@ -206,8 +206,10 @@ class VideoAnnotationTool(QMainWindow):
         self.autosave_enabled = True
         self.autosave_interval = 5000
         self.autosave_file = None
+        self._annotations_imported = set()
         self.last_autosave_time = None
         self.tracking_mode_enabled = False
+        self.verification_mode = False
         # Add image dataset flag
         self.is_image_dataset = False
         self.image_files = []
@@ -1546,10 +1548,12 @@ class VideoAnnotationTool(QMainWindow):
     # -------------------------------------------------------------------------
 
     @log_exceptions
-    def save_project(self, save_as=False):
+    def save_project(self, filename=False):
         """Save the current project."""
-        if not save_as and self.project_file:
+        if not filename and self.project_file:
             filename = self.project_file
+        elif filename:
+            pass
         else:
             filename, _ = QFileDialog.getSaveFileName(
                 self, "Save Project", "", "JSON Files (*.json);;All Files (*)"
@@ -1577,7 +1581,7 @@ class VideoAnnotationTool(QMainWindow):
 
             # Get class attributes if available
             class_attributes = getattr(self.canvas, "class_attributes", {})
-
+            backup_before_save(filename)
             # Save project with additional data
             save_project(
                 filename,
@@ -1596,7 +1600,8 @@ class VideoAnnotationTool(QMainWindow):
                 image_dataset_info=image_dataset_info,
                 tracking_mode_enabled=self.tracking_mode_enabled,
                 interpolation_mode_active=self.interpolation_manager.is_active,
-                verification_mode_enabled=self.verification_mode_enabled,
+                verification_mode_enabled=self.verification_mode,
+                annotations_imported_list=list(self._annotations_imported) if hasattr(self, "_annotations_imported") else [],
             )
 
             self.project_file = filename
@@ -1650,6 +1655,10 @@ class VideoAnnotationTool(QMainWindow):
 
             # Reset application state
             self.reset_application_state()
+            
+            # Clear imported annotations tracking
+            if hasattr(self, "_annotations_imported"):
+                self._annotations_imported = set()
 
             # Show success message
             QMessageBox.information(
@@ -1664,72 +1673,12 @@ class VideoAnnotationTool(QMainWindow):
                 self, "Error", f"An error occurred while deleting history: {str(e)}"
             )
 
-    
-    @log_exceptions
-    def save_project(self, filename=None):
-        """Save the current project to a file."""
-        if not filename:
-            if self.project_path:
-                # Use existing project path
-                filename = self.project_path
-            else:
-                # Ask for a file name
-                filename, _ = QFileDialog.getSaveFileName(
-                    self, "Save Project", "", "VIAT Project Files (*.viat)"
-                )
-                if not filename:
-                    return False  # User cancelled
 
-        # Ensure it has the correct extension
-        if not filename.endswith(".viat"):
-            filename += ".viat"
-
-        # Create a backup of the existing file if it exists
-        backup_before_save(filename)
-
-        # Set the current project path
-        self.project_path = filename
-        self.setWindowTitle(f"Video Annotation Tool - {os.path.basename(filename)}")
-
-        # Check if we're in the middle of annotation editing
-        if self.annotation_dock.editing_annotation:
-            self.annotation_dock.apply_changes()
-
-        try:
-            save_project(
-                filename,
-                self.canvas.annotations,
-                self.class_colors,
-                self.video_filename if hasattr(self, "video_filename") else None,
-                self.current_frame,
-                self.frame_annotations,
-                self.class_attributes,
-                self.current_style,
-                self.auto_show_attribute_dialog,
-                self.use_previous_attributes,
-                self.duplicate_frames_enabled,
-                self.frame_hashes if hasattr(self, "frame_hashes") else None,
-                self.duplicate_frames_cache if hasattr(self, "duplicate_frames_cache") else None,
-                self.image_dataset_info if hasattr(self, "image_dataset_info") else None,
-                # Add mode states
-                self.tracking_mode_enabled if hasattr(self, "tracking_mode_enabled") else False,
-                self.interpolation_manager.is_active if hasattr(self.interpolation_manager, "is_active") else False,
-                self.verification_mode if hasattr(self, "verification_mode") else False,
-            )
-            self.statusBar.showMessage(f"Project saved to {filename}", 5000)
-            self.project_modified = False
-            return True
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Error Saving Project",
-                f"Could not save project:\n{str(e)}",
-            )
-            return False
 
     @log_exceptions
     def load_project(self, filename=None):
         """Load a project from a file."""
+
         if not filename:
             # Ask for a file name
             filename, _ = QFileDialog.getOpenFileName(
@@ -1767,8 +1716,8 @@ class VideoAnnotationTool(QMainWindow):
                 tracking_mode_enabled,
                 interpolation_mode_active,
                 verification_mode_enabled,
+                annotations_imported_list,
             ) = load_project(filename, BoundingBox)
-            
             # Set up the application with the loaded data
             self.canvas.annotations = annotations
             self.class_colors = class_colors
@@ -1779,6 +1728,12 @@ class VideoAnnotationTool(QMainWindow):
             self.auto_show_attribute_dialog = auto_show_attribute_dialog
             self.use_previous_attributes = use_previous_attributes
             self.duplicate_frames_enabled = duplicate_frames_enabled
+            
+            # Restore annotations imported tracking
+            if annotations_imported_list:
+                self._annotations_imported = set(annotations_imported_list)
+            else:
+                self._annotations_imported = set()
             
             if frame_hashes:
                 self.frame_hashes = frame_hashes
@@ -1847,6 +1802,7 @@ class VideoAnnotationTool(QMainWindow):
         # Load last project if it exists
         last_project = state.get("last_project")
         if last_project and os.path.exists(last_project):
+            self.has_autosave = True
             self.load_project(last_project)
             return True
 
@@ -2323,7 +2279,7 @@ class VideoAnnotationTool(QMainWindow):
             if not filename:
                 return
         self.save_undo_state()
-
+        self._annotations_imported.add(filename)
         # Check if it's a VIAT project file
         try:
             with open(filename, "r") as f:
@@ -2401,12 +2357,23 @@ class VideoAnnotationTool(QMainWindow):
         Args:
             video_filename (str): Path to the video file
         """
+            
+        # If we've already imported annotations for this video, skip the check
+        
+        extensions = [".txt", ".json", ".xml"]
+        file_basename, _ = os.path.splitext(video_filename)
+        for vid in self._annotations_imported:
+            for ext in extensions:
+                if Path(file_basename + ext)== Path(vid):
+                    return
+        
         # Get the directory and base name without extension
-        directory = os.path.dirname(video_filename)
+        directory = os.path.join(os.path.dirname(video_filename),)
+        save_path = os.path.join(directory,'auto_save')
         base_name = os.path.splitext(os.path.basename(video_filename))[0]
 
         # Check for auto-save file first
-        autosave_file = os.path.join(directory, f"{base_name}_autosave.json")
+        autosave_file = os.path.join(save_path, f"{base_name}_autosave.json")
 
         # Only show auto-save prompt if we're not loading from a project
         if os.path.exists(autosave_file) and not hasattr(self, "_loading_from_project"):
@@ -2442,7 +2409,6 @@ class VideoAnnotationTool(QMainWindow):
                         )
 
         # List of possible annotation file extensions to check
-        extensions = [".txt", ".json", ".xml"]
 
         # Find matching annotation files
         annotation_files = []
@@ -3523,11 +3489,11 @@ class VideoAnnotationTool(QMainWindow):
     def toggle_verification_mode(self):
         """Toggle verification mode for annotations."""
         if not hasattr(self, "verification_mode_enabled"):
-            self.verification_mode_enabled = False
+            self.verification_mode = False
 
-        self.verification_mode_enabled = not self.verification_mode_enabled
+        self.verification_mode = not self.verification_mode
 
-        if self.verification_mode_enabled:
+        if self.verification_mode:
             self.statusBar.showMessage(
                 "Verification mode enabled - unverified annotations will be deleted when changing frames",
                 5000,
@@ -3537,7 +3503,7 @@ class VideoAnnotationTool(QMainWindow):
 
         # Update UI to show current mode
         if hasattr(self, "verify_mode_action"):
-            self.verify_mode_action.setChecked(self.verification_mode_enabled)
+            self.verify_mode_action.setChecked(self.verification_mode)
 
     @log_exceptions
     def verify_selected_annotation(self):
@@ -3569,8 +3535,8 @@ class VideoAnnotationTool(QMainWindow):
     def handle_unverified_annotations(self):
         """Handle unverified annotations when changing frames."""
         if (
-            not hasattr(self, "verification_mode_enabled")
-            or not self.verification_mode_enabled
+            not hasattr(self, "verification_mode")
+            or not self.verification_mode
         ):
             return
 
@@ -3582,9 +3548,9 @@ class VideoAnnotationTool(QMainWindow):
                 if not getattr(ann, "verified", False)
             ]
             for ann in unverified:
-                if ann.get("source",'')=='interpolated':
-                    ann['source'] = 'manual'
-                    ann['verified'] = True
+                if ann.source=='interpolated':
+                    ann.source = 'manual'
+                    ann.verified = True
             if unverified:
                 # Remove unverified annotations
                 self.frame_annotations[self.current_frame] = [
@@ -3818,10 +3784,9 @@ class VideoAnnotationTool(QMainWindow):
                     # For videos, use the video filename
                     video_base = os.path.dirname(self.video_filename)
                     video_name = os.path.splitext(os.path.basename(self.video_filename))[0]
-                    auto_save_folder = os.path.join(video_base,'autosaves')
-                    os.makedirs(auto_save_folder,exist_ok=True)
-                    self.autosave_file = os.path.join(auto_save_folder,video_name+'_autosave.json')
-
+                    auto_save_folder = os.path.join(video_base, 'autosaves')
+                    os.makedirs(auto_save_folder, exist_ok=True)
+                    self.autosave_file = os.path.join(auto_save_folder, video_name + '_autosave.json')
                 else:
                     # No valid source to auto-save
                     return
@@ -3830,50 +3795,21 @@ class VideoAnnotationTool(QMainWindow):
             self.autosave_file = self.project_file
 
         try:
-            # Get video path or image dataset info
-            video_path = None
-            image_dataset_info = None
-
-            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
-                # For image datasets, store the folder and relative paths
-                if self.image_files:
-                    base_folder = os.path.dirname(self.image_files[0])
-                    image_dataset_info = {
-                        "is_image_dataset": True,
-                        "base_folder": base_folder,
-                        "image_files": [
-                            os.path.relpath(f, base_folder) for f in self.image_files
-                        ],
-                    }
-            else:
-                # For videos, store the video path
-                video_path = getattr(self, "video_filename", None)
-
-            # Get class attributes
-            class_attributes = getattr(self.canvas, "class_attributes", {})
-
-            # Save project with additional data
-            save_project(
-                self.autosave_file,
-                self.canvas.annotations,
-                self.canvas.class_colors,
-                video_path=video_path,
-                current_frame=self.current_frame,
-                frame_annotations=self.frame_annotations,
-                class_attributes=class_attributes,
-                current_style=self.current_style,
-                auto_show_attribute_dialog=self.auto_show_attribute_dialog,
-                use_previous_attributes=self.use_previous_attributes,
-                duplicate_frames_enabled=self.duplicate_frames_enabled,
-                frame_hashes=self.frame_hashes,
-                duplicate_frames_cache=self.duplicate_frames_cache,
-                image_dataset_info=image_dataset_info,
-            )
-
-            self.last_autosave_time = QDateTime.currentDateTime()
-            self.statusBar.showMessage(
-                f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000
-            )
+            # Store the original project_path
+            original_project_path = self.project_path if hasattr(self, "project_path") else None
+            
+            # Temporarily set project_path to autosave_file
+            self.project_path = self.autosave_file
+            success = self.save_project(self.autosave_file)
+            
+            # Restore the original project_path
+            self.project_path = original_project_path
+            
+            if success:
+                self.last_autosave_time = QDateTime.currentDateTime()
+                self.statusBar.showMessage(
+                    f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000
+                )
         except Exception as e:
             print(f"Auto-save failed: {str(e)}")
 
@@ -3898,7 +3834,7 @@ class VideoAnnotationTool(QMainWindow):
         """Reset zoom to default level."""
         self.zoom_level = 1.0
         self.canvas.set_zoom(self.zoom_level)
-
+        self.canvas.reset_pan()
     # -------------------------------------------------------------------------
     # Tool Methods
     # -------------------------------------------------------------------------
