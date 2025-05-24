@@ -1126,7 +1126,7 @@ def detect_annotation_format(filename):
         lines = content.strip().split("\n")
 
         # More flexible Raya format detection
-        if any("[" in line and "]" in line and ";" in line for line in lines):
+        if any("[]" in line or ('[' and '];' in line) for line in lines):
             return "Raya"
 
         # Check for RayaYOLO format
@@ -1380,15 +1380,13 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
 
             content = line[start_idx + 1 : end_idx]
             annotations = content.split(";")
-
             for annotation in annotations:
                 if not annotation.strip():
                     continue
                 # Parse the annotation values
                 parts = annotation.split(",")
-
                 # Ensure we have at least the minimum required fields
-                if len(parts) < 6:
+                if len(parts) < 5:
                     continue
 
                 try:
@@ -1427,7 +1425,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                 parts = annotation.split(",")
 
                 # Ensure we have at least the minimum required fields
-                if len(parts) < 6:
+                if len(parts) < 5:
                     continue
                 try:
                     # Remove any remaining brackets
@@ -1438,7 +1436,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
                     y = float(parts[2])
                     width = float(parts[3])
                     height = float(parts[4])
-                    size = float(parts[5])
+                    size = float(parts[5]) if len(parts) > 5 else 100.0
                     quality = float(parts[6]) if len(parts) > 6 else 100.0
                     Difficult = float(parts[7]) if len(parts) > 7 else 0.0
 
