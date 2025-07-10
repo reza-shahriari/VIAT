@@ -1126,7 +1126,7 @@ def detect_annotation_format(filename):
         lines = content.strip().split("\n")
 
         # More flexible Raya format detection
-        if any("[]" in line or ('[' and '];' in line) for line in lines):
+        if all("[]" in line or ('[' and '];' in line) for line in lines):
             return "Raya"
 
         # Check for RayaYOLO format
