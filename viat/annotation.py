@@ -19,6 +19,73 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QTimer, QRect
 import random
+import re
+
+
+def parse_yolo_class_names(filepath):
+    """
+    Parse class names from a YOLO dataset YAML file (e.g. data.yaml).
+
+    Supports inline lists, YAML list items, and numbered dict entries under names.
+    """
+    try:
+        import yaml
+
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if isinstance(data, dict) and "names" in data:
+            names = data["names"]
+            if isinstance(names, dict):
+                return [
+                    names[k]
+                    for k in sorted(
+                        names.keys(),
+                        key=lambda x: int(x) if str(x).isdigit() else str(x),
+                    )
+                ]
+            if isinstance(names, list):
+                return list(names)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    names = []
+    in_names = False
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            if in_names and names:
+                break
+            continue
+
+        if stripped.startswith("names:"):
+            in_names = True
+            rest = stripped[6:].strip()
+            if rest.startswith("["):
+                inner = rest.strip("[]")
+                names = [
+                    s.strip().strip("'").strip('"')
+                    for s in inner.split(",")
+                    if s.strip()
+                ]
+                break
+            continue
+
+        if in_names:
+            if stripped.startswith("- "):
+                names.append(stripped[2:].strip().strip("'").strip('"'))
+            elif re.match(r"^\d+\s*:", stripped):
+                _, val = stripped.split(":", 1)
+                names.append(val.strip().strip("'").strip('"'))
+            else:
+                break
+
+    return names
 
 
 class BoundingBox:
@@ -316,7 +383,7 @@ class AnnotationManager:
         if dialog.exec_() == QDialog.Accepted:
             old_class = annotation.class_name
             new_class = class_combo.currentText()
-
+            annotation.verify()
             # Update class and color
             annotation.class_name = new_class
             annotation.color = self.canvas.class_colors[new_class]
@@ -1467,3 +1534,93 @@ class ClassManager:
             
             # Show success message
             self.main_window.statusBar.showMessage(f"Deleted class '{class_name}' and all its annotations", 5000)
+
+    def import_classes_from_yolo_yaml(self, filepath):
+        """Import annotation classes from a YOLO dataset YAML file."""
+        class_names = parse_yolo_class_names(filepath)
+        class_names = [name for name in class_names if name]
+
+        if not class_names:
+            QMessageBox.warning(
+                self.main_window,
+                "Import Classes",
+                "No class names found in the YAML file. "
+                "Expected a 'names' field with a list or numbered entries.",
+            )
+            return
+
+        existing = set(self.main_window.canvas.class_colors.keys())
+        replace_existing = False
+
+        if existing:
+            msg = QMessageBox(self.main_window)
+            msg.setWindowTitle("Import Classes")
+            msg.setText(f"Found {len(class_names)} classes in YAML.")
+            msg.setInformativeText(
+                "Merge adds new classes alongside existing ones. "
+                "Replace removes all current classes first."
+            )
+            merge_btn = msg.addButton("Merge", QMessageBox.AcceptRole)
+            replace_btn = msg.addButton("Replace All", QMessageBox.DestructiveRole)
+            cancel_btn = msg.addButton("Cancel", QMessageBox.RejectRole)
+            msg.exec_()
+
+            if msg.clickedButton() == cancel_btn:
+                return
+            replace_existing = msg.clickedButton() == replace_btn
+
+        if replace_existing:
+            self.main_window.canvas.class_colors.clear()
+            if hasattr(self.main_window.canvas, "class_attributes"):
+                self.main_window.canvas.class_attributes.clear()
+            elif not hasattr(self.main_window, "class_attributes"):
+                self.main_window.class_attributes = {}
+            else:
+                self.main_window.class_attributes.clear()
+
+        if not hasattr(self.main_window.canvas, "class_attributes"):
+            self.main_window.canvas.class_attributes = {}
+        if not hasattr(self.main_window, "class_attributes"):
+            self.main_window.class_attributes = self.main_window.canvas.class_attributes
+
+        added = 0
+        for class_name in class_names:
+            if class_name in self.main_window.canvas.class_colors:
+                continue
+
+            color = QColor(
+                random.randint(0, 255),
+                random.randint(0, 255),
+                random.randint(0, 255),
+            )
+            self.main_window.canvas.class_colors[class_name] = color
+            self.main_window.canvas.class_attributes[class_name] = {
+                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
+            }
+            added += 1
+
+        if added == 0 and not replace_existing:
+            QMessageBox.information(
+                self.main_window,
+                "Import Classes",
+                "All classes from the YAML file already exist.",
+            )
+            return
+
+        self.main_window.toolbar.update_class_selector()
+        self.main_window.class_dock.update_class_list()
+        self.main_window.refresh_class_lists()
+
+        first_class = class_names[0]
+        if first_class in self.main_window.canvas.class_colors:
+            self.main_window.canvas.set_current_class(first_class)
+            if hasattr(self.main_window, "class_selector"):
+                self.main_window.class_selector.blockSignals(True)
+                self.main_window.class_selector.setCurrentText(first_class)
+                self.main_window.class_selector.blockSignals(False)
+
+        self.main_window.project_modified = True
+        self.main_window.statusBar.showMessage(
+            f"Imported {added} classes from YOLO YAML", 5000
+        )

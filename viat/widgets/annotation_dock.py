@@ -571,11 +571,14 @@ class AnnotationDock(QDockWidget):
 
             menu = QMenu()
             delete_action = menu.addAction("Delete")
+            delete_range_action = menu.addAction("Delete across frames...")
 
             action = menu.exec_(self.annotations_list.mapToGlobal(position))
 
             if action == delete_action:
                 self.delete_selected_annotation()
+            elif action == delete_range_action:
+                self.delete_object_across_frames(annotation)
 
     def batch_edit_annotations(self):
         """Open dialog to batch edit annotations across multiple frames."""
@@ -619,6 +622,11 @@ class AnnotationDock(QDockWidget):
         delete_class_radio = QRadioButton("Delete annotations of class")
         action_radios.addButton(delete_class_radio)
         action_layout.addWidget(delete_class_radio)
+
+        # Delete selected object across frames
+        delete_object_radio = QRadioButton("Delete selected object across frames")
+        action_radios.addButton(delete_object_radio)
+        action_layout.addWidget(delete_object_radio)
 
         # Modify attributes radio
         modify_attr_radio = QRadioButton("Modify attributes of a class")
@@ -729,9 +737,11 @@ class AnnotationDock(QDockWidget):
         # Connect radio buttons to show/hide relevant groups
         def update_visible_groups():
             # Class group visibility - only show for class-specific operations
-            class_group.setVisible(change_class_radio.isChecked() or 
-                                delete_class_radio.isChecked() or 
-                                modify_attr_radio.isChecked())
+            class_group.setVisible(
+                change_class_radio.isChecked()
+                or delete_class_radio.isChecked()
+                or modify_attr_radio.isChecked()
+            )
             
             # Show/hide specific class selection components
             from_class_label.setVisible(change_class_radio.isChecked())
@@ -755,6 +765,7 @@ class AnnotationDock(QDockWidget):
 
         change_class_radio.toggled.connect(update_visible_groups)
         delete_class_radio.toggled.connect(update_visible_groups)
+        delete_object_radio.toggled.connect(update_visible_groups)
         modify_attr_radio.toggled.connect(update_visible_groups)
         use_current_radio.toggled.connect(update_visible_groups)
 
@@ -798,6 +809,17 @@ class AnnotationDock(QDockWidget):
                 # Delete annotations of class
                 class_to_delete = target_class_combo.currentText()
                 self.batch_delete_class(start_frame, end_frame, class_to_delete)
+
+            elif delete_object_radio.isChecked():
+                reference = self._get_reference_annotation_for_batch_delete()
+                if reference is None:
+                    QMessageBox.warning(
+                        self.main_window,
+                        "No Selection",
+                        "Select an annotation on the canvas or in the list first.",
+                    )
+                    return
+                self.apply_batch_delete_object(start_frame, end_frame, reference)
 
             elif modify_attr_radio.isChecked():
                 # Modify attributes of a class
@@ -1400,4 +1422,166 @@ class AnnotationDock(QDockWidget):
         )
 
         # Mark project as modified
+        self.main_window.project_modified = True
+
+    def _get_reference_annotation_for_batch_delete(self):
+        """Return the annotation to use as reference for object deletion."""
+        if (
+            hasattr(self.main_window.canvas, "selected_annotation")
+            and self.main_window.canvas.selected_annotation
+        ):
+            return self.main_window.canvas.selected_annotation
+
+        selected_items = self.annotations_list.selectedItems()
+        if selected_items:
+            widget = self.annotations_list.itemWidget(selected_items[0])
+            if widget and hasattr(widget, "annotation"):
+                return widget.annotation
+        return None
+
+    def delete_object_across_frames(self, reference_annotation):
+        """Open dialog to delete a specific object across a frame range."""
+        dialog = QDialog(self.main_window)
+        dialog.setWindowTitle("Delete Object Across Frames")
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+
+        class_name = reference_annotation.class_name
+        track_id = None
+        if hasattr(reference_annotation, "attributes") and reference_annotation.attributes:
+            track_id = reference_annotation.attributes.get("track_id")
+
+        info = f"Object: {class_name}"
+        if track_id is not None:
+            info += f" (track_id={track_id})"
+        layout.addWidget(QLabel(info))
+        layout.addWidget(
+            QLabel(
+                "Deletes only this object in the frame range, not other objects "
+                "of the same class."
+            )
+        )
+
+        form = QFormLayout()
+        start_spin = QSpinBox()
+        start_spin.setRange(0, self.main_window.total_frames - 1)
+        start_spin.setValue(self.main_window.current_frame)
+
+        end_spin = QSpinBox()
+        end_spin.setRange(0, self.main_window.total_frames - 1)
+        end_spin.setValue(
+            min(self.main_window.current_frame + 10, self.main_window.total_frames - 1)
+        )
+
+        form.addRow("Start Frame:", start_spin)
+        form.addRow("End Frame:", end_spin)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() == QDialog.Accepted:
+            start_frame = start_spin.value()
+            end_frame = end_spin.value()
+            self.main_window.save_undo_state()
+            self.apply_batch_delete_object(start_frame, end_frame, reference_annotation)
+
+    def apply_batch_delete_object(self, start_frame, end_frame, reference_annotation):
+        """
+        Delete a specific object across frames using track_id or IoU tracking.
+
+        Args:
+            start_frame (int): Start frame number
+            end_frame (int): End frame number
+            reference_annotation: The annotation identifying the object to remove
+        """
+        if start_frame > end_frame:
+            start_frame, end_frame = end_frame, start_frame
+
+        class_name = reference_annotation.class_name
+        ref_track_id = None
+        if hasattr(reference_annotation, "attributes") and reference_annotation.attributes:
+            ref_track_id = reference_annotation.attributes.get("track_id")
+
+        progress = QDialog(self)
+        progress.setWindowTitle("Deleting Object")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+        progress_layout.addWidget(
+            QLabel(f"Deleting object in frames {start_frame}-{end_frame}...")
+        )
+        progress_bar = QProgressBar()
+        progress_bar.setRange(start_frame, end_frame)
+        progress_layout.addWidget(progress_bar)
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+
+        delete_count = 0
+        last_matched_rect = reference_annotation.rect
+        iou_threshold = 0.2
+
+        for frame_num in range(start_frame, end_frame + 1):
+            progress_bar.setValue(frame_num)
+            if frame_num % 5 == 0:
+                QApplication.processEvents()
+
+            if frame_num not in self.main_window.frame_annotations:
+                continue
+
+            anns = self.main_window.frame_annotations[frame_num]
+            to_delete = []
+
+            if ref_track_id is not None:
+                for ann in anns:
+                    tid = (
+                        ann.attributes.get("track_id")
+                        if hasattr(ann, "attributes") and ann.attributes
+                        else None
+                    )
+                    if ann.class_name == class_name and tid == ref_track_id:
+                        to_delete.append(ann)
+            else:
+                best_ann = None
+                best_iou = 0.0
+                for ann in anns:
+                    if ann.class_name != class_name:
+                        continue
+                    iou = self.main_window.canvas.iou(last_matched_rect, ann.rect)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_ann = ann
+                if best_ann and best_iou >= iou_threshold:
+                    to_delete.append(best_ann)
+                    last_matched_rect = best_ann.rect
+
+            if to_delete:
+                delete_count += len(to_delete)
+                self.main_window.frame_annotations[frame_num] = [
+                    a for a in anns if a not in to_delete
+                ]
+
+            if frame_num == self.main_window.current_frame:
+                self.main_window.frame_annotations[frame_num] = (
+                    self.main_window.frame_annotations.get(frame_num, [])
+                )
+                self.main_window.canvas.annotations = (
+                    self.main_window.frame_annotations[frame_num].copy()
+                )
+                self.main_window.canvas.selected_annotation = None
+                if hasattr(self.main_window.canvas, "selected_annotations"):
+                    self.main_window.canvas.selected_annotations = []
+                self.main_window.canvas.update()
+                self.update_annotation_list()
+
+        progress.close()
+
+        self.main_window.statusBar.showMessage(
+            f"Deleted {delete_count} annotations for '{class_name}' "
+            f"across frames {start_frame}-{end_frame}",
+            5000,
+        )
         self.main_window.project_modified = True

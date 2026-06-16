@@ -17,7 +17,7 @@ def build_executable():
         shutil.rmtree("dist")
     
     # Make sure PyQt5 is properly installed
-    subprocess.run(["pip", "install", "PyQt5==5.12.3"], check=True)
+    # subprocess.run(["pip", "install", "PyQt5==5.12.3"], check=True)
     
     # Use the unified spec file
     spec_file = "viat.spec"

@@ -704,14 +704,22 @@ class InterpolationManager:
                     # Get confidence scores (default to 0.5 if not present)
                     existing_conf = getattr(existing, 'score', 0.5)
                     interpolated_conf = getattr(interpolated, 'score', 0.5)
-                    existing_source = getattr(existing, 'source', 'detected')  # Default to 'detected' if not specified
+                    existing_source = getattr(existing, 'source', 'detected')
+                    interpolated_source = getattr(interpolated, 'source', 'interpolated')
                     
                     # If existing is manual, always keep it
                     if existing_source == 'manual':
                         final_annotations.append(existing)
                     # If interpolated is manual (unlikely), keep it
-                    elif getattr(interpolated, 'source', '') == 'manual':
+                    elif interpolated_source == 'manual':
                         final_annotations.append(interpolated)
+                    # NEW: Handle detected vs interpolated conflict
+                    elif existing_source == 'detected' and interpolated_source == 'interpolated':
+                        # Use interpolated attributes but create a hybrid annotation
+                        hybrid_ann = self._create_hybrid_annotation(existing, interpolated)
+                        # Change the source type to 'interpolated' as requested
+                        hybrid_ann.source = 'interpolated'
+                        final_annotations.append(hybrid_ann)
                     # If scores are similar (within 0.2 of each other), use weighted average
                     elif abs(existing_conf - interpolated_conf) < 0.2:
                         # Create a weighted average annotation
@@ -730,7 +738,7 @@ class InterpolationManager:
                     used_existing.add(i)
                     used_interpolated.add(j)
         
-        # Add remaining existing annotations that didn't have conflicts
+        # Add remaining existing annotations that didn0t have conflicts
         for i, annotation in enumerate(existing_annotations):
             if i not in used_existing:
                 final_annotations.append(annotation)
@@ -741,6 +749,55 @@ class InterpolationManager:
                 final_annotations.append(annotation)
                 
         return final_annotations
+
+    def _create_hybrid_annotation(self, detected_ann, interpolated_ann):
+        """
+        Create a hybrid annotation that uses the detected bounding box but interpolated attributes.
+        
+        Args:
+            detected_ann: The detected annotation (for bounding box)
+            interpolated_ann: The interpolated annotation (for attributes)
+        
+        Returns:
+            BoundingBox: New hybrid annotation
+        """
+        # Use the detected bounding box (as it's likely more accurate)
+        hybrid_rect = detected_ann.rect
+        
+        # Use interpolated attributes (as requested)
+        hybrid_attributes = {}
+        if hasattr(interpolated_ann, 'attributes') and interpolated_ann.attributes:
+            hybrid_attributes = interpolated_ann.attributes.copy()
+        
+        # If detected annotation has attributes that interpolated doesn't have, add them
+        if hasattr(detected_ann, 'attributes') and detected_ann.attributes:
+            for key, value in detected_ann.attributes.items():
+                if key not in hybrid_attributes:
+                    hybrid_attributes[key] = value
+        
+        # Use class name from detected (more reliable)
+        class_name = detected_ann.class_name
+        
+        # Use color from detected annotation
+        color = detected_ann.color
+        
+        # Calculate hybrid confidence score (average of both, slightly boosted for agreement)
+        detected_conf = getattr(detected_ann, 'score', 0.5)
+        interpolated_conf = getattr(interpolated_ann, 'score', 0.5)
+        hybrid_score = min(1.0, (detected_conf + interpolated_conf) / 2 * 1.1)
+        
+        # Create hybrid annotation
+        from .annotation import BoundingBox
+        hybrid_ann = BoundingBox(
+            hybrid_rect,
+            class_name,
+            hybrid_attributes,
+            color,
+            source='interpolated',  # Set to interpolated as requested
+            score=hybrid_score
+        )
+        
+        return hybrid_ann
 
     def _create_weighted_average_annotation(self, ann1, ann2, score1, score2):
         """

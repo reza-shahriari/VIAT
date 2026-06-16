@@ -38,12 +38,15 @@ class ClassDock(QDockWidget):
         controls_layout = QHBoxLayout()
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(self.add_class)
+        import_btn = QPushButton("Import YAML")
+        import_btn.clicked.connect(self.import_yaml_classes)
         edit_btn = QPushButton("Edit")
         edit_btn.clicked.connect(self.edit_class)
         delete_btn = QPushButton("Delete")
         delete_btn.clicked.connect(self.delete_class)
 
         controls_layout.addWidget(add_btn)
+        controls_layout.addWidget(import_btn)
         controls_layout.addWidget(edit_btn)
         controls_layout.addWidget(delete_btn)
 
@@ -166,6 +169,11 @@ class ClassDock(QDockWidget):
         """Add a new class"""
         if hasattr(self.main_window, "add_class"):
             self.main_window.add_class()
+
+    def import_yaml_classes(self):
+        """Import classes from a YOLO dataset YAML file"""
+        if hasattr(self.main_window, "import_classes_from_yolo_yaml"):
+            self.main_window.import_classes_from_yolo_yaml()
 
     def edit_class(self):
         """Edit the selected class"""

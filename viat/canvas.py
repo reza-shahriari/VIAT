@@ -648,7 +648,6 @@ class VideoCanvas(QWidget):
         # Return the closest edge
         return candidates[0][0]
 
-
     def get_edge_cursor(self, edge):
         """Return the appropriate cursor for the given edge"""
         if edge in (EDGE_TOP, EDGE_BOTTOM):
@@ -1119,6 +1118,7 @@ class VideoCanvas(QWidget):
                     # The annotation was modified, so verify it
                     if hasattr(self.selected_annotation, 'verify'):
                         self.selected_annotation.verify()
+                        self.update()
                         if self.main_window and hasattr(self.main_window, "statusBar"):
                             self.main_window.statusBar.showMessage(
                                 f"Annotation verified and marked as manual (originally {self.selected_annotation.original_source})", 

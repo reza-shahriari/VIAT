@@ -888,19 +888,38 @@ class VideoAnnotationTool(QMainWindow):
                     # Load annotations for the new frame
                     self.load_current_frame_annotations()
         elif self.cap and self.cap.isOpened():
-            # Calculate the frame number from slider value
             frame_number = int(value)
+            if frame_number != self.current_frame:
+                self.seek_to_frame(frame_number)
 
-            # Set video to that frame
+    @log_exceptions
+    def seek_to_frame(self, frame_number):
+        """Seek the video to an exact frame and refresh the display."""
+        if not self.cap or not self.cap.isOpened():
+            return False
+
+        if frame_number < 0:
+            frame_number = 0
+        elif frame_number >= self.total_frames:
+            frame_number = self.total_frames - 1
+
+        if frame_number == self.current_frame + 1:
+            ret, frame = self.cap.read()
+        else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
             ret, frame = self.cap.read()
-            if ret:
-                self.current_frame = frame_number
-                self.canvas.set_frame(frame)
-                self.update_frame_info()
 
-                # Load annotations for the new frame
-                self.load_current_frame_annotations()
+        if not ret:
+            return False
+
+        self.current_frame = frame_number
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
+        self.canvas.set_frame(frame)
+        self.update_frame_info()
+        self.load_current_frame_annotations()
+        return True
 
     @log_exceptions
     def prev_frame(self):
@@ -946,15 +965,8 @@ class VideoAnnotationTool(QMainWindow):
                         prev_frame = max(0, current_frame - 1)
             else:
                 prev_frame = max(0, self.current_frame - 1)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, prev_frame)
-            ret, frame = self.cap.read()
-            if ret:
-                self.current_frame = prev_frame
-                self.frame_slider.setValue(self.current_frame)
-                self.canvas.set_frame(frame)
-                self.update_frame_info()
-                # Load annotations for the new frame
-                self.load_current_frame_annotations()
+            if self.seek_to_frame(prev_frame):
+                pass
 
     @log_exceptions
     def next_frame(self):
@@ -981,52 +993,32 @@ class VideoAnnotationTool(QMainWindow):
                     # Just show message if not playing
                     self.statusBar.showMessage("End of image dataset")
         else:
+            next_frame_number = None
+
             if (
                 hasattr(self, "interpolation_manager")
                 and self.interpolation_manager.is_active
             ):
-                next_frame_number = self.interpolation_manager.get_next_frame_for_workflow(self.current_frame)
-
+                next_frame_number = self.interpolation_manager.get_next_frame_for_workflow(
+                    self.current_frame
+                )
             elif self.cap and self.cap.isOpened():
-                # Calculate the next frame number explicitly
                 next_frame_number = self.current_frame + 1
 
-                # Check if we've reached the end of the video
                 if next_frame_number >= self.total_frames:
-                    # End of video
                     self.play_timer.stop()
                     self.is_playing = False
                     self.statusBar.showMessage("End of video")
-                    # Rewind to beginning
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.current_frame = 0
-                    # Update slider position first
-                    self.frame_slider.setValue(self.current_frame)
-                    ret, frame = self.cap.read()
-                    if ret:
-                        self.canvas.set_frame(frame)
-                        self.update_frame_info()
-                        self.load_current_frame_annotations()
+                    self.seek_to_frame(0)
                     return
 
-            # Explicitly set the frame position instead of just reading the next frame
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, next_frame_number)
-            ret, frame = self.cap.read()
-
-            if ret:
-                self.current_frame = next_frame_number
-                # Update slider position first
-                self.frame_slider.setValue(self.current_frame)
-                self.canvas.set_frame(frame)
-                self.update_frame_info()
-
-                # Check for duplicate frames and propagate annotations if enabled
+            if next_frame_number is not None and self.seek_to_frame(next_frame_number):
                 if (
                     self.duplicate_frames_enabled
                     and self.current_frame in self.frame_hashes
                 ):
                     current_hash = self.frame_hashes[self.current_frame]
-                    # If this is a duplicate frame, check if any other frame with this hash has annotations
                     if (
                         current_hash in self.duplicate_frames_cache
                         and len(self.duplicate_frames_cache[current_hash]) > 1
@@ -1439,6 +1431,19 @@ class VideoAnnotationTool(QMainWindow):
     def add_class(self):
         self.save_undo_state()
         self.class_manager.add_class()
+
+    @log_exceptions
+    def import_classes_from_yolo_yaml(self):
+        """Import annotation classes from a YOLO dataset YAML file."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Classes from YOLO YAML",
+            "",
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if filename:
+            self.save_undo_state()
+            self.class_manager.import_classes_from_yolo_yaml(filename)
 
     @log_exceptions
     def refresh_class_lists(self):
@@ -4232,10 +4237,6 @@ class VideoAnnotationTool(QMainWindow):
             # Left or Up arrow - go to previous frame
             self.prev_frame()
             return
-        elif event.key() == Qt.Key_Space:
-            # Space - toggle play/pause
-            self.play_pause_video()
-            return True
         elif event.key() == Qt.Key_Delete:
             if (
                 hasattr(self.canvas, "selected_annotations")
