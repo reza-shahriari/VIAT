@@ -96,6 +96,14 @@ class VideoCanvas(QWidget):
         self.pan_mode_enabled = False
         # Debug flag for showing scores
         self.show_debug_scores = False
+        # Segmentation display toggle: when True, draw polygon outlines for
+        # annotations that have a `segmentation` attribute (from YOLO polygon
+        # labels). The bounding box is always drawn regardless.
+        self.show_segmentation = False
+        # Object filter: when set (to an actor_id string), only annotations whose
+        # attributes['actor_id'] or ['track_id'] matches are drawn. Used by the
+        # per-object visibility editing mode.
+        self.object_filter = None
         self._display_rect_cache = {}  # Cache for display rectangles
         self._last_display_rect = None  # Cache the last display rectangle
         self._last_zoom_level = 1.0    # Track zoom level for cache invalidation
@@ -190,6 +198,11 @@ class VideoCanvas(QWidget):
         
         # Only draw annotations that intersect with the update area
         for annotation in self.annotations:
+            # Skip if object_filter is set and this annotation doesn't match
+            if getattr(self, 'object_filter', None):
+                _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
+                if _aid != self.object_filter:
+                    continue
             display_rect = self.image_to_display_rect(annotation.rect)
             
             # Skip annotations outside the update area
@@ -214,6 +227,11 @@ class VideoCanvas(QWidget):
             )
         # Draw annotations
         for annotation in self.annotations:
+            # Skip if object_filter is set and this annotation doesn't match
+            if getattr(self, 'object_filter', None):
+                _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
+                if _aid != self.object_filter:
+                    continue
             # Convert annotation rectangle to display coordinates
             display_rect = self.image_to_display_rect(annotation.rect)
 
@@ -259,6 +277,23 @@ class VideoCanvas(QWidget):
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(display_rect)
+
+            # Draw segmentation polygon if enabled and available
+            if getattr(self, 'show_segmentation', False) and getattr(annotation, 'segmentation', None):
+                from PyQt5.QtGui import QPolygonF
+                from PyQt5.QtCore import QPointF
+                poly = QPolygonF()
+                for (px, py) in annotation.segmentation:
+                    dp = self.image_to_display_point(px, py)
+                    poly.append(QPointF(dp.x(), dp.y()))
+                if poly.size() >= 3:
+                    old_pen = painter.pen()
+                    seg_pen = QPen(QColor(0, 255, 0, 200), 1, Qt.DashLine)
+                    painter.setPen(seg_pen)
+                    painter.setBrush(QBrush(QColor(0, 255, 0, 40)))
+                    painter.drawPolygon(poly)
+                    painter.setPen(old_pen)
+                    painter.setBrush(Qt.NoBrush)
 
             # Highlight hovered annotation
             if annotation == self.selected_annotation and self.underMouse():
@@ -1689,3 +1724,15 @@ class VideoCanvas(QWidget):
             self._display_rect_cache.clear()
         
         super().resizeEvent(event)
+
+
+    def image_to_display_point(self, x, y):
+        """Convert an image-space (pixel) point to display-space coordinates."""
+        rect = self.get_display_rect()
+        if not rect or not self.pixmap:
+            from PyQt5.QtCore import QPoint
+            return QPoint(int(x), int(y))
+        sx = rect.x() + (x / float(self.pixmap.width())) * rect.width()
+        sy = rect.y() + (y / float(self.pixmap.height())) * rect.height()
+        from PyQt5.QtCore import QPoint
+        return QPoint(int(sx), int(sy))

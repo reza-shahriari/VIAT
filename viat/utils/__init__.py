@@ -22,7 +22,10 @@ from .im_tools import (
     create_thumbnail,
 )
 from .ui_creator import UICreator
-from .performance import PerfomanceManger
+try:
+    from .performance import PerfomanceManger, PerformanceManager
+except ImportError:
+    pass
 from .dataset_manager import (
     import_dataset_dialog,
     load_dataset,

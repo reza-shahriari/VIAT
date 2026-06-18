@@ -84,6 +84,44 @@ from utils import (
     load_project_with_backup,
     backup_before_save,
 )
+# --- New dataset & label-format modules (patch2) ---
+from utils.dataset_manager import (
+    detect_folder_type as _viat_detect_folder_type,
+    scan_dataset,
+    load_dataset_into_app,
+    DatasetInfo,
+    SplitInfo,
+)
+from utils.dataset_ops import (
+    remove_bad_frames as _viat_remove_bad_frames,
+    remap_class as _viat_remap_class,
+    merge_classes as _viat_merge_classes,
+)
+# --- New dataset ops + logging (patch3) ---
+from utils.dataset_ops import (
+    move_frames_to as _viat_move_frames_to,
+    remove_bad_frames as _viat_remove_bad_frames_v2,
+    move_to_removed as _viat_move_to_removed,
+    move_to_review_label as _viat_move_to_review_label,
+    remove_grayscale_images as _viat_remove_grayscale,
+    remove_duplicate_groups as _viat_remove_dup_groups,
+    remove_class_and_images as _viat_remove_class_and_images,
+    remap_class as _viat_remap_class_v2,
+    merge_classes as _viat_merge_classes_v2,
+    auto_import_detections as _viat_auto_import_detections,
+)
+from utils.dataset_log import (
+    init_dataset_log as _viat_init_dataset_log,
+    append_dataset_log as _viat_append_dataset_log,
+)
+# --- Video annotation features (patch4) ---
+from utils.dataset_manager import load_viat_json_for_video as _viat_load_json_video
+from utils.video_border import detect_and_adjust_borders as _viat_detect_adjust_borders
+from utils.video_border import detect_video_borders as _viat_detect_borders
+from utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibilityManager
+# --- Performance + segmentation video (patch6) ---
+from utils.performance import PerformanceManager as _ViatPerformanceManager
+from utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
 from utils.icon_provider import IconProvider
 from natsort import natsorted
 from copy import deepcopy
@@ -130,6 +168,8 @@ class VideoAnnotationTool(QMainWindow):
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
         self.performance_manager = PerfomanceManger()
+        # Frame cache + fast seek (patch6)
+        self.viat_perf = _ViatPerformanceManager(self, cache_capacity=60)
 
     @log_exceptions
     def load_last_project(self):
@@ -210,6 +250,15 @@ class VideoAnnotationTool(QMainWindow):
         self.last_autosave_time = None
         self.tracking_mode_enabled = False
         self.verification_mode = False
+        # When True, unverified annotations are removed when navigating away from
+        # a frame. Default OFF (keep unverified labels) per user request.
+        self.remove_unverified = False
+        # Per-object visibility editing mode (patch4)
+        self.object_visibility_manager = None
+        # Performance manager (frame cache + fast seek)
+        self.performance_manager = None
+        # Segmentation video labeler
+        self.seg_labeler = None
         # Add image dataset flag
         self.is_image_dataset = False
         self.image_files = []
@@ -267,6 +316,128 @@ class VideoAnnotationTool(QMainWindow):
 
         # Set window icon
         self.setWindowIcon(self.icon_provider.get_icon("app-icon"))
+
+        # Inject extra menu items for new features (patches 2-5)
+        self.viat_setup_extra_menus()
+
+    @log_exceptions
+    def viat_setup_extra_menus(self):
+        """Inject menu items for all new VIAT features into the menu bar.
+
+        This is called from setup_ui() AFTER UICreator has built the
+        existing menus, so we just add a new 'Dataset' menu and items to
+        the 'Edit' and 'View' menus without touching UICreator.
+        """
+        menubar = self.menuBar()
+
+        # --- Dataset menu (new top-level menu) ---
+        dataset_menu = menubar.addMenu("&Dataset")
+
+        # Image dataset operations
+        img_menu = dataset_menu.addMenu("Image Dataset Operations")
+
+        act = img_menu.addAction("Remove Current Image")
+        act.setShortcut("Shift+X")
+        act.triggered.connect(lambda: self.viat_move_current_to_removed())
+
+        act = img_menu.addAction("Move to Review Label (CHANGE LABEL)")
+        act.setShortcut("Shift+R")
+        act.triggered.connect(lambda: self.viat_move_current_to_review_label())
+
+        img_menu.addSeparator()
+
+        act = img_menu.addAction("Remove Grayscale Images...")
+        act.triggered.connect(lambda: self.viat_remove_grayscale())
+
+        act = img_menu.addAction("Remove Roboflow Duplicates...")
+        act.triggered.connect(lambda: self.viat_remove_duplicates())
+
+        act = img_menu.addAction("Remove Class + Images...")
+        act.triggered.connect(lambda: self.viat_remove_class_and_images_dialog())
+
+        img_menu.addSeparator()
+
+        act = img_menu.addAction("Remove Bad Frames (batch)...")
+        act.triggered.connect(lambda: self.remove_bad_frames_dialog())
+
+        act = img_menu.addAction("Remap Class...")
+        act.triggered.connect(lambda: self.remap_class_dialog())
+
+        act = img_menu.addAction("Merge Classes...")
+        act.triggered.connect(lambda: self.merge_classes_dialog())
+
+        img_menu.addSeparator()
+
+        act = img_menu.addAction("Dataset Statistics...")
+        act.triggered.connect(lambda: self.viat_dataset_stats())
+
+        act = img_menu.addAction("View Dataset Log (DATASET_LOG.md)")
+        act.triggered.connect(lambda: self.viat_view_dataset_log())
+
+        img_menu.addSeparator()
+
+        # Auto-import YOLO detections (produced by yolo_detect.py)
+        act = img_menu.addAction("Auto-Import Detections (move to review_label)...")
+        act.triggered.connect(lambda: self.viat_auto_import_detections())
+
+        # Video annotation operations
+        vid_menu = dataset_menu.addMenu("Video Annotation Operations")
+
+        act = vid_menu.addAction("Import VIAT JSON Annotations...")
+        act.triggered.connect(lambda: self.viat_import_video_json())
+
+        act = vid_menu.addAction("Fix Video Borders (remove/clip labels)...")
+        act.triggered.connect(lambda: self.viat_detect_and_fix_borders())
+
+        act = vid_menu.addAction("Object Visibility Mode...")
+        act.triggered.connect(lambda: self.viat_start_object_visibility_mode())
+
+        vid_menu.addSeparator()
+
+        # Segmentation video labeling
+        seg_menu = vid_menu.addMenu("Segmentation Video")
+        act = seg_menu.addAction("Pick Object Color...")
+        act.triggered.connect(lambda: self.viat_seg_video_pick_color())
+        act = seg_menu.addAction("Track All Objects")
+        act.triggered.connect(lambda: self.viat_seg_video_track_all())
+        act = seg_menu.addAction("Export Seg Video JSON...")
+        act.triggered.connect(lambda: self.viat_seg_video_export_json())
+
+        vid_menu.addSeparator()
+
+        act = vid_menu.addAction("Export VIAT JSON...")
+        act.triggered.connect(lambda: self.viat_export_json())
+        act = vid_menu.addAction("Toggle Remove Unverified Labels")
+        act.setShortcut("Shift+U")
+        act.triggered.connect(lambda: self.viat_toggle_remove_unverified())
+        act = vid_menu.addAction("Frame Cache Stats...")
+        act.triggered.connect(lambda: self.viat_perf_stats())
+        act = vid_menu.addAction("Clear Frame Cache")
+        act.triggered.connect(lambda: self.viat_clear_cache())
+
+        # --- View menu additions ---
+        # Find the View menu (it's usually the 3rd or 4th menu)
+        view_menu = None
+        for action in menubar.actions():
+            if action.text() in ("&View", "View"):
+                view_menu = action.menu()
+                break
+        if view_menu is None:
+            view_menu = menubar.addMenu("&View")
+
+        view_menu.addSeparator()
+        act = view_menu.addAction("Toggle Segmentation Display")
+        act.setShortcut("Shift+S")
+        act.triggered.connect(lambda: self.viat_toggle_segmentation())
+
+        act = view_menu.addAction("Dataset Statistics...")
+        act.triggered.connect(lambda: self.viat_dataset_stats())
+
+        act = view_menu.addAction("View Dataset Log...")
+        act.triggered.connect(lambda: self.viat_view_dataset_log())
+
+        # Store reference so we can re-inject if needed
+        self._viat_extra_menus = dataset_menu
 
     @log_exceptions
     def setup_playback_timer(self):
@@ -427,26 +598,89 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def open_image_folder(self):
-        """Open a folder of images."""
-        folder_path = QFileDialog.getExistingDirectory(
-            self, "Open Image Folder", "", QFileDialog.ShowDirsOnly
-        )
+        """Open a folder of images OR a labeled dataset.
 
+        Uses utils.dataset_manager.scan_dataset() to auto-detect:
+          - single folder with images+labels mixed
+          - images/ + labels/ subfolders
+          - train/valid/test splits (each split either of the above)
+          - Roboflow YOLO exports (data.yaml)
+        and loads ALL splits + ALL labels in one pass.
+        """
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Open Image Folder / Dataset", "", QFileDialog.ShowDirsOnly
+        )
         if not folder_path:
             return
 
-        # Import the dataset manager
-        from utils.dataset_manager import detect_folder_type
+        # Reset existing state
+        self.reset_media_state()
 
-        # Detect if this is a simple folder or a dataset
-        folder_type = detect_folder_type(folder_path)
+        # Scan the folder (recurses into splits + label subfolders)
+        info = scan_dataset(folder_path)
+        self._viat_dataset_info = info
 
-        if folder_type == "dataset":
-            # Handle as a dataset
-            self.open_image_dataset(folder_path)
-        else:
-            # Handle as a simple image folder
-            self.open_simple_image_folder(folder_path)
+        if info.image_count == 0:
+            QMessageBox.warning(
+                self, "Open Image Folder",
+                "No image files found in the selected folder!",
+            )
+            return
+
+        # Load everything (all splits by default) into frame_annotations.
+        result = load_dataset_into_app(self, info, BoundingBox)
+        self._viat_frame_to_split = result["frame_to_split"]
+
+        self.image_files = result["image_files"]
+        self.total_frames = len(self.image_files)
+        self.current_frame = 0
+        self.is_image_dataset = True
+
+        self.load_current_image()
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.update_frame_info()
+
+        # Window title shows layout + per-split counts
+        folder_name = os.path.basename(folder_path)
+        counts = ", ".join(
+            f"{k}={v}" for k, v in result["per_split_counts"].items()
+        )
+        self.setWindowTitle(
+            f"VIAT - {folder_name} [{info.layout}] ({counts})"
+        )
+
+        if hasattr(self, "play_button"):
+            self.play_button.setEnabled(True)
+            self.play_button.setIcon(
+                self.icon_provider.get_icon("media-playback-start")
+            )
+
+        self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
+        if self.autosave_enabled and not self.autosave_timer.isActive():
+            self.autosave_timer.start(self.autosave_interval)
+
+        # Status message: classes source + conflict warning
+        msg = (
+            f"Loaded {self.total_frames} images across "
+            f"{len(info.splits)} split(s); {len(info.classes)} classes "
+            f"from {info.classes_source or 'labels (inferred)'}; "
+            f"format={info.label_format or 'none'}"
+        )
+        if info.classes_conflict:
+            msg += f"  ⚠ {info.classes_conflict}"
+            QMessageBox.warning(self, "Class Name Conflict", info.classes_conflict)
+        if result["warnings"]:
+            msg += f"  ({len(result['warnings'])} parse warnings)"
+        self.statusBar.showMessage(msg, 8000)
+
+        self.update_annotation_list()
+        self.refresh_class_ui()
+
+        # Initialize the dataset workflow log (DATASET_LOG.md)
+        try:
+            _viat_init_dataset_log(self, info)
+        except Exception:
+            pass
 
     @log_exceptions
     def open_simple_image_folder(self, folder_path):
@@ -509,163 +743,98 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def open_image_dataset(self, folder_path=None):
-        """Open an image dataset with advanced options."""
-        if folder_path is None:
-            folder_path = QFileDialog.getExistingDirectory(
-                self, "Open Image Dataset", "", QFileDialog.ShowDirsOnly
-            )
-
-        if not folder_path:
-            return
-
-        # Show import dialog
-        config = import_dataset_dialog(self, folder_path)
-
-        if not config:
-            return  # User cancelled
-
-        # Reset existing state
-        self.reset_media_state()
-
-        # Load the dataset
-        image_files, success_message = load_dataset(
-            self, config, self.frame_annotations, self.canvas.class_colors, BoundingBox
-        )
-
-        if not image_files:
-            QMessageBox.warning(
-                self,
-                "Open Image Dataset",
-                "No image files found in the selected dataset!",
-            )
-            return
-
-        # Set up the image dataset interface
-        self.image_files = image_files
-        self.total_frames = len(image_files)
-        self.current_frame = 0
-        self.is_image_dataset = True
-
-        # Load the first image
-        self.load_current_image()
-
-        # Update UI
-        self.frame_slider.setMaximum(self.total_frames - 1)
-        self.update_frame_info()
-
-        # Update window title
-        folder_name = os.path.basename(folder_path)
-        self.setWindowTitle(f"Video Annotation Tool - Image Dataset: {folder_name}")
-
-        # Enable play button for image datasets
-        if hasattr(self, "play_button"):
-            self.play_button.setEnabled(True)
-            self.play_button.setIcon(
-                self.icon_provider.get_icon("media-playback-start")
-            )
-
-        # Set up auto-save for this dataset
-        self.autosave_file = os.path.join(folder_path, f"{folder_name}_autosave.json")
-
-        # Start auto-save timer
-        if self.autosave_enabled and not self.autosave_timer.isActive():
-            self.autosave_timer.start(self.autosave_interval)
-
-        # Update UI
-        self.update_annotation_list()
-        self.toolbar.update_class_selector()
-        self.class_dock.update_class_list()
-
-        # Show success message
-        self.statusBar.showMessage(success_message)
+        """Open a labeled dataset (Roboflow/splits/etc). Now delegates
+        to the unified open_image_folder() flow."""
+        self.open_image_folder()
 
     @log_exceptions
-    def load_image_dataset_from_project(self, image_dataset_info, current_frame):
-        """Load an image dataset from project information."""
+    def load_image_dataset_from_project(self, image_dataset_info, current_frame=None):
+        """Load an image dataset from a saved project / autosave.
+
+        current_frame is optional (defaults to self.current_frame, which
+        load_project has just restored). Re-scans the dataset folder so
+        that _viat_dataset_info, _viat_frame_to_split, and labels are
+        populated, then refreshes the class UI.
+        """
+        if current_frame is None:
+            current_frame = getattr(self, "current_frame", 0)
+
         base_folder = image_dataset_info.get("base_folder", "")
-        relative_paths = image_dataset_info.get("image_files", [])
-
-        # Check if base folder exists
         if not os.path.exists(base_folder):
-            # Ask user to locate the base folder
-            msg = f"The original image folder '{base_folder}' was not found.\nWould you like to locate it?"
             reply = QMessageBox.question(
-                self,
-                "Folder Not Found",
-                msg,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                self, "Folder Not Found",
+                f"The original image folder '{base_folder}' was not found.\n"
+                f"Would you like to locate it?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             )
-
             if reply == QMessageBox.Yes:
-                new_base_folder = QFileDialog.getExistingDirectory(
+                new_base = QFileDialog.getExistingDirectory(
                     self, "Locate Image Folder", "", QFileDialog.ShowDirsOnly
                 )
-                if new_base_folder:
-                    base_folder = new_base_folder
+                if new_base:
+                    base_folder = new_base
                 else:
                     return False
             else:
                 return False
 
-        # Construct absolute paths
-        image_files = []
-        missing_files = []
+        # Re-scan the dataset to get fresh info (layout, splits, labels)
+        from utils.dataset_manager import scan_dataset, load_dataset_into_app
+        info = scan_dataset(base_folder)
+        self._viat_dataset_info = info
 
-        for rel_path in relative_paths:
-            abs_path = os.path.join(base_folder, rel_path)
-            if os.path.exists(abs_path):
-                image_files.append(abs_path)
-            else:
-                missing_files.append(rel_path)
-
-        # Warn about missing files
-        if missing_files:
-            if len(missing_files) > 10:
-                missing_msg = (
-                    "\n".join(missing_files[:10])
-                    + f"\n... and {len(missing_files) - 10} more"
-                )
-            else:
-                missing_msg = "\n".join(missing_files)
-
-            QMessageBox.warning(
-                self,
-                "Missing Files",
-                f"The following {len(missing_files)} image files were not found:\n\n{missing_msg}",
-            )
+        # If the saved project has image_files as relative paths, use them;
+        # otherwise use the scanned images.
+        relative_paths = image_dataset_info.get("image_files", [])
+        if relative_paths:
+            image_files = []
+            for rel in relative_paths:
+                ap = os.path.join(base_folder, rel)
+                if os.path.exists(ap):
+                    image_files.append(ap)
+        else:
+            image_files = info.all_images
 
         if not image_files:
-            QMessageBox.critical(
-                self, "Error", "No image files could be loaded from the project."
-            )
+            QMessageBox.critical(self, "Error", "No image files could be loaded.")
             return False
 
-        # Set up the image dataset
-        self.image_files = image_files
-        self.total_frames = len(image_files)
+        # Reload labels from disk (fresh), overwriting the project-saved ones
+        # so edits on disk since last save are reflected.
+        result = load_dataset_into_app(self, info, BoundingBox)
+        self._viat_frame_to_split = result["frame_to_split"]
+        self.image_files = result["image_files"]
+        self.total_frames = len(self.image_files)
         self.current_frame = min(current_frame, self.total_frames - 1)
         self.is_image_dataset = True
 
-        # Update UI
         self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
         self.frame_slider.setValue(self.current_frame)
 
         self.load_current_image()
-
         self.update_frame_info()
 
-        # Update window title
-        self.setWindowTitle(
-            f"Video Annotation Tool - Image Dataset: {os.path.basename(base_folder)}"
-        )
+        folder_name = os.path.basename(base_folder)
+        self.setWindowTitle(f"VIAT - Image Dataset: {folder_name}")
 
         if hasattr(self, "play_button"):
             self.play_button.setEnabled(True)
             self.play_button.setIcon(
                 self.icon_provider.get_icon("media-playback-start")
             )
+
+        # Initialize the dataset workflow log
+        try:
+            _viat_init_dataset_log(self, info)
+        except Exception:
+            pass
+
+        # CRITICAL: refresh the class UI so the class selector / dock
+        # shows the loaded classes (was missing -- classes were in
+        # canvas.class_colors but the selector stayed empty).
+        self.refresh_class_ui()
+        self.update_annotation_list()
 
         return True
 
@@ -876,21 +1045,32 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def slider_changed(self, value):
-        """Handle slider value changes."""
-        # self.handle_unverified_annotations()
+        """Handle slider value changes (user drag only -- programmatic
+        setValue blocks signals, so this only fires on genuine user
+        interaction)."""
+        # A manual slider drag means the user took control of navigation;
+        # cancel any in-progress interpolation cycle so Next/Prev behave
+        # predictably and slider/keyboard/mouse share the same state.
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+            and value != self.current_frame
+        ):
+            self.interpolation_manager.reset_cycle()
+
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if 0 <= value < len(self.image_files):
-                # Only update if the value actually changed
                 if value != self.current_frame:
                     self.current_frame = value
                     self.load_current_image()
                     self.update_frame_info()
-                    # Load annotations for the new frame
                     self.load_current_frame_annotations()
+                    self.update_frame_display()
         elif self.cap and self.cap.isOpened():
             frame_number = int(value)
             if frame_number != self.current_frame:
                 self.seek_to_frame(frame_number)
+                self.update_frame_display()
 
     @log_exceptions
     def seek_to_frame(self, frame_number):
@@ -919,111 +1099,97 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.set_frame(frame)
         self.update_frame_info()
         self.load_current_frame_annotations()
+        self.update_frame_display()
         return True
 
     @log_exceptions
     def prev_frame(self):
-        """Go to the previous frame in the video or previous image in the dataset."""
+        """Go to the previous frame. ALWAYS steps back exactly one frame,
+        regardless of interpolation mode (per user requirement)."""
         self.handle_unverified_annotations()
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame > 0:
                 self.current_frame -= 1
+                self.frame_slider.blockSignals(True)
                 self.frame_slider.setValue(self.current_frame)
+                self.frame_slider.blockSignals(False)
                 self.load_current_image()
                 self.update_frame_info()
+                self.load_current_frame_annotations()
+                self.update_frame_display()
         else:
-            if (
-                hasattr(self, "interpolation_manager")
-                and self.interpolation_manager.is_active
-            ):
-                current_frame = self.current_frame
-
-                # Check if current frame has annotations
-                current_has_annotations = (
-                    current_frame in self.frame_annotations
-                    and len(self.frame_annotations[current_frame]) > 0
-                )
-
-                if current_has_annotations:
-                    # If current frame has annotations, go to previous keyframe (current - interval)
-                    prev_frame = max(
-                        0, current_frame - self.interpolation_manager.interval
-                    )
-                else:
-                    # If current frame has no annotations, find the previous frame with annotations
-                    prev_frame = None
-                    for frame in sorted(self.frame_annotations.keys(), reverse=True):
-                        if (
-                            frame < current_frame
-                            and len(self.frame_annotations[frame]) > 0
-                        ):
-                            prev_frame = frame
-                            break
-
-                    # If no previous annotated frame found, just go to previous frame
-                    if prev_frame is None:
-                        prev_frame = max(0, current_frame - 1)
-            else:
-                prev_frame = max(0, self.current_frame - 1)
-            if self.seek_to_frame(prev_frame):
-                pass
+            prev = max(0, self.current_frame - 1)
+            if self.seek_to_frame(prev):
+                self.update_frame_display()
 
     @log_exceptions
     def next_frame(self):
-        """Go to the next frame in the video or next image in the dataset."""
+        """Go to the next frame, or drive the interpolation workflow when
+        interpolation mode is active (and not during playback)."""
         self.handle_unverified_annotations()
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
                 self.current_frame += 1
-                # Update slider position first
+                self.frame_slider.blockSignals(True)
                 self.frame_slider.setValue(self.current_frame)
+                self.frame_slider.blockSignals(False)
                 self.load_current_image()
                 self.update_frame_info()
                 self.load_current_frame_annotations()
+                self.update_frame_display()
             else:
                 if self.is_playing:
                     self.current_frame = 0
-                    # Update slider position first
+                    self.frame_slider.blockSignals(True)
                     self.frame_slider.setValue(self.current_frame)
+                    self.frame_slider.blockSignals(False)
                     self.load_current_image()
                     self.update_frame_info()
                     self.load_current_frame_annotations()
                     self.statusBar.showMessage("Looping back to start of image dataset")
+                    self.update_frame_display()
                 else:
-                    # Just show message if not playing
                     self.statusBar.showMessage("End of image dataset")
-        else:
-            next_frame_number = None
+            return
 
+        # --- Video ---
+        next_frame_number = None
+
+        # Interpolation workflow drives Next (single owner of jumps).
+        # Note: object visibility mode no longer restricts navigation -- the
+        # user can navigate freely; the canvas filter shows only the current
+        # object's annotations.
+        if (
+            hasattr(self, "interpolation_manager")
+            and self.interpolation_manager.is_active
+            and not self.is_playing
+        ):
+            # Interpolation workflow drives Next (single owner of jumps).
+            next_frame_number = self.interpolation_manager.get_next_frame(
+                self.current_frame
+            )
+        elif self.cap and self.cap.isOpened():
+            next_frame_number = self.current_frame + 1
+            if next_frame_number >= self.total_frames:
+                self.play_timer.stop()
+                self.is_playing = False
+                self.statusBar.showMessage("End of video")
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.seek_to_frame(0)
+                return
+
+        if next_frame_number is not None and self.seek_to_frame(next_frame_number):
+            self.update_frame_display()
             if (
-                hasattr(self, "interpolation_manager")
-                and self.interpolation_manager.is_active
+                self.duplicate_frames_enabled
+                and self.current_frame in self.frame_hashes
             ):
-                next_frame_number = self.interpolation_manager.get_next_frame_for_workflow(
-                    self.current_frame
-                )
-            elif self.cap and self.cap.isOpened():
-                next_frame_number = self.current_frame + 1
-
-                if next_frame_number >= self.total_frames:
-                    self.play_timer.stop()
-                    self.is_playing = False
-                    self.statusBar.showMessage("End of video")
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.seek_to_frame(0)
-                    return
-
-            if next_frame_number is not None and self.seek_to_frame(next_frame_number):
+                current_hash = self.frame_hashes[self.current_frame]
                 if (
-                    self.duplicate_frames_enabled
-                    and self.current_frame in self.frame_hashes
+                    current_hash in self.duplicate_frames_cache
+                    and len(self.duplicate_frames_cache[current_hash]) > 1
                 ):
-                    current_hash = self.frame_hashes[self.current_frame]
-                    if (
-                        current_hash in self.duplicate_frames_cache
-                        and len(self.duplicate_frames_cache[current_hash]) > 1
-                    ):
-                        self.propagate_annotations_to_duplicate(current_hash)
+                    self.propagate_annotations_to_duplicate(current_hash)
 
     @log_exceptions
     def play_pause_video(self):
@@ -1254,15 +1420,8 @@ class VideoAnnotationTool(QMainWindow):
         # Save current annotations to frame_annotations
         self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
 
-        # Check if we're in interpolation mode and should trigger the workflow
-        if (
-            hasattr(self, "interpolation_manager")
-            and self.interpolation_manager.is_active
-            and len(self.canvas.annotations) > 0
-        ):
-
-            # Notify the interpolation manager that this frame has been annotated
-            self.interpolation_manager.on_frame_annotated(self.current_frame)
+        # The interpolation workflow is now driven entirely by Next/Prev
+        # (see InterpolationManager.get_next_frame). No action needed here.
 
         # Handle duplicate frames if enabled
         if self.duplicate_frames_enabled and self.current_frame in self.frame_hashes:
@@ -1757,7 +1916,7 @@ class VideoAnnotationTool(QMainWindow):
             if video_path and os.path.exists(video_path):
                 self.load_video_file(video_path)
             elif image_dataset_info:
-                self.load_image_dataset_from_project(image_dataset_info)
+                self.load_image_dataset_from_project(image_dataset_info, current_frame)
                 
             # Update UI
             self.update_frame_display()
@@ -3373,118 +3532,52 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def update_frame_display(self):
-        """Update the frame display with interpolation indicators."""
-        # Update indicator if interpolation is active
-        if (
+        """Update the keyframe/interpolation indicator for the current frame.
+
+        Uses the interpolation cycle (anchor/target) when active, so the
+        indicator reflects the actual workflow state instead of a stale
+        'last_annotated_frame' value.
+        """
+        if not (
             hasattr(self, "interpolation_manager")
             and self.interpolation_manager.is_active
         ):
-            # Check if this frame has annotations
-            has_annotations = (
-                self.current_frame in self.frame_annotations
-                and len(self.frame_annotations[self.current_frame]) > 0
-            )
-
-            # Update indicator in toolbar
-            if hasattr(self, "keyframe_indicator"):
-                if has_annotations:
-                    # This is an annotated frame (either manually or interpolated)
-                    if (
-                        self.current_frame
-                        == self.interpolation_manager.last_annotated_frame
-                    ):
-                        # This is the last manually annotated frame
-                        self.keyframe_indicator.setStyleSheet(
-                            "background-color: #FF5555; min-width: 16px;"
-                        )
-                        self.keyframe_indicator.setToolTip(
-                            "Current frame is manually annotated"
-                        )
-                    else:
-                        # This is an interpolated frame or another manually annotated frame
-                        self.keyframe_indicator.setStyleSheet(
-                            "background-color: #55AAFF; min-width: 16px;"
-                        )
-                        self.keyframe_indicator.setToolTip(
-                            "Current frame has annotations"
-                        )
-                else:
-                    self.keyframe_indicator.setStyleSheet(
-                        "background-color: transparent; min-width: 16px;"
-                    )
-                    self.keyframe_indicator.setToolTip(
-                        "Current frame has no annotations"
-                    )
-
-            # Add visual indicator to frame display
             if hasattr(self, "canvas"):
-                if has_annotations:
-                    if (
-                        self.current_frame
-                        == self.interpolation_manager.last_annotated_frame
-                    ):
-                        self.canvas.setStyleSheet(
-                            "border: 2px solid #FF5555;"
-                        )  # Red for manually annotated
-                    else:
-                        self.canvas.setStyleSheet(
-                            "border: 2px solid #55AAFF;"
-                        )  # Blue for other annotations
-                else:
-                    self.canvas.setStyleSheet("")
+                self.canvas.setStyleSheet("")
+            return
 
-    @log_exceptions
-    def update_frame_display(self):
-        """Update the frame display with keyframe and interpolation indicators."""
-        # Update keyframe indicator if interpolation is active
-        if (
-            hasattr(self, "interpolation_manager")
-            and self.interpolation_manager.is_active
-        ):
-            is_keyframe = self.interpolation_manager.is_keyframe()
+        has_annotations = (
+            self.current_frame in self.frame_annotations
+            and len(self.frame_annotations[self.current_frame]) > 0
+        )
+        is_keyframe = self.interpolation_manager.is_keyframe()
 
-            # Update indicator in toolbar
-            if hasattr(self, "keyframe_indicator"):
-                if is_keyframe:
-                    self.keyframe_indicator.setStyleSheet(
-                        "background-color: #FF5555; min-width: 16px;"
-                    )
-                    self.keyframe_indicator.setToolTip("Current frame is a keyframe")
-                else:
-                    # Check if this is an interpolated frame
-                    is_interpolated = (
-                        self.current_frame in self.frame_annotations
-                        and len(self.frame_annotations[self.current_frame]) > 0
-                    )
+        if hasattr(self, "keyframe_indicator"):
+            if is_keyframe:
+                self.keyframe_indicator.setStyleSheet(
+                    "background-color: #FF5555; min-width: 16px;"
+                )
+                self.keyframe_indicator.setToolTip("Current frame is a keyframe")
+            elif has_annotations:
+                self.keyframe_indicator.setStyleSheet(
+                    "background-color: #55AAFF; min-width: 16px;"
+                )
+                self.keyframe_indicator.setToolTip(
+                    "Current frame has interpolated annotations"
+                )
+            else:
+                self.keyframe_indicator.setStyleSheet(
+                    "background-color: transparent; min-width: 16px;"
+                )
+                self.keyframe_indicator.setToolTip("Current frame has no annotations")
 
-                    if is_interpolated:
-                        self.keyframe_indicator.setStyleSheet(
-                            "background-color: #55AAFF; min-width: 16px;"
-                        )
-                        self.keyframe_indicator.setToolTip(
-                            "Current frame has interpolated annotations"
-                        )
-                    else:
-                        self.keyframe_indicator.setStyleSheet(
-                            "background-color: transparent; min-width: 16px;"
-                        )
-                        self.keyframe_indicator.setToolTip(
-                            "Current frame is not a keyframe"
-                        )
-
-            # Add visual indicator to frame display
-            if hasattr(self, "canvas"):
-                if is_keyframe:
-                    self.canvas.setStyleSheet("border: 2px solid #FF5555;")
-                elif (
-                    self.current_frame in self.frame_annotations
-                    and len(self.frame_annotations[self.current_frame]) > 0
-                ):
-                    self.canvas.setStyleSheet(
-                        "border: 2px solid #55AAFF;"
-                    )  # Blue for interpolated frames
-                else:
-                    self.canvas.setStyleSheet("")
+        if hasattr(self, "canvas"):
+            if is_keyframe:
+                self.canvas.setStyleSheet("border: 2px solid #FF5555;")
+            elif has_annotations:
+                self.canvas.setStyleSheet("border: 2px solid #55AAFF;")
+            else:
+                self.canvas.setStyleSheet("")
 
     # -------------------------------------------------------------------------
     # Verification Methods
@@ -3538,11 +3631,12 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def handle_unverified_annotations(self):
-        """Handle unverified annotations when changing frames."""
-        if (
-            not hasattr(self, "verification_mode")
-            or not self.verification_mode
-        ):
+        """Handle unverified annotations when changing frames.
+
+        Only removes unverified annotations if self.remove_unverified is True
+        (toggle, default OFF). When OFF, unverified labels are kept.
+        """
+        if not getattr(self, "remove_unverified", False):
             return
 
         # Check if there are any unverified annotations in the current frame
@@ -4195,49 +4289,50 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def eventFilter(self, obj, event):
-        """Global event filter to handle shortcuts regardless of focus."""
+        """Global event filter for frame-navigation shortcuts.
+
+        Arrow keys (without Ctrl) step frames; Space toggles play/pause;
+        Tab cycles annotation selection when the canvas has focus. These
+        are handled HERE and only here, so there is a single owner of
+        frame navigation and no double-stepping between the event filter
+        and keyPressEvent.
+        """
         if event.type() == QEvent.KeyPress:
-            # Handle arrow keys for frame navigation
-            # Check if control is not pressed
-            if not (QApplication.keyboardModifiers() & Qt.ControlModifier):
-                if event.key() == Qt.Key_Right:
-                    # Right or Down arrow - go to next frame
-                    self.next_frame()
-                    return True
-                elif event.key() == Qt.Key_Left:
-                    # Left or Up arrow - go to previous frame
-                    self.prev_frame()
-                    return True
-            # Handle space key for play/pause
-            elif event.key() == Qt.Key_Space:
-                # Space - toggle play/pause
+            from PyQt5.QtWidgets import (
+                QLineEdit, QPlainTextEdit, QTextEdit,
+                QSpinBox, QDoubleSpinBox, QComboBox,
+            )
+            focused = QApplication.focusWidget()
+            typing = isinstance(
+                focused,
+                (QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox),
+            )
+            mods = QApplication.keyboardModifiers()
+
+            if (event.key() == Qt.Key_Right and not typing
+                    and not (mods & Qt.ControlModifier)):
+                self.next_frame()
+                return True
+            if (event.key() == Qt.Key_Left and not typing
+                    and not (mods & Qt.ControlModifier)):
+                self.prev_frame()
+                return True
+            if event.key() == Qt.Key_Space and not typing:
                 self.play_pause_video()
                 return True
-                # Cycle through annotations with Tab
-            elif event.key() == Qt.Key_Tab:
-                # Check if the focused widget is an input field
-                focused_widget = QApplication.focusWidget()
-                # Only use Tab for cycling if we're not in an input field
-                if isinstance(focused_widget, VideoCanvas):
+            if event.key() == Qt.Key_Tab:
+                if isinstance(focused, VideoCanvas):
                     self.cycle_annotation_selection()
                     event.accept()
                     return True
-        # Let other events pass through
         return super().eventFilter(obj, event)
 
     @log_exceptions
     def keyPressEvent(self, event):
-        """Handle keyboard events."""
-        # Handle arrow keys for frame navigation
-        if event.key() == Qt.Key_Right:
-            # Right or Down arrow - go to next frame
-            self.next_frame()
-            return
-        elif event.key() == Qt.Key_Left:
-            # Left or Up arrow - go to previous frame
-            self.prev_frame()
-            return
-        elif event.key() == Qt.Key_Delete:
+        """Handle keyboard shortcuts that are NOT frame navigation.
+        Arrow keys are handled globally in eventFilter so there is a
+        single owner of frame stepping (no double jumps)."""
+        if event.key() == Qt.Key_Delete:
             if (
                 hasattr(self.canvas, "selected_annotations")
                 and self.canvas.selected_annotations
@@ -4248,47 +4343,46 @@ class VideoAnnotationTool(QMainWindow):
                 and self.canvas.selected_annotation
             ):
                 self.delete_selected_annotation()
-        # Toggle annotation method with 'M' key
-        elif event.key() == Qt.Key_M:
+            return
+        if event.key() == Qt.Key_M:
             current_index = self.method_selector.currentIndex()
             new_index = (current_index + 1) % self.method_selector.count()
             self.method_selector.setCurrentIndex(new_index)
-        # Batch edit annotations with 'B' key
-        elif event.key() == Qt.Key_B:
+            return
+        if event.key() == Qt.Key_B:
             if hasattr(self, "annotation_dock"):
                 self.annotation_dock.batch_edit_annotations()
-
-        # Propagate annotations with 'P' key
-        elif event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
+            return
+        if event.key() == Qt.Key_P and (event.modifiers() & Qt.ControlModifier):
             self.propagate_annotations()
-        # Copy selected annotation with Ctrl+C
-        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            return
+        if event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
             self.copy_selected_annotation()
-        # Paste annotation with Ctrl+V
-        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            return
+        if event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
             self.paste_annotation()
-        # Cut selected annotation with Ctrl+X
-        elif event.key() == Qt.Key_X and (event.modifiers() & Qt.ControlModifier):
+            return
+        if event.key() == Qt.Key_X and (event.modifiers() & Qt.ControlModifier):
             self.cut_selected_annotation()
-        # Select all annotations with Ctrl+A
-        elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            return
+        if event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
             self.select_all_annotations()
-        # Undo with Ctrl+Z
-        elif (
+            return
+        if (
             event.key() == Qt.Key_Z
             and (event.modifiers() & Qt.ControlModifier)
             and not (event.modifiers() & Qt.ShiftModifier)
         ):
             self.undo()
-        # Redo with Ctrl+Y or Ctrl+Shift+Z
-        elif (event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier)) or (
+            return
+        if (event.key() == Qt.Key_Y and (event.modifiers() & Qt.ControlModifier)) or (
             event.key() == Qt.Key_Z
             and (event.modifiers() & Qt.ControlModifier)
             and (event.modifiers() & Qt.ShiftModifier)
         ):
             self.redo()
-        else:
-            super().keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
 
     @log_exceptions
     def closeEvent(self, event):
@@ -4330,6 +4424,947 @@ class VideoAnnotationTool(QMainWindow):
     # -------------------------------------------------------------------------
     # Miscellaneous Methods
     # -------------------------------------------------------------------------
+
+    # -----------------------------------------------------------------
+    # Dataset operations (patch2): remove bad frames, remap/merge classes
+    # -----------------------------------------------------------------
+
+    def _viat_ensure_dataset(self):
+        """Return the loaded DatasetInfo or show a warning."""
+        info = getattr(self, "_viat_dataset_info", None)
+        if info is None or not getattr(self, "is_image_dataset", False):
+            QMessageBox.warning(
+                self, "Dataset Operation",
+                "Open an image dataset first (File > Open Image Folder).",
+            )
+            return None
+        return info
+
+    def viat_current_split(self):
+        """Return the split name of the current frame, or 'root'."""
+        f2s = getattr(self, "_viat_frame_to_split", None)
+        if f2s and 0 <= self.current_frame < len(f2s):
+            return f2s[self.current_frame]
+        return "root"
+
+    @log_exceptions
+    def remove_bad_frame(self):
+        """Discard the current frame: move image + label to discarded/."""
+        if not self._viat_ensure_dataset():
+            return
+        if not (0 <= self.current_frame < self.total_frames):
+            return
+        fname = os.path.basename(self.image_files[self.current_frame])
+        reply = QMessageBox.question(
+            self, "Remove Bad Frame",
+            f"Move this frame to the 'discarded' folder?\n\n"
+            f"  {fname} (split: {self.viat_current_split()})\n\n"
+            f"Image + label will be moved on disk (reversible).",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        result = _viat_remove_bad_frames(self, [self.current_frame])
+        # Stay on the same index (now the next image) or clamp.
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Discarded 1 frame -> {result['discarded_dir']} "
+            f"({result['moved_images']} img, {result['moved_labels']} lbl)",
+            5000,
+        )
+
+    @log_exceptions
+    def remove_bad_frames_dialog(self):
+        """Discard a range of frames (batch)."""
+        if not self._viat_ensure_dataset():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Remove Bad Frames (batch)")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        start_spin = QSpinBox(); start_spin.setRange(0, max(0, self.total_frames - 1))
+        start_spin.setValue(self.current_frame)
+        end_spin = QSpinBox(); end_spin.setRange(0, max(0, self.total_frames - 1))
+        end_spin.setValue(self.current_frame)
+        form.addRow("Start frame:", start_spin)
+        form.addRow("End frame:", end_spin)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        lo, hi = sorted([start_spin.value(), end_spin.value()])
+        frames = list(range(lo, hi + 1))
+        reply = QMessageBox.question(
+            self, "Remove Bad Frames",
+            f"Move {len(frames)} frames ({lo}..{hi}) to discarded/?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        result = _viat_remove_bad_frames(self, frames)
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Discarded {result['moved_images']} images / "
+            f"{result['moved_labels']} labels -> {result['discarded_dir']}",
+            5000,
+        )
+
+    @log_exceptions
+    def remap_class_dialog(self):
+        """Rename a class everywhere (in-memory + on-disk labels)."""
+        if not self._viat_ensure_dataset():
+            return
+        classes = sorted(getattr(self.canvas, "class_colors", {}).keys())
+        if not classes:
+            QMessageBox.information(self, "Remap Class", "No classes loaded.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Remap Class")
+        dialog.setMinimumWidth(380)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        old_combo = QComboBox(); old_combo.addItems(classes)
+        new_edit = QLineEdit(); new_edit.setPlaceholderText("new class name")
+        rewrite_check = QCheckBox("Also rewrite label files on disk"); rewrite_check.setChecked(True)
+        form.addRow("Old class:", old_combo)
+        form.addRow("New name:", new_edit)
+        form.addRow("", rewrite_check)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        old = old_combo.currentText()
+        new = new_edit.text().strip()
+        if not new or old == new:
+            return
+        result = _viat_remap_class(self, old, new, rewrite_disk=rewrite_check.isChecked())
+        self.refresh_class_ui()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Remapped '{old}' -> '{new}': "
+            f"{result['changed_boxes']} boxes in {result['changed_frames']} frames, "
+            f"{result['disk_files_rewritten']} files rewritten.",
+            6000,
+        )
+
+    @log_exceptions
+    def merge_classes_dialog(self):
+        """Merge several classes into one (e.g. car+truck -> vehicle)."""
+        if not self._viat_ensure_dataset():
+            return
+        classes = sorted(getattr(self.canvas, "class_colors", {}).keys())
+        if len(classes) < 2:
+            QMessageBox.information(self, "Merge Classes", "Need at least 2 classes.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Merge Classes")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select classes to merge INTO a single class:"))
+        checks = []
+        for c in classes:
+            cb = QCheckBox(c); checks.append((c, cb)); layout.addWidget(cb)
+        form = QFormLayout()
+        new_edit = QLineEdit(); new_edit.setPlaceholderText("target class name")
+        form.addRow("Merge into:", new_edit)
+        rewrite_check = QCheckBox("Also rewrite label files on disk"); rewrite_check.setChecked(True)
+        form.addRow("", rewrite_check)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        old_names = [c for c, cb in checks if cb.isChecked()]
+        new = new_edit.text().strip()
+        if not new or not old_names:
+            return
+        if new in old_names:
+            old_names = [c for c in old_names if c != new]
+        result = _viat_merge_classes(self, old_names, new, rewrite_disk=rewrite_check.isChecked())
+        self.refresh_class_ui()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Merged {len(old_names)} classes into '{new}': "
+            f"{result['changed_boxes']} boxes, {result['disk_files_rewritten']} files rewritten.",
+            6000,
+        )
+
+    @log_exceptions
+    def viat_dataset_stats(self):
+        """Show a quick dataset statistics dialog."""
+        info = self._viat_ensure_dataset()
+        if not info:
+            return
+        # per-split counts + per-class counts
+        per_split = {}
+        per_class = {}
+        f2s = getattr(self, "_viat_frame_to_split", []) or []
+        for fidx, anns in self.frame_annotations.items():
+            sp = f2s[fidx] if fidx < len(f2s) else "root"
+            per_split[sp] = per_split.get(sp, 0) + 1
+            for a in anns:
+                per_class[a.class_name] = per_class.get(a.class_name, 0) + 1
+        lines = [f"Dataset: {os.path.basename(info.root)}", f"Layout: {info.layout}", ""]
+        lines.append("Splits (annotated frames):")
+        for s in info.splits:
+            lines.append(f"  {s.name}: {per_split.get(s.name, 0)}/{len(s.images)} frames, format={s.label_format}")
+        lines.append("")
+        lines.append("Classes (box counts):")
+        for c, n in sorted(per_class.items(), key=lambda x: -x[1]):
+            lines.append(f"  {c}: {n}")
+        lines.append("")
+        lines.append(f"Classes source: {info.classes_source}")
+        if info.classes_conflict:
+            lines.append(f"⚠ {info.classes_conflict}")
+        QMessageBox.information(self, "Dataset Statistics", "\n".join(lines))
+
+    # -----------------------------------------------------------------
+    # New dataset ops (patch3): move, grayscale, duplicates, class filter,
+    #                           segmentation toggle, dataset log viewer
+    # -----------------------------------------------------------------
+
+    @log_exceptions
+    def viat_move_current_to_removed(self):
+        """Move the current frame to removed/ (image + label on disk).
+
+        No confirmation dialog -- the user pressed Shift+X / Ctrl+X intentionally.
+        """
+        if not self._viat_ensure_dataset():
+            return
+        if not (0 <= self.current_frame < self.total_frames):
+            return
+        result = _viat_move_to_removed(self, [self.current_frame])
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Moved to {result['dest_dir']} ({result['moved_images']} img, "
+            f"{result['moved_labels']} lbl)", 3000,
+        )
+
+    @log_exceptions
+    def viat_move_current_to_review_label(self):
+        """Move the current frame to review_label/ (the CHANGE LABEL queue)."""
+        if not self._viat_ensure_dataset():
+            return
+        if not (0 <= self.current_frame < self.total_frames):
+            return
+        fname = os.path.basename(self.image_files[self.current_frame])
+        result = _viat_move_to_review_label(self, [self.current_frame])
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Moved to review_label/ for label review: {fname}", 5000,
+        )
+
+    @log_exceptions
+    def viat_remove_grayscale(self):
+        """Detect and move all grayscale images to removed/grayscale/."""
+        if not self._viat_ensure_dataset():
+            return
+        reply = QMessageBox.question(
+            self, "Remove Grayscale Images",
+            "Scan all images and move grayscale ones to removed/grayscale/?\n\n"
+            "This may take a moment for large datasets.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.statusBar.showMessage("Scanning for grayscale images...")
+        QApplication.processEvents()
+        result = _viat_remove_grayscale(self)
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Removed {result['moved_images']} grayscale images -> {result['dest_dir']}",
+            5000,
+        )
+
+    @log_exceptions
+    def viat_remove_duplicates(self):
+        """Remove Roboflow duplicate groups (keep 1 per .rf. group)."""
+        if not self._viat_ensure_dataset():
+            return
+        reply = QMessageBox.question(
+            self, "Remove Roboflow Duplicates",
+            "Group images by their Roboflow base name (before .rf.) and\n"
+            "move duplicates to removed/duplicates/ (keeping 1 random per group)?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        result = _viat_remove_dup_groups(self)
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Removed {result['moved_images']} duplicates from "
+            f"{result['groups_processed']} groups -> {result['dest_dir']}",
+            5000,
+        )
+
+    @log_exceptions
+    def viat_remove_class_and_images_dialog(self):
+        """Move all frames whose labels contain a selected class."""
+        if not self._viat_ensure_dataset():
+            return
+        classes = sorted(getattr(self.canvas, "class_colors", {}).keys())
+        if not classes:
+            QMessageBox.information(self, "Remove Class + Images", "No classes loaded.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Remove Class + Images")
+        dialog.setMinimumWidth(380)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Select classes to remove (all images containing\n"
+                                 "any of these classes will be moved to removed/class_filtered/):"))
+        checks = []
+        for c in classes:
+            cb = QCheckBox(c)
+            checks.append((c, cb))
+            layout.addWidget(cb)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        selected = [c for c, cb in checks if cb.isChecked()]
+        if not selected:
+            return
+        reply = QMessageBox.question(
+            self, "Remove Class + Images",
+            f"Move all frames containing classes {selected} to removed/class_filtered/?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        result = _viat_remove_class_and_images(self, selected)
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.statusBar.showMessage(
+            f"Moved {result['moved_images']} frames (classes={selected}) -> {result['dest_dir']}",
+            5000,
+        )
+
+    @log_exceptions
+    def viat_toggle_segmentation(self):
+        """Toggle showing segmentation polygon outlines on the canvas."""
+        self.canvas.show_segmentation = not getattr(self.canvas, "show_segmentation", False)
+        self.canvas.update()
+        state = "ON" if self.canvas.show_segmentation else "OFF"
+        self.statusBar.showMessage(f"Segmentation display: {state}", 3000)
+
+    @log_exceptions
+    def viat_view_dataset_log(self):
+        """Open the DATASET_LOG.md file in the system text editor."""
+        info = getattr(self, "_viat_dataset_info", None)
+        if not info:
+            QMessageBox.warning(self, "Dataset Log", "No dataset loaded.")
+            return
+        log_path = os.path.join(info.root, "DATASET_LOG.md")
+        if not os.path.isfile(log_path):
+            # Create it now
+            try:
+                _viat_init_dataset_log(self, info)
+            except Exception:
+                pass
+        if os.path.isfile(log_path):
+            # Read and show in a dialog
+            content = open(log_path, "r", encoding="utf-8").read()
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Dataset Log — {os.path.basename(info.root)}")
+            dialog.setMinimumWidth(600)
+            dialog.setMinimumHeight(500)
+            layout = QVBoxLayout(dialog)
+            text_widget = QPlainTextEdit()
+            text_widget.setPlainText(content)
+            text_widget.setReadOnly(True)
+            layout.addWidget(text_widget)
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            dialog.exec_()
+        else:
+            QMessageBox.warning(self, "Dataset Log", "Could not create DATASET_LOG.md")
+
+    # -----------------------------------------------------------------
+    # Video annotation features (patch4)
+    # -----------------------------------------------------------------
+
+    @log_exceptions
+    def viat_import_video_json(self):
+        """Import a VIAT custom JSON annotation file.
+
+        Works for both video and image-dataset projects. If no media is
+        open, infers total_frames from the JSON's max frame key.
+        """
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import VIAT JSON Annotations", "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        # If no media is open, infer total_frames from the JSON
+        if not self.cap and not self.is_image_dataset:
+            try:
+                import json
+                with open(filename, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and data:
+                    max_frame = max(int(k) for k in data.keys() if str(k).isdigit())
+                    self.total_frames = max_frame + 1
+                    self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+            except Exception as e:
+                QMessageBox.warning(self, "Import JSON",
+                    f"Could not read JSON file:\n{e}\n\n"
+                    f"Make sure it's a VIAT JSON (frame-number keys with 'actors').")
+                return
+
+        self.save_undo_state()
+        try:
+            result = _viat_load_json_video(self, filename, BoundingBox)
+        except Exception as e:
+            QMessageBox.critical(self, "Import JSON",
+                f"Failed to parse JSON:\n{e}\n\n"
+                f"The file must be in VIAT JSON format:"
+                f"  \"0000\": {{\"actors\": {{...}}}}")
+            return
+        self.refresh_class_ui()
+        self.update_annotation_list()
+        if self.current_frame in self.frame_annotations:
+            self.canvas.annotations = self.frame_annotations[self.current_frame]
+            self.canvas.update()
+        if result['frames_loaded'] == 0:
+            QMessageBox.warning(self, "Import JSON",
+                "No frames were loaded. The file may not be in VIAT JSON format\n"
+                "(expected: {\"0000\": {\"actors\": {...}}})")
+            return
+        msg = (
+            f"Imported {result['frames_loaded']} frames, "
+            f"{result['actors_loaded']} annotations, "
+            f"{len(result['classes_found'])} classes. "
+            f"Actors: {', '.join(result.get('actor_ids', [])[:5])}"
+        )
+        if result.get('warnings'):
+            msg += f"  ({len(result['warnings'])} warnings)"
+        self.statusBar.showMessage(msg, 8000)
+
+    @log_exceptions
+    def viat_detect_and_fix_borders(self):
+        """Detect video borders and adjust (remove/clip) labels in the border."""
+        if not self.cap and not self.is_image_dataset:
+            QMessageBox.warning(self, "Video Borders", "Open a video first.")
+            return
+        self.statusBar.showMessage("Detecting video borders...")
+        QApplication.processEvents()
+        self.save_undo_state()
+        result = _viat_detect_adjust_borders(self)
+        if not result.get('detected', False):
+            QMessageBox.information(
+                self, "Video Borders",
+                "No black/gray borders detected on the left or right edges.",
+            )
+            self.statusBar.showMessage("No borders detected", 3000)
+            return
+        det = result['detection']
+        adj = result['adjustment']
+        self.canvas.update()
+        self.update_annotation_list()
+        msg = (
+            f"Borders: left={det['left_border']}px, right={det['right_border']}px "
+            f"(sampled {det['sampled']} frames).\n\n"
+            f"Annotations: {adj['removed']} removed (≥80% in border), "
+            f"{adj['clipped']} clipped, {adj['unchanged']} unchanged."
+        )
+        QMessageBox.information(self, "Video Borders Adjusted", msg)
+        self.statusBar.showMessage(
+            f"Borders fixed: {adj['removed']} removed, {adj['clipped']} clipped", 5000
+        )
+
+    @log_exceptions
+    def viat_start_object_visibility_mode(self):
+        """Enter per-object visibility editing mode."""
+        if not self.frame_annotations:
+            QMessageBox.warning(self, "Object Visibility", "No annotations loaded.")
+            return
+        if self.object_visibility_manager and self.object_visibility_manager.active:
+            return  # already active
+        self.object_visibility_manager = _ViatObjectVisibilityManager(self)
+        if not self.object_visibility_manager.start():
+            QMessageBox.warning(self, "Object Visibility", "No objects found (need actor_id attributes).")
+            self.object_visibility_manager = None
+            return
+        self._viat_show_object_visibility_dialog()
+
+    @log_exceptions
+    def viat_exit_object_visibility_mode(self):
+        """Exit per-object visibility editing mode."""
+        if self.object_visibility_manager and self.object_visibility_manager.active:
+            self.object_visibility_manager.exit()
+        self.object_visibility_manager = None
+        if hasattr(self, '_viat_visibility_dialog') and self._viat_visibility_dialog:
+            self._viat_visibility_dialog.close()
+            self._viat_visibility_dialog = None
+        self.statusBar.showMessage("Exited object visibility mode", 3000)
+
+    def _viat_show_object_visibility_dialog(self):
+        """Show the object visibility editing dialog."""
+        mgr = self.object_visibility_manager
+        if not mgr or not mgr.active:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Object Visibility Mode")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+
+        # Status label
+        status_label = QLabel()
+        layout.addWidget(status_label)
+
+        # Object selector
+        obj_layout = QHBoxLayout()
+        obj_layout.addWidget(QLabel("Object:"))
+        obj_combo = QComboBox()
+        obj_combo.addItems(mgr.sorted_objects)
+        obj_combo.setCurrentText(mgr.current_object)
+        obj_layout.addWidget(obj_combo, 1)
+        layout.addLayout(obj_layout)
+
+        # Ranges display
+        ranges_label = QLabel()
+        ranges_label.setWordWrap(True)
+        layout.addWidget(ranges_label)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        trim_start_btn = QPushButton("Set Start Here")
+        trim_end_btn = QPushButton("Set End Here")
+        del_frame_btn = QPushButton("Delete on This Frame")
+        del_obj_btn = QPushButton("Delete Whole Object")
+        btn_layout.addWidget(trim_start_btn)
+        btn_layout.addWidget(trim_end_btn)
+        btn_layout.addWidget(del_frame_btn)
+        btn_layout.addWidget(del_obj_btn)
+        layout.addLayout(btn_layout)
+
+        # Navigation
+        nav_layout = QHBoxLayout()
+        prev_obj_btn = QPushButton("< Prev Object")
+        next_obj_btn = QPushButton("Next Object >")
+        finish_btn = QPushButton("FINISH (Next Object)")
+        finish_btn.setStyleSheet("font-weight: bold; background-color: #4CAF50; color: white;")
+        exit_btn = QPushButton("Exit Mode")
+        nav_layout.addWidget(prev_obj_btn)
+        nav_layout.addWidget(next_obj_btn)
+        nav_layout.addWidget(finish_btn)
+        nav_layout.addWidget(exit_btn)
+        layout.addLayout(nav_layout)
+
+        def update_status():
+            s = mgr.get_status()
+            status_label.setText(
+                f"Object {s['object_index']+1}/{s['total_objects']}: "
+                f"{s['current_object']}  |  Frame: {s['current_frame']}  |  "
+                f"Object appears in {len(s['current_object_frames'])} frames"
+            )
+            ranges = s['visible_ranges']
+            if ranges:
+                ranges_str = ", ".join(f"{a}-{b}" for a, b in ranges)
+                ranges_label.setText(f"Visible ranges: {ranges_str}")
+            else:
+                ranges_label.setText("No visible ranges (object may have been deleted)")
+
+        def on_obj_change(text):
+            mgr.select_object(text)
+            update_status()
+
+        def on_trim_start():
+            mgr.trim_current_frame_as_start()
+            update_status()
+            self.load_current_frame_annotations()
+
+        def on_trim_end():
+            mgr.trim_current_frame_as_end()
+            update_status()
+            self.load_current_frame_annotations()
+
+        def on_del_frame():
+            n = mgr.delete_current_object_on_current_frame()
+            update_status()
+            self.load_current_frame_annotations()
+            self.statusBar.showMessage(f"Deleted {n} annotation(s) on this frame", 2000)
+
+        def on_del_obj():
+            reply = QMessageBox.question(
+                dialog, "Delete Object",
+                f"Delete ALL annotations for '{mgr.current_object}' across all frames?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                n = mgr.delete_object()
+                if not mgr.sorted_objects:
+                    QMessageBox.information(dialog, "Done", "All objects processed.")
+                    self.viat_exit_object_visibility_mode()
+                    return
+                obj_combo.clear()
+                obj_combo.addItems(mgr.sorted_objects)
+                obj_combo.setCurrentText(mgr.current_object)
+                update_status()
+                self.load_current_frame_annotations()
+                self.statusBar.showMessage(f"Deleted {n} annotations for object", 3000)
+
+        def on_prev_obj():
+            if mgr.prev_object():
+                obj_combo.setCurrentText(mgr.current_object)
+                update_status()
+
+        def on_next_obj():
+            if mgr.next_object():
+                obj_combo.setCurrentText(mgr.current_object)
+                update_status()
+            else:
+                QMessageBox.information(dialog, "Done", "This was the last object.")
+
+        def on_finish():
+            if mgr.next_object():
+                obj_combo.setCurrentText(mgr.current_object)
+                update_status()
+            else:
+                QMessageBox.information(dialog, "All Done", "All objects have been processed.")
+                self.viat_exit_object_visibility_mode()
+
+        def on_exit():
+            self.viat_exit_object_visibility_mode()
+
+        obj_combo.currentTextChanged.connect(on_obj_change)
+        trim_start_btn.clicked.connect(on_trim_start)
+        trim_end_btn.clicked.connect(on_trim_end)
+        del_frame_btn.clicked.connect(on_del_frame)
+        del_obj_btn.clicked.connect(on_del_obj)
+        prev_obj_btn.clicked.connect(on_prev_obj)
+        next_obj_btn.clicked.connect(on_next_obj)
+        finish_btn.clicked.connect(on_finish)
+        exit_btn.clicked.connect(on_exit)
+
+        update_status()
+        self._viat_visibility_dialog = dialog
+        dialog.exec_()
+
+    # -----------------------------------------------------------------
+    # Patch 6: remove-unverified toggle, seg video, JSON export, perf
+    # -----------------------------------------------------------------
+
+    @log_exceptions
+    def viat_toggle_remove_unverified(self):
+        """Toggle whether unverified annotations are removed on frame change."""
+        self.remove_unverified = not self.remove_unverified
+        state = "ON" if self.remove_unverified else "OFF"
+        self.statusBar.showMessage(f"Remove unverified labels: {state}", 3000)
+
+    @log_exceptions
+    def viat_export_json(self):
+        """Export all annotations to VIAT JSON format."""
+        if not self.frame_annotations:
+            QMessageBox.warning(self, "Export JSON", "No annotations to export.")
+            return
+        default_name = "annotations.json"
+        if self.video_filename:
+            base = os.path.splitext(os.path.basename(self.video_filename))[0]
+            default_name = base + "_annotations.json"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export VIAT JSON", default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        # Build boxes_by_frame from frame_annotations
+        from utils.label_formats.viat_json import ViatJsonLabelFormat
+        boxes_by_frame = {}
+        for frame_num, anns in self.frame_annotations.items():
+            boxes = []
+            for ann in anns:
+                attrs = getattr(ann, "attributes", {}) or {}
+                boxes.append({
+                    "class_name": ann.class_name,
+                    "actor_id": attrs.get("actor_id", f"actor_{frame_num}"),
+                    "x": ann.rect.x(),
+                    "y": ann.rect.y(),
+                    "w": ann.rect.width(),
+                    "h": ann.rect.height(),
+                    "verified": getattr(ann, "verified", False),
+                    "segmentation": getattr(ann, "segmentation", None),
+                })
+            boxes_by_frame[frame_num] = boxes
+        fmt = ViatJsonLabelFormat()
+        content = fmt.dump(boxes_by_frame, (0, 0), [])
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+        total = sum(len(v) for v in boxes_by_frame.values())
+        self.statusBar.showMessage(
+            f"Exported {len(boxes_by_frame)} frames / {total} annotations to {filename}",
+            5000,
+        )
+
+    @log_exceptions
+    def viat_seg_video_pick_color(self):
+        """Pick a color from the current frame and start tracking an object."""
+        if not self.cap and not self.is_image_dataset:
+            QMessageBox.warning(self, "Seg Video", "Open a video first.")
+            return
+        # Get the current frame
+        if self.cap and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                QMessageBox.warning(self, "Seg Video", "Could not read current frame.")
+                return
+        elif self.is_image_dataset and self.image_files:
+            frame = cv2.imread(self.image_files[self.current_frame])
+        else:
+            return
+
+        # Show a dialog asking the user to click on the canvas, OR enter x,y
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pick Object Color")
+        dialog.setMinimumWidth(400)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Enter the pixel coordinates of the object to track,\n"
+                                 "or use the spin boxes to adjust. The color at that\n"
+                                 "pixel will be tracked across the video."))
+        form = QFormLayout()
+        x_spin = QSpinBox(); x_spin.setRange(0, 99999); x_spin.setValue(100)
+        y_spin = QSpinBox(); y_spin.setRange(0, 99999); y_spin.setValue(100)
+        form.addRow("X:", x_spin); form.addRow("Y:", y_spin)
+        class_edit = QLineEdit(); class_edit.setPlaceholderText("class name (e.g. Helicopter)")
+        form.addRow("Class:", class_edit)
+        actor_edit = QLineEdit(); actor_edit.setPlaceholderText("actor ID (auto if empty)")
+        form.addRow("Actor ID:", actor_edit)
+        tol_spin = QSpinBox(); tol_spin.setRange(1, 60); tol_spin.setValue(15)
+        form.addRow("Color tolerance:", tol_spin)
+        min_area_spin = QSpinBox(); min_area_spin.setRange(1, 99999); min_area_spin.setValue(100)
+        form.addRow("Min area (px):", min_area_spin)
+        layout.addLayout(form)
+
+        # Preview label
+        preview_label = QLabel()
+        layout.addWidget(preview_label)
+
+        def update_preview():
+            x, y = x_spin.value(), y_spin.value()
+            if y < frame.shape[0] and x < frame.shape[1]:
+                from utils.seg_video_labeler import SegmentationVideoLabeler
+                tmp = SegmentationVideoLabeler(self)
+                hsv = tmp.pick_color_from_frame(frame, x, y)
+                preview_label.setText(f"Color at ({x},{y}): HSV={hsv}")
+
+        x_spin.valueChanged.connect(update_preview)
+        y_spin.valueChanged.connect(update_preview)
+        update_preview()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        class_name = class_edit.text().strip()
+        if not class_name:
+            QMessageBox.warning(self, "Seg Video", "Class name is required.")
+            return
+
+        if self.seg_labeler is None:
+            self.seg_labeler = _ViatSegLabeler(self)
+        color_hsv = self.seg_labeler.pick_color_from_frame(frame, x_spin.value(), y_spin.value())
+        self.seg_labeler.add_tracked_object(
+            color_hsv=color_hsv,
+            class_name=class_name,
+            actor_id=actor_edit.text().strip() or None,
+            tolerance=tol_spin.value(),
+            min_area=min_area_spin.value(),
+        )
+        self.statusBar.showMessage(
+            f"Added tracked object '{class_name}' (HSV={color_hsv}). "
+            f"Total tracked: {len(self.seg_labeler.tracked_objects)}", 4000,
+        )
+
+    @log_exceptions
+    def viat_seg_video_track_all(self):
+        """Track all picked objects across the video and add as annotations."""
+        if self.seg_labeler is None or not self.seg_labeler.tracked_objects:
+            QMessageBox.warning(self, "Seg Video", "No tracked objects. Pick a color first.")
+            return
+        if not self.video_filename and not self.cap:
+            QMessageBox.warning(self, "Seg Video", "No video loaded.")
+            return
+        video_path = self.video_filename
+        # Track
+        self.statusBar.showMessage(f"Tracking {len(self.seg_labeler.tracked_objects)} objects...")
+        QApplication.processEvents()
+        result = self.seg_labeler.track_all_objects(
+            video_path,
+            start_frame=0,
+            end_frame=self.total_frames - 1,
+            progress_callback=lambda cur, tot: self.statusBar.showMessage(
+                f"Tracking... {cur}/{tot} frames", 0
+            ),
+        )
+        # Commit to frame_annotations
+        added = self.seg_labeler.commit_to_app(self, BoundingBox)
+        self.refresh_class_ui()
+        self.update_annotation_list()
+        if self.current_frame in self.frame_annotations:
+            self.canvas.annotations = self.frame_annotations[self.current_frame]
+            self.canvas.update()
+        msg = (
+            f"Tracked {len(self.seg_labeler.tracked_objects)} objects across "
+            f"{result['frames_processed']} frames. Added {added} annotations.\n"
+            f"Per object: {result['per_object']}"
+        )
+        QMessageBox.information(self, "Seg Video Tracking Complete", msg)
+        self.statusBar.showMessage(f"Added {added} annotations from seg video", 5000)
+
+    @log_exceptions
+    def viat_seg_video_export_json(self):
+        """Export tracked seg-video objects to VIAT JSON."""
+        if self.seg_labeler is None or not self.seg_labeler.tracked_objects:
+            QMessageBox.warning(self, "Seg Video", "No tracked objects.")
+            return
+        default_name = "seg_annotations.json"
+        if self.video_filename:
+            base = os.path.splitext(os.path.basename(self.video_filename))[0]
+            default_name = base + "_seg.json"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Seg Video JSON", default_name,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+        content = self.seg_labeler.to_viat_json()
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+        self.statusBar.showMessage(f"Exported seg video JSON to {filename}", 5000)
+
+    @log_exceptions
+    def viat_perf_stats(self):
+        """Show frame cache statistics."""
+        if not hasattr(self, "viat_perf"):
+            QMessageBox.information(self, "Performance", "No performance manager.")
+            return
+        stats = self.viat_perf.get_stats()
+        QMessageBox.information(self, "Frame Cache Stats",
+            f"Cache: {stats['cache_size']}/{stats['cache_capacity']} frames\n"
+            f"Hit rate: {stats['hit_rate']}\n"
+            f"Hits: {stats['hits']}, Misses: {stats['misses']}")
+
+    @log_exceptions
+    def viat_clear_cache(self):
+        """Clear the frame cache."""
+        if hasattr(self, "viat_perf"):
+            self.viat_perf.clear_cache()
+            self.statusBar.showMessage("Frame cache cleared", 2000)
+
+    @log_exceptions
+    def viat_auto_import_detections(self):
+        """Auto-import a YOLO detections JSON and move flagged images to review_label/.
+
+        Workflow:
+          1. Run yolo_detect.py separately (produces _viat_detections.json).
+          2. In VIAT: Dataset > Auto-Import Detections... -> select the JSON.
+          3. Images WITH detections are moved to review_label/ and the
+             detections are added as unverified annotations.
+        """
+        if not self._viat_ensure_dataset():
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select Detections JSON", "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        reply = QMessageBox.question(
+            self, "Auto-Import Detections",
+            f"Import detections from:\n  {os.path.basename(filename)}\n\n"
+            f"Images with detections will be:\n"
+            f"  - moved to review_label/\n"
+            f"  - detections added as unverified annotations\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        result = _viat_auto_import_detections(
+            self, filename,
+            move_to_review=True,
+            add_as_annotations=False,
+            bbox_cls=BoundingBox,
+        )
+
+        # Refresh UI
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        self.refresh_class_ui()
+
+        json_info = ""
+        if result.get("json_copied_to"):
+            json_info = f"\n  Detections JSON copied to: review_label/_viat_detections.json"
+        msg = (
+            f"Auto-import complete:\n"
+            f"  Flagged images: {result['flagged_images']}\n"
+            f"  Moved to review_label/: {result['moved_images']}\n"
+            f"  Total detections in JSON: {result['total_detections']}"
+            f"{json_info}\n\n"
+            f"To review: open the review_label/ folder as a dataset, then\n"
+            f"use Dataset > Import VIAT JSON Annotations to load the detections."
+        )
+        QMessageBox.information(self, "Auto-Import Detections", msg)
+        self.statusBar.showMessage(
+            f"Moved {result['moved_images']} images to review_label/", 5000,
+        )
 
     @log_exceptions
     def show_about(self):
@@ -4706,3 +5741,4 @@ class VideoAnnotationTool(QMainWindow):
         box2_area = w2 * h2
         union_area = box1_area + box2_area - inter_area
         return inter_area / union_area if union_area > 0 else 0
+

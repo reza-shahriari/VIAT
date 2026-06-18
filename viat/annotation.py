@@ -93,7 +93,7 @@ class BoundingBox:
     Represents a bounding box annotation with class and attributes.
     """
 
-    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=1.0,):
+    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=1.0, segmentation=None):
         """
         Initialize a bounding box annotation.
 
@@ -104,6 +104,9 @@ class BoundingBox:
             color (QColor, optional): Color for display
             source (str, optional): Source of the annotation (manual, interpolated, tracked, detected)
             score (float, optional): Confidence score for detected annotations
+            segmentation (list, optional): List of (x, y) pixel tuples for polygon
+                segmentation. When present, the canvas can draw the polygon outline
+                (if show_segmentation is enabled) in addition to the bounding box.
         """
         self.rect = rect
         self.class_name = class_name
@@ -113,6 +116,7 @@ class BoundingBox:
         self.original_source = source  # Unchangeable record of how it was first created
         self.verified = source == "manual"  # Auto-verify manual annotations
         self.score = score  # Store confidence score for detections
+        self.segmentation = segmentation  # None or list of (x, y) pixel tuples
 
     def to_dict(self):
         """Convert to a dictionary for serialization"""
@@ -139,7 +143,12 @@ class BoundingBox:
             "source": self.source,
             "original_source": self.original_source,
             "verified": self.verified,
-            "score": self.score
+            "score": self.score,
+            "segmentation": (
+                [(float(x), float(y)) for (x, y) in self.segmentation]
+                if self.segmentation
+                else None
+            ),
         }
 
     @classmethod
@@ -170,8 +179,11 @@ class BoundingBox:
 
         source = data.get("source", "manual")
         score = data.get("score", None)
-        
-        bbox = cls(rect, class_name, attributes, color, source, score)
+        segmentation = data.get("segmentation", None)
+        if segmentation:
+            segmentation = [tuple(p) for p in segmentation]
+
+        bbox = cls(rect, class_name, attributes, color, source, score, segmentation=segmentation)
         bbox.verified = data.get("verified", source == "manual")
         bbox.original_source = data.get("original_source", source)
         return bbox
@@ -197,8 +209,13 @@ class BoundingBox:
         # Create a copy of attributes
         new_attributes = self.attributes.copy() if self.attributes else {}
 
+        # Copy segmentation (list of tuples) if present
+        new_segmentation = None
+        if self.segmentation:
+            new_segmentation = [(x, y) for (x, y) in self.segmentation]
+
         # Return a new BoundingBox with the copied properties
-        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score)
+        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score, segmentation=new_segmentation)
         bbox.verified = self.verified
         bbox.original_source = self.original_source
         return bbox
@@ -860,25 +877,39 @@ class ClassManager:
             # Add class to canvas
             self.main_window.canvas.class_colors[class_name] = color
 
-            # Store attributes configuration
-            if not hasattr(self.main_window, "class_attributes"):
-                self.main_window.class_attributes = {}
-            self.main_window.class_attributes[class_name] = attributes_config
-            if hasattr(self, "annotation_dock"):
-                self.main_window.annotation_dock.update_class_selector()
-            # Update UI
-            self.main_window.toolbar.update_class_selector()
-            self.main_window.class_dock.update_class_list()
-            self.main_window.refresh_class_lists()
+            # Store attributes configuration ON THE CANVAS.
+            # NOTE: This previously wrote to self.main_window.class_attributes,
+            # which is a *different* dict that the canvas, the edit-annotation
+            # dialog, and the convert/delete/import code paths never read. That
+            # was why a newly-added class appeared in the classes panel but was
+            # not actually applied to the main canvas (attribute types/defaults
+            # were lost, edit dialog fell back to inferring types from values,
+            # etc.). canvas.class_attributes is the single source of truth used
+            # everywhere else.
+            if not hasattr(self.main_window.canvas, "class_attributes") or self.main_window.canvas.class_attributes is None:
+                self.main_window.canvas.class_attributes = {}
+            self.main_window.canvas.class_attributes[class_name] = attributes_config
+
+            # Keep the legacy alias in sync so any stray reader still sees the data.
+            self.main_window.class_attributes = self.main_window.canvas.class_attributes
+
+            # Update ALL UI surfaces IMMEDIATELY (refresh_class_ui is synchronous;
+            # refresh_class_lists is debounced 100ms, which made the panel feel detached).
+            self.main_window.refresh_class_ui()
 
             # Set as current class
             self.main_window.canvas.set_current_class(class_name)
 
             # Update the class selector in the toolbar directly
-            if hasattr(self, "class_selector"):
+            if hasattr(self.main_window, "class_selector"):
                 self.main_window.class_selector.blockSignals(True)
                 self.main_window.class_selector.setCurrentText(class_name)
                 self.main_window.class_selector.blockSignals(False)
+
+            self.main_window.project_modified = True
+            self.main_window.statusBar.showMessage(
+                f"Added class '{class_name}'", 3000
+            )
 
     def create_class_dialog(self, class_name=None, color=None, attributes=None):
         """Create a dialog for adding or editing classes with custom attributes."""
@@ -1624,3 +1655,5 @@ class ClassManager:
         self.main_window.statusBar.showMessage(
             f"Imported {added} classes from YOLO YAML", 5000
         )
+
+

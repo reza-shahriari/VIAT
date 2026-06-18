@@ -1,1710 +1,980 @@
 """
-Dataset management utilities for handling various image dataset structures.
+Dataset detection, scanning & loading for VIAT.
 
-This module provides functions to import and export datasets with different
-organizational structures including train/test/validation splits, parallel
-image/label folders, and multiple annotation files.
+Designed for Roboflow YOLO exports but handles every common layout:
+
+  Layout A -- single folder, images + labels mixed:
+      dataset/
+        img1.jpg
+        img1.txt
+        img2.jpg
+        img2.txt
+        data.yaml
+
+  Layout B -- images/ + labels/ subfolders:
+      dataset/
+        images/
+          img1.jpg
+        labels/
+          img1.txt
+        data.yaml
+
+  Layout C -- train/valid/test splits, each split is Layout A or B:
+      dataset/
+        data.yaml
+        train/
+          images/  labels/
+        valid/
+          images/  labels/
+        test/
+          images/  labels/
+
+Class-name resolution (priority order, with conflict warnings):
+  1. data.yaml (Roboflow / Ultralytics) -- ``names`` list or dict
+  2. classes.txt / obj.names / labels.txt
+  3. Inferred from label class indices (numeric fallback, ``class_0``...)
+
+Label formats are pluggable -- see utils/label_formats/__init__.py.
+YOLO is the default and is tried first.
 """
 
 import os
-import json
-import shutil
-import cv2
-import numpy as np
-from pathlib import Path
-from PyQt5.QtWidgets import (
-    QMessageBox,
-    QHBoxLayout,
-    QDialog,
-    QVBoxLayout,
-    QLabel,
-    QListWidget,
-    QDialogButtonBox,
-    QCheckBox,
-    QGroupBox,
-    QFormLayout,
-    QLineEdit,
-    QComboBox,
-    QPushButton,
-    QFileDialog,
-    QProgressBar,
-    QApplication,
-    QListWidgetItem,
-    QRadioButton,
-)
-from PyQt5.QtGui import QColor
-from PyQt5.QtCore import Qt,QRect
-import random
-import xml.dom.minidom as minidom
-import xml.etree.ElementTree as ET
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
-def detect_folder_type(folder_path):
+try:
+    import yaml  # PyYAML -- optional but very common
+except ImportError:  # pragma: no cover
+    yaml = None
+
+from .label_formats import PRIORITY, get_format, all_formats, LabelParseError
+
+# --------------------------------------------------------------------------- #
+# Constants
+# --------------------------------------------------------------------------- #
+
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
+
+SPLIT_NAMES = ("train", "valid", "val", "test", "validation")
+# Aliases normalized to canonical split names
+SPLIT_ALIASES = {"val": "valid", "validation": "valid"}
+
+CLASS_FILE_NAMES = ("classes.txt", "obj.names", "labels.txt")
+
+
+# --------------------------------------------------------------------------- #
+# Data classes
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SplitInfo:
+    name: str  # canonical: train / valid / test (or "root" for no splits)
+    path: str
+    image_dir: str
+    label_dirs: List[str]
+    images: List[str] = field(default_factory=list)  # absolute paths
+    label_format: Optional[str] = None  # detected format name
+
+    def __repr__(self):
+        return (
+            f"SplitInfo(name={self.name!r}, images={len(self.images)}, "
+            f"format={self.label_format})"
+        )
+
+
+@dataclass
+class DatasetInfo:
+    root: str
+    layout: str  # "single_mixed" | "images_labels" | "splits_single" | "splits_sep" | "simple"
+    splits: List[SplitInfo] = field(default_factory=list)
+    classes: List[str] = field(default_factory=list)
+    classes_source: Optional[str] = None  # "data.yaml" | "classes.txt" | "inferred"
+    classes_conflict: Optional[str] = None  # warning text if sources disagree
+    label_format: Optional[str] = None  # global default format
+
+    @property
+    def all_images(self) -> List[str]:
+        out = []
+        for s in self.splits:
+            out.extend(s.images)
+        return out
+
+    @property
+    def image_count(self) -> int:
+        return sum(len(s.images) for s in self.splits)
+
+
+# --------------------------------------------------------------------------- #
+# Public API expected by main.py
+# --------------------------------------------------------------------------- #
+
+
+def detect_folder_type(folder_path: str) -> str:
+    """Quick classifier used by main.py to decide simple-folder vs dataset.
+
+    Returns "dataset" if the folder looks like a labeled dataset (has labels/,
+    a data.yaml, classes.txt, or train/valid/test subfolders), else "simple".
     """
-    Detect if a folder is a simple image folder or a structured dataset.
-    
-    Args:
-        folder_path (str): Path to the folder
-        
-    Returns:
-        str: "simple_folder" or "dataset"
-    """
-    # Check for common dataset indicators
-    dataset_indicators = [
-        os.path.isdir(os.path.join(folder_path, "train")),
-        os.path.isdir(os.path.join(folder_path, "test")),
-        os.path.isdir(os.path.join(folder_path, "val")),
-        os.path.isdir(os.path.join(folder_path, "validation")),
-        os.path.isdir(os.path.join(folder_path, "images")) and os.path.isdir(os.path.join(folder_path, "labels")),
-        os.path.isdir(os.path.join(folder_path, "images")) and os.path.isdir(os.path.join(folder_path, "annotations")),
-        os.path.exists(os.path.join(folder_path, "classes.txt")),
-    ]
-    
-    # Check for annotation files
-    annotation_files = []
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if file.endswith(('.json', '.xml')):
-                if "coco" in file.lower() or "annotations" in file.lower() or "instances" in file.lower():
-                    annotation_files.append(os.path.join(root, file))
-    
-    # If any dataset indicators are true or we found annotation files, it's likely a dataset
-    if any(dataset_indicators) or annotation_files:
+    if not os.path.isdir(folder_path):
+        return "simple"
+    try:
+        entries = set(os.listdir(folder_path))
+    except OSError:
+        return "simple"
+
+    # Roboflow / Ultralytics markers
+    if "data.yaml" in entries or "data.yml" in entries:
         return "dataset"
-    else:
-        return "simple_folder"
-    
-def detect_dataset_structure(folder_path):
-    """
-    Analyze a folder to detect common dataset structures.
+    # images/labels split
+    if "images" in entries and "labels" in entries:
+        return "dataset"
+    # splits
+    lower = {e.lower() for e in entries}
+    if any(s in lower for s in ("train", "valid", "val", "test")):
+        # but only treat as dataset if at least one split has images or
+        # an images/labels structure
+        for s in ("train", "valid", "val", "test"):
+            sp = os.path.join(folder_path, s)
+            if os.path.isdir(sp):
+                try:
+                    sub = set(os.listdir(sp))
+                except OSError:
+                    continue
+                if sub & {"images", "labels"} or any(
+                    f.lower().endswith(IMAGE_EXTENSIONS) for f in sub
+                ):
+                    return "dataset"
+    # classes.txt / obj.names next to images
+    if any(c in entries for c in CLASS_FILE_NAMES):
+        return "dataset"
+    # COCO-style shared annotation file
+    if any(
+        f.lower().endswith((".coco.json",)) or f.lower() in ("annotations.json", "_annotations.coco.json")
+        for f in entries
+    ):
+        return "dataset"
+    # any .xml (pascal voc) alongside images
+    if any(f.lower().endswith(".xml") for f in entries):
+        return "dataset"
+    return "simple"
+
+
+def scan_dataset(folder_path: str) -> DatasetInfo:
+    """Fully scan a dataset folder and return a :class:`DatasetInfo`."""
+    info = DatasetInfo(root=folder_path, layout="simple", splits=[])
+
+    # 1. Class names (resolve early so we can warn about conflicts)
+    _resolve_classes(info)
+
+    # 2. Detect layout & splits
+    _detect_layout_and_splits(info)
+
+    # 3. For each split, collect images + detect label format
+    for split in info.splits:
+        split.images = _list_images(split.image_dir)
+        split.label_format, _ = _detect_label_format_for_split(split, info)
+
+    # 4. Global default format (from splits, majority vote)
+    fmt_votes: Dict[str, int] = {}
+    for s in info.splits:
+        if s.label_format:
+            fmt_votes[s.label_format] = fmt_votes.get(s.label_format, 0) + len(s.images)
+    if fmt_votes:
+        info.label_format = max(fmt_votes, key=fmt_votes.get)
+
+    return info
+
+
+def load_dataset_into_app(
+    app,
+    info: DatasetInfo,
+    bbox_cls,
+    *,
+    splits_to_load: Optional[List[str]] = None,
+):
+    """Load *info* into the VIAT main window.
 
     Args:
-        folder_path (str): Path to the dataset folder
+        app: the VideoAnnotationTool main window.
+        info: scanned dataset.
+        bbox_cls: the BoundingBox class (used to build annotation objects).
+        splits_to_load: which splits to load (names). None = all (show all by
+            default, per user requirement). "root" loads the no-split case.
 
     Returns:
-        dict: Information about the detected dataset structure
+        dict with keys: image_files (list[str]), frame_to_split (list[str]),
+        per_split_counts (dict), classes (list[str]), warnings (list[str]).
     """
-    structure_info = {
-        "type": "unknown",
-        "has_splits": False,
-        "splits": [],
-        "annotation_files": [],
-        "image_folders": [],
-        "label_folders": [],
-        "total_images": 0,
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+    import random
+    import cv2
+
+    warnings = []
+    image_files: List[str] = []
+    frame_to_split: List[str] = []
+    per_split: Dict[str, int] = {}
+
+    # Build class colors on the canvas (preserve existing ones)
+    existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    for cls in info.classes:
+        if cls not in existing_colors:
+            existing_colors[cls] = QColor(
+                random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+            )
+    app.canvas.class_colors = existing_colors
+    # class_attributes defaults
+    if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
+        app.canvas.class_attributes = {}
+    for cls in info.classes:
+        if cls not in app.canvas.class_attributes:
+            app.canvas.class_attributes[cls] = {
+                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
+            }
+    app.class_attributes = app.canvas.class_attributes  # legacy alias
+
+    # Reset frame annotations (caller usually already did, but be safe)
+    app.frame_annotations = {}
+
+    target_splits = {s.name for s in info.splits}
+    if splits_to_load is not None:
+        target_splits = set(splits_to_load)
+
+    for split in info.splits:
+        if split.name not in target_splits:
+            continue
+        fmt = get_format(split.label_format or info.label_format or "yolo")
+        if fmt is None:
+            warnings.append(f"Split {split.name}: unknown format, skipped.")
+            continue
+
+        for img_path in split.images:
+            frame_idx = len(image_files)
+            image_files.append(img_path)
+            frame_to_split.append(split.name)
+            per_split[split.name] = per_split.get(split.name, 0) + 1
+
+            # Get image size (needed by YOLO de-normalization)
+            img_size = _image_size(img_path)
+            if img_size is None:
+                warnings.append(f"Could not read size: {os.path.basename(img_path)}")
+                continue
+
+            try:
+                label_path = fmt.find_label_file(img_path, split.label_dirs)
+            except Exception as e:
+                warnings.append(f"{os.path.basename(img_path)}: {e}")
+                label_path = None
+
+            if not label_path:
+                continue
+
+            try:
+                boxes = fmt.load(label_path, img_size, info.classes)
+            except LabelParseError as e:
+                warnings.append(str(e))
+                continue
+
+            if not boxes:
+                continue
+
+            anns = []
+            for b in boxes:
+                rect = QRect(b["x"], b["y"], max(1, b["w"]), max(1, b["h"]))
+                color = app.canvas.class_colors.get(b["class_name"], QColor(255, 0, 0))
+                ann = bbox_cls(
+                    rect=rect,
+                    class_name=b["class_name"],
+                    attributes=b.get("attributes", {}),
+                    color=color,
+                    source=b.get("source", "manual"),
+                    score=b.get("score", 1.0),
+                    segmentation=b.get("segmentation"),
+                )
+                # Set verified flag (for viat_json, accepted=True -> verified)
+                if "verified" in b:
+                    ann.verified = bool(b["verified"])
+                anns.append(ann)
+            app.frame_annotations[frame_idx] = anns
+
+    return {
+        "image_files": image_files,
+        "frame_to_split": frame_to_split,
+        "per_split_counts": per_split,
+        "classes": info.classes,
+        "warnings": warnings,
     }
 
-    # Check for common split folders
-    common_splits = ["train", "test", "val", "validation"]
-    detected_splits = []
 
-    for split in common_splits:
-        split_path = os.path.join(folder_path, split)
-        if os.path.isdir(split_path):
-            detected_splits.append(split)
+def load_viat_json_for_video(app, json_path, bbox_cls, *, frame_offset=0):
+    """Load a VIAT custom JSON annotation file into a VIDEO project.
 
-    # Check for parallel image/label structure
-    images_folder = os.path.join(folder_path, "images")
-    labels_folder = os.path.join(folder_path, "labels")
-    annotations_folder = os.path.join(folder_path, "annotations")
+    Unlike load_dataset_into_app (which is for image datasets), this loads
+    annotations for an already-open video, keyed by frame number.
 
-    has_parallel_structure = os.path.isdir(images_folder) and (
-        os.path.isdir(labels_folder) or os.path.isdir(annotations_folder)
-    )
+    Args:
+        app: the VideoAnnotationTool main window (must have a video loaded).
+        json_path: path to the VIAT JSON file.
+        bbox_cls: the BoundingBox class.
+        frame_offset: if the JSON frame keys don't start at 0 (e.g. the video
+            was trimmed), add this offset to each frame key.
 
-    # Check for annotation files
-    annotation_files = []
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if file.endswith((".json", ".xml")):
-                if "coco" in file.lower() or "annotations" in file.lower():
-                    annotation_files.append(os.path.join(root, file))
+    Returns:
+        dict: {frames_loaded, actors_loaded, classes_found, warnings}
+    """
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+    from .label_formats.viat_json import ViatJsonLabelFormat
+    import random
 
-    # Determine structure type
-    if detected_splits:
-        structure_info["type"] = "split_folders"
-        structure_info["has_splits"] = True
-        structure_info["splits"] = detected_splits
+    warnings = []
+    fmt = ViatJsonLabelFormat()
+    fmt._parse(json_path)
+    all_frames = fmt.load_all_frames()
 
-        # Check for images and labels within each split
-        for split in detected_splits:
-            split_path = os.path.join(folder_path, split)
-            split_images = os.path.join(split_path, "images")
-            split_labels = os.path.join(split_path, "labels")
+    if not all_frames:
+        return {"frames_loaded": 0, "actors_loaded": 0, "classes_found": [], "warnings": ["No frames found in JSON"]}
 
-            if os.path.isdir(split_images):
-                structure_info["image_folders"].append(split_images)
-            else:
-                # The split folder itself might contain images
-                structure_info["image_folders"].append(split_path)
+    # Collect all classes and actors
+    classes_found = set()
+    actor_ids = set()
+    total_actors = 0
 
-            if os.path.isdir(split_labels):
-                structure_info["label_folders"].append(split_labels)
+    # Ensure class_colors has all classes
+    existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
+        app.canvas.class_attributes = {}
 
-    elif has_parallel_structure:
-        structure_info["type"] = "parallel_folders"
-        structure_info["image_folders"].append(images_folder)
+    for frame_num, boxes in all_frames.items():
+        for b in boxes:
+            classes_found.add(b["class_name"])
+            if b.get("actor_id"):
+                actor_ids.add(b["actor_id"])
+            total_actors += 1
 
-        if os.path.isdir(labels_folder):
-            structure_info["label_folders"].append(labels_folder)
-        if os.path.isdir(annotations_folder):
-            structure_info["label_folders"].append(annotations_folder)
+    for cls in classes_found:
+        if cls not in existing_colors:
+            existing_colors[cls] = QColor(
+                random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+            )
+        if cls not in app.canvas.class_attributes:
+            app.canvas.class_attributes[cls] = {
+                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
+            }
+    app.canvas.class_colors = existing_colors
+    app.class_attributes = app.canvas.class_attributes
 
+    # Load into frame_annotations
+    frames_loaded = 0
+    for frame_num, boxes in all_frames.items():
+        actual_frame = frame_num + frame_offset
+        if actual_frame < 0 or actual_frame >= getattr(app, "total_frames", 10**9):
+            continue
+
+        anns = []
+        for b in boxes:
+            rect = QRect(b["x"], b["y"], max(1, b["w"]), max(1, b["h"]))
+            color = app.canvas.class_colors.get(b["class_name"], QColor(255, 0, 0))
+            ann = bbox_cls(
+                rect=rect,
+                class_name=b["class_name"],
+                attributes=b.get("attributes", {}),
+                color=color,
+                source=b.get("source", "manual"),
+                score=b.get("score", 1.0),
+                segmentation=b.get("segmentation"),
+            )
+            if "verified" in b:
+                ann.verified = bool(b["verified"])
+            anns.append(ann)
+        app.frame_annotations[actual_frame] = anns
+        frames_loaded += 1
+
+    return {
+        "frames_loaded": frames_loaded,
+        "actors_loaded": total_actors,
+        "classes_found": sorted(classes_found),
+        "actor_ids": sorted(actor_ids),
+        "warnings": warnings,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Class-name resolution
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_classes(info: DatasetInfo) -> None:
+    yaml_classes = _parse_data_yaml_classes(info.root)
+    txt_classes = _parse_classes_txt(info.root)
+
+    # If splits exist, also look inside them for class files
+    if not txt_classes:
+        for s in SPLIT_NAMES:
+            sp = os.path.join(info.root, s)
+            if os.path.isdir(sp):
+                txt_classes = _parse_classes_txt(sp)
+                if txt_classes:
+                    break
+
+    if yaml_classes and txt_classes:
+        if list(yaml_classes) == list(txt_classes):
+            info.classes = list(yaml_classes)
+            info.classes_source = "data.yaml + classes.txt (agree)"
+        else:
+            info.classes = list(yaml_classes)  # yaml wins
+            info.classes_source = "data.yaml"
+            info.classes_conflict = (
+                f"data.yaml names {yaml_classes!r} differ from "
+                f"classes.txt {txt_classes!r}. Using data.yaml. "
+                f"Delete one source if this is wrong."
+            )
+    elif yaml_classes:
+        info.classes = list(yaml_classes)
+        info.classes_source = "data.yaml"
+    elif txt_classes:
+        info.classes = list(txt_classes)
+        info.classes_source = "classes.txt"
     else:
-        structure_info["type"] = "flat_folder"
-        structure_info["image_folders"].append(folder_path)
+        info.classes = []
+        info.classes_source = None  # will be inferred later
 
-    # Add annotation files
-    structure_info["annotation_files"] = annotation_files
 
-    # Count total images
-    image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
-    total_images = 0
-
-    for img_folder in structure_info["image_folders"]:
-        for root, _, files in os.walk(img_folder):
-            for file in files:
-                if any(file.lower().endswith(ext) for ext in image_extensions):
-                    total_images += 1
-
-    structure_info["total_images"] = total_images
-
-    return structure_info
-
-def import_dataset_dialog(parent, folder_path):
-    """Show dialog for importing a dataset with advanced options."""
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Import Dataset")
-    dialog.setMinimumWidth(500)
-    
-    layout = QVBoxLayout(dialog)
-    
-    # Dataset type selection
-    type_group = QGroupBox("Dataset Type")
-    type_layout = QVBoxLayout(type_group)
-    
-    coco_radio = QRadioButton("COCO JSON")
-    yolo_radio = QRadioButton("YOLO")
-    pascal_radio = QRadioButton("Pascal VOC")
-    
-    coco_radio.setChecked(True)  # Default to COCO
-    
-    type_layout.addWidget(coco_radio)
-    type_layout.addWidget(yolo_radio)
-    type_layout.addWidget(pascal_radio)
-    
-    # Class mapping section
-    class_group = QGroupBox("Class Mapping")
-    class_layout = QVBoxLayout(class_group)
-    
-    class_list = QListWidget()
-    class_list.setSelectionMode(QListWidget.ExtendedSelection)
-    
-    # Add class mapping controls
-    class_map_layout = QHBoxLayout()
-    class_map_label = QLabel("Map selected to:")
-    class_map_input = QLineEdit()
-    class_map_btn = QPushButton("Map")
-    
-    class_map_layout.addWidget(class_map_label)
-    class_map_layout.addWidget(class_map_input)
-    class_map_layout.addWidget(class_map_btn)
-    
-    # Class selection controls
-    class_select_layout = QHBoxLayout()
-    select_all_btn = QPushButton("Select All")
-    deselect_all_btn = QPushButton("Deselect All")
-    invert_selection_btn = QPushButton("Invert Selection")
-    
-    class_select_layout.addWidget(select_all_btn)
-    class_select_layout.addWidget(deselect_all_btn)
-    class_select_layout.addWidget(invert_selection_btn)
-    
-    class_layout.addWidget(class_list)
-    class_layout.addLayout(class_map_layout)
-    class_layout.addLayout(class_select_layout)
-    
-    # Options section
-    options_group = QGroupBox("Import Options")
-    options_layout = QVBoxLayout(options_group)
-    
-    skip_empty_check = QCheckBox("Skip images without annotations")
-    skip_empty_check.setChecked(True)
-    
-    options_layout.addWidget(skip_empty_check)
-    
-    # Buttons
-    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    
-    # Add all sections to main layout
-    layout.addWidget(type_group)
-    layout.addWidget(class_group)
-    layout.addWidget(options_group)
-    layout.addWidget(buttons)
-    
-    # Connect signals
-    def detect_and_load_classes():
-        class_list.clear()
-        
-        # Detect dataset type and load classes
-        if coco_radio.isChecked():
-            # Find COCO JSON files
-            json_files = [f for f in os.listdir(folder_path) 
-                         if f.endswith('.json') and os.path.isfile(os.path.join(folder_path, f))]
-            
-            if json_files:
-                # Try to load the first JSON file that looks like COCO
-                for json_file in json_files:
-                    try:
-                        with open(os.path.join(folder_path, json_file), 'r') as f:
-                            data = json.load(f)
-                            if 'categories' in data:
-                                # Found COCO file, load classes
-                                for category in data['categories']:
-                                    item = QListWidgetItem(category['name'])
-                                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                                    item.setCheckState(Qt.Checked)
-                                    item.setData(Qt.UserRole, category['id'])
-                                    class_list.addItem(item)
-                                break
-                    except:
-                        continue
-        
-        elif yolo_radio.isChecked():
-            # Look for classes.txt or obj.names
-            class_files = ['classes.txt', 'obj.names']
-            for class_file in class_files:
-                class_path = os.path.join(folder_path, class_file)
-                if os.path.exists(class_path):
-                    try:
-                        with open(class_path, 'r') as f:
-                            for i, line in enumerate(f):
-                                class_name = line.strip()
-                                if class_name:
-                                    item = QListWidgetItem(class_name)
-                                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                                    item.setCheckState(Qt.Checked)
-                                    item.setData(Qt.UserRole, i)
-                                    class_list.addItem(item)
-                        break
-                    except:
-                        continue
-        
-        elif pascal_radio.isChecked():
-            # Look for a sample XML file to extract classes
-            xml_files = [f for f in os.listdir(folder_path) 
-                        if f.endswith('.xml') and os.path.isfile(os.path.join(folder_path, f))]
-            
-            classes = set()
-            for xml_file in xml_files[:10]:  # Check first 10 files
-                try:
-                    tree = ET.parse(os.path.join(folder_path, xml_file))
-                    root = tree.getroot()
-                    for obj in root.findall('.//object'):
-                        class_name = obj.find('name').text
-                        classes.add(class_name)
-                except:
-                    continue
-            
-            for i, class_name in enumerate(sorted(classes)):
-                item = QListWidgetItem(class_name)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked)
-                item.setData(Qt.UserRole, i)
-                class_list.addItem(item)
-    
-    # Connect radio buttons to class detection
-    coco_radio.toggled.connect(detect_and_load_classes)
-    yolo_radio.toggled.connect(detect_and_load_classes)
-    pascal_radio.toggled.connect(detect_and_load_classes)
-    
-    # Connect class selection buttons
-    select_all_btn.clicked.connect(lambda: [class_list.item(i).setCheckState(Qt.Checked) 
-                                           for i in range(class_list.count())])
-    deselect_all_btn.clicked.connect(lambda: [class_list.item(i).setCheckState(Qt.Unchecked) 
-                                             for i in range(class_list.count())])
-    invert_selection_btn.clicked.connect(lambda: [class_list.item(i).setCheckState(
-                                                 Qt.Unchecked if class_list.item(i).checkState() == Qt.Checked 
-                                                 else Qt.Checked) 
-                                                 for i in range(class_list.count())])
-    
-    # Class mapping functionality
-    def map_selected_classes():
-        new_class = class_map_input.text().strip()
-        if not new_class:
-            return
-            
-        for item in class_list.selectedItems():
-            item.setText(f"{item.text()} → {new_class}")
-            item.setData(Qt.UserRole + 1, new_class)  # Store mapping
-    
-    class_map_btn.clicked.connect(map_selected_classes)
-    
-    # Initial class detection
-    detect_and_load_classes()
-    
-    # Show dialog
-    if dialog.exec_() == QDialog.Accepted:
-        # Create configuration
-        config = {
-            "dataset_type": "coco" if coco_radio.isChecked() else 
-                           "yolo" if yolo_radio.isChecked() else "pascal_voc",
-            "folder_path": folder_path,
-            "skip_empty": skip_empty_check.isChecked(),
-            "classes": {}
-        }
-        
-        # Get selected classes and mappings
-        for i in range(class_list.count()):
-            item = class_list.item(i)
-            if item.checkState() == Qt.Checked:
-                original_class = item.text().split(' → ')[0]
-                mapped_class = item.data(Qt.UserRole + 1) or original_class
-                class_id = item.data(Qt.UserRole)
-                config["classes"][class_id] = {
-                    "original": original_class,
-                    "mapped": mapped_class,
-                    "enabled": True
-                }
-            else:
-                class_id = item.data(Qt.UserRole)
-                original_class = item.text().split(' → ')[0]
-                config["classes"][class_id] = {
-                    "original": original_class,
-                    "mapped": original_class,
-                    "enabled": False
-                }
-        
-        return config
-    
+def _parse_data_yaml_classes(root: str) -> Optional[List[str]]:
+    if yaml is None:
+        # Minimal fallback parser (handles the common ``names: [a, b, c]``
+        # and ``names:\n  0: a`` forms) so VIAT works without PyYAML.
+        return _parse_data_yaml_fallback(root)
+    for name in ("data.yaml", "data.yml"):
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+            except Exception:
+                continue
+            if isinstance(data, dict) and "names" in data:
+                names = data["names"]
+                if isinstance(names, list):
+                    return [str(n) for n in names]
+                if isinstance(names, dict):
+                    return [str(names[k]) for k in sorted(names.keys(), key=_sort_key)]
     return None
 
-def load_dataset(parent, config, frame_annotations, class_colors, BoundingBox):
-    """Load a dataset based on configuration."""
-    dataset_type = config.get("dataset_type", "coco")
-    folder_path = config.get("folder_path", "")
-    skip_empty = config.get("skip_empty", True)
-    classes_config = config.get("classes", {})
-    
-    image_files = []
-    
-    # Create progress dialog
-    progress = QDialog(parent)
-    progress.setWindowTitle("Loading Dataset")
-    progress.setFixedSize(400, 100)
-    progress_layout = QVBoxLayout(progress)
-    
-    status_label = QLabel("Loading dataset...")
-    progress_layout.addWidget(status_label)
-    
-    progress_bar = QProgressBar()
-    progress_bar.setRange(0, 100)
-    progress_layout.addWidget(progress_bar)
-    
-    # Non-blocking progress dialog
-    progress.setModal(False)
-    progress.show()
-    QApplication.processEvents()
-    
-    try:
-        if dataset_type == "coco":
-            # Find COCO JSON file
-            json_files = [f for f in os.listdir(folder_path) 
-                         if f.endswith('.json') and os.path.isfile(os.path.join(folder_path, f))]
-            
-            if not json_files:
-                progress.close()
-                return [], "No COCO JSON file found in the selected folder."
-            
-            # Try to load the first JSON file that looks like COCO
-            coco_file = None
-            for json_file in json_files:
-                try:
-                    with open(os.path.join(folder_path, json_file), 'r') as f:
-                        data = json.load(f)
-                        if 'images' in data and 'annotations' in data and 'categories' in data:
-                            coco_file = json_file
-                            break
-                except:
-                    continue
-            
-            if not coco_file:
-                progress.close()
-                return [], "No valid COCO JSON file found in the selected folder."
-            
-            # Load COCO dataset
-            status_label.setText(f"Loading COCO dataset from {coco_file}...")
-            QApplication.processEvents()
-            
-            with open(os.path.join(folder_path, coco_file), 'r') as f:
-                data = json.load(f)
-            
-            # Create mapping from category ID to class name
-            category_mapping = {}
-            for category in data['categories']:
-                cat_id = category['id']
-                if cat_id in classes_config and classes_config[cat_id]['enabled']:
-                    # Use mapped class name if available
-                    category_mapping[cat_id] = classes_config[cat_id]['mapped']
-                    
-                    # Ensure the class color exists
-                    if category_mapping[cat_id] not in class_colors:
-                        class_colors[category_mapping[cat_id]] = QColor(
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                            random.randint(0, 255)
-                        )
-            
-            # Create mapping from image ID to filename
-            image_mapping = {}
-            for image in data['images']:
-                image_mapping[image['id']] = {
-                    'file_name': image['file_name'],
-                    'width': image.get('width', 0),
-                    'height': image.get('height', 0)
-                }
-            
-            # Group annotations by image ID
-            annotations_by_image = {}
-            for annotation in data['annotations']:
-                image_id = annotation['image_id']
-                category_id = annotation['category_id']
-                
-                # Skip if category is not enabled
-                if category_id not in category_mapping:
-                    continue
-                    
-                if image_id not in annotations_by_image:
-                    annotations_by_image[image_id] = []
-                
-                # Convert COCO bbox [x,y,width,height] to QRect
-                bbox = annotation['bbox']
-                rect = QRect(int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
-                
-                # Get class name from mapping
-                class_name = category_mapping[category_id]
-                
-                # Create BoundingBox object
-                bbox_obj = BoundingBox(
-                    rect=rect,
-                    class_name=class_name,
-                    attributes={"Size": -1, "Quality": -1},  # Default attributes
-                    color=class_colors[class_name]
-                )
-                
-                annotations_by_image[image_id].append(bbox_obj)
-            
-            # Find all image files
-            all_images = []
-            for image_id, image_info in image_mapping.items():
-                file_name = image_info['file_name']
-                file_path = os.path.join(folder_path, file_name)
-                
-                # Check if file exists
-                if os.path.exists(file_path):
-                    has_annotations = image_id in annotations_by_image
-                    
-                    # Skip images without annotations if requested
-                    if skip_empty and not has_annotations:
-                        continue
-                    
-                    all_images.append((file_path, image_id))
-            
-            # Sort images by filename
-            all_images.sort(key=lambda x: x[0])
-            
-            # Update progress bar
-            progress_bar.setRange(0, len(all_images))
-            
-            # Load images and annotations
-            for i, (file_path, image_id) in enumerate(all_images):
-                # Update progress
-                progress_bar.setValue(i)
-                status_label.setText(f"Loading image {i+1}/{len(all_images)}: {os.path.basename(file_path)}")
-                                # Update progress
-                progress_bar.setValue(i)
-                status_label.setText(f"Loading image {i+1}/{len(all_images)}: {os.path.basename(file_path)}")
-                QApplication.processEvents()
-                
-                # Add to image files list
-                image_files.append(file_path)
-                
-                # Add annotations to frame_annotations dictionary
-                if image_id in annotations_by_image:
-                    frame_annotations[i] = annotations_by_image[image_id]
-            
-            # Close progress dialog
-            progress.close()
-            
-            return image_files, f"Loaded {len(image_files)} images with {sum(len(anns) for anns in frame_annotations.values())} annotations from COCO dataset"
-            
-        elif dataset_type == "yolo":
-            # Look for classes.txt or obj.names
-            class_files = ['classes.txt', 'obj.names']
-            class_file = None
-            class_list = []
-            
-            for cf in class_files:
-                class_path = os.path.join(folder_path, cf)
-                if os.path.exists(class_path):
-                    class_file = class_path
-                    with open(class_path, 'r') as f:
-                        class_list = [line.strip() for line in f if line.strip()]
+
+def _sort_key(x):
+    return int(x) if str(x).isdigit() else str(x)
+
+
+def _parse_data_yaml_fallback(root: str) -> Optional[List[str]]:
+    for name in ("data.yaml", "data.yml"):
+        p = os.path.join(root, name)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        in_names = False
+        names: List[str] = []
+        for line in lines:
+            s = line.rstrip()
+            if not s.strip() or s.strip().startswith("#"):
+                if in_names and names:
                     break
-            
-            if not class_file or not class_list:
-                progress.close()
-                return [], "No YOLO class file found in the selected folder."
-            
-            # Create class mapping
-            class_mapping = {}
-            for i, class_name in enumerate(class_list):
-                if i in classes_config and classes_config[i]['enabled']:
-                    # Use mapped class name if available
-                    class_mapping[i] = classes_config[i]['mapped']
-                    
-                    # Ensure the class color exists
-                    if class_mapping[i] not in class_colors:
-                        class_colors[class_mapping[i]] = QColor(
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                            random.randint(0, 255)
-                        )
-            
-            # Find all image files
-            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
-            all_images = []
-            
-            for file in os.listdir(folder_path):
-                if any(file.lower().endswith(ext) for ext in image_extensions):
-                    image_path = os.path.join(folder_path, file)
-                    txt_path = os.path.join(folder_path, os.path.splitext(file)[0] + '.txt')
-                    
-                    has_annotations = os.path.exists(txt_path)
-                    
-                    # Skip images without annotations if requested
-                    if skip_empty and not has_annotations:
-                        continue
-                    
-                    all_images.append((image_path, txt_path))
-            
-            # Sort images by filename
-            all_images.sort(key=lambda x: x[0])
-            
-            # Update progress bar
-            progress_bar.setRange(0, len(all_images))
-            
-            # Load images and annotations
-            for i, (image_path, txt_path) in enumerate(all_images):
-                # Update progress
-                progress_bar.setValue(i)
-                status_label.setText(f"Loading image {i+1}/{len(all_images)}: {os.path.basename(image_path)}")
-                QApplication.processEvents()
-                
-                # Add to image files list
-                image_files.append(image_path)
-                
-                # Load annotations if available
-                if os.path.exists(txt_path):
-                    # Get image dimensions
-                    img = cv2.imread(image_path)
-                    if img is None:
-                        continue
-                    
-                    img_height, img_width = img.shape[:2]
-                    
-                    annotations = []
-                    with open(txt_path, 'r') as f:
-                        for line in f:
-                            parts = line.strip().split()
-                            if len(parts) >= 5:
-                                try:
-                                    class_id = int(parts[0])
-                                    
-                                    # Skip if class is not enabled
-                                    if class_id not in class_mapping:
-                                        continue
-                                    
-                                    # YOLO format: class_id x_center y_center width height (normalized)
-                                    x_center = float(parts[1]) * img_width
-                                    y_center = float(parts[2]) * img_height
-                                    width = float(parts[3]) * img_width
-                                    height = float(parts[4]) * img_height
-                                    
-                                    # Convert to top-left coordinates
-                                    x = int(x_center - width / 2)
-                                    y = int(y_center - height / 2)
-                                    
-                                    rect = QRect(x, y, int(width), int(height))
-                                    
-                                    # Get class name from mapping
-                                    class_name = class_mapping[class_id]
-                                    
-                                    # Parse additional attributes if present
-                                    attributes = {"Size": -1, "Quality": -1}
-                                    if len(parts) > 5 and '#' in line:
-                                        attr_part = line.split('#', 1)[1].strip()
-                                        for attr in attr_part.split(','):
-                                            if ':' in attr:
-                                                attr_name, attr_value = attr.split(':', 1)
-                                                try:
-                                                    attributes[attr_name.strip()] = int(attr_value.strip())
-                                                except ValueError:
-                                                    attributes[attr_name.strip()] = attr_value.strip()
-                                    
-                                    # Create BoundingBox object
-                                    bbox_obj = BoundingBox(
-                                        rect=rect,
-                                        class_name=class_name,
-                                        attributes=attributes,
-                                        color=class_colors[class_name]
-                                    )
-                                    
-                                    annotations.append(bbox_obj)
-                                except (ValueError, IndexError):
-                                    continue
-                    
-                    if annotations:
-                        frame_annotations[i] = annotations
-            
-            # Close progress dialog
-            progress.close()
-            
-            return image_files, f"Loaded {len(image_files)} images with {sum(len(anns) for anns in frame_annotations.values())} annotations from YOLO dataset"
-            
-        elif dataset_type == "pascal_voc":
-            # Find all XML files
-            xml_files = [f for f in os.listdir(folder_path) 
-                        if f.endswith('.xml') and os.path.isfile(os.path.join(folder_path, f))]
-            
-            if not xml_files:
-                progress.close()
-                return [], "No Pascal VOC XML files found in the selected folder."
-            
-            # Create class mapping from config
-            class_mapping = {}
-            for class_id, class_info in classes_config.items():
-                if class_info['enabled']:
-                    original_class = class_info['original']
-                    mapped_class = class_info['mapped']
-                    class_mapping[original_class] = mapped_class
-                    
-                    # Ensure the class color exists
-                    if mapped_class not in class_colors:
-                        class_colors[mapped_class] = QColor(
-                            random.randint(0, 255),
-                            random.randint(0, 255),
-                            random.randint(0, 255)
-                        )
-            
-            # Find all image files corresponding to XML files
-            all_images = []
-            
-            for xml_file in xml_files:
-                xml_path = os.path.join(folder_path, xml_file)
-                
-                try:
-                    tree = ET.parse(xml_path)
-                    root = tree.getroot()
-                    
-                    # Get filename from XML
-                    filename_elem = root.find('filename')
-                    if filename_elem is None:
-                        continue
-                    
-                    image_filename = filename_elem.text
-                    
-                    # Check for different image extensions
-                    image_path = None
-                    for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
-                        potential_path = os.path.join(folder_path, os.path.splitext(image_filename)[0] + ext)
-                        if os.path.exists(potential_path):
-                            image_path = potential_path
-                            break
-                    
-                    if image_path is None:
-                        continue
-                    
-                    # Check if there are any enabled annotations
-                    has_enabled_annotations = False
-                    for obj in root.findall('.//object'):
-                        class_elem = obj.find('name')
-                        if class_elem is not None and class_elem.text in class_mapping:
-                            has_enabled_annotations = True
-                            break
-                    
-                    # Skip images without enabled annotations if requested
-                    if skip_empty and not has_enabled_annotations:
-                        continue
-                    
-                    all_images.append((image_path, xml_path))
-                    
-                except Exception as e:
-                    print(f"Error parsing {xml_file}: {str(e)}")
-                    continue
-            
-            # Sort images by filename
-            all_images.sort(key=lambda x: x[0])
-            
-            # Update progress bar
-            progress_bar.setRange(0, len(all_images))
-            
-            # Load images and annotations
-            for i, (image_path, xml_path) in enumerate(all_images):
-                # Update progress
-                progress_bar.setValue(i)
-                status_label.setText(f"Loading image {i+1}/{len(all_images)}: {os.path.basename(image_path)}")
-                QApplication.processEvents()
-                
-                # Add to image files list
-                image_files.append(image_path)
-                
-                # Parse XML for annotations
-                try:
-                    tree = ET.parse(xml_path)
-                    root = tree.getroot()
-                    
-                    annotations = []
-                    
-                    for obj in root.findall('.//object'):
-                        class_elem = obj.find('name')
-                        if class_elem is None:
-                            continue
-                        
-                        original_class = class_elem.text
-                        
-                        # Skip if class is not enabled
-                        if original_class not in class_mapping:
-                            continue
-                        
-                        # Get mapped class name
-                        class_name = class_mapping[original_class]
-                        
-                        # Get bounding box coordinates
-                        bbox = obj.find('bndbox')
-                        if bbox is None:
-                            continue
-                        
-                        xmin = int(float(bbox.find('xmin').text))
-                        ymin = int(float(bbox.find('ymin').text))
-                        xmax = int(float(bbox.find('xmax').text))
-                        ymax = int(float(bbox.find('ymax').text))
-                        
-                        width = xmax - xmin
-                        height = ymax - ymin
-                        
-                        rect = QRect(xmin, ymin, width, height)
-                        
-                        # Check for attributes in the XML
-                        attributes = {"Size": -1, "Quality": -1}
-                        for attr_elem in obj.findall('./attribute'):
-                            attr_name = attr_elem.find('name')
-                            attr_value = attr_elem.find('value')
-                            
-                            if attr_name is not None and attr_value is not None:
-                                try:
-                                    attributes[attr_name.text] = int(attr_value.text)
-                                except ValueError:
-                                    attributes[attr_name.text] = attr_value.text
-                        
-                        # Create BoundingBox object
-                        bbox_obj = BoundingBox(
-                            rect=rect,
-                            class_name=class_name,
-                            attributes=attributes,
-                            color=class_colors[class_name]
-                        )
-                        
-                        annotations.append(bbox_obj)
-                    
-                    if annotations:
-                        frame_annotations[i] = annotations
-                        
-                except Exception as e:
-                    print(f"Error loading annotations from {xml_path}: {str(e)}")
-                    continue
-            
-            # Close progress dialog
-            progress.close()
-            
-            return image_files, f"Loaded {len(image_files)} images with {sum(len(anns) for anns in frame_annotations.values())} annotations from Pascal VOC dataset"
-    
-    except Exception as e:
-        # Close progress dialog
-        progress.close()
-        return [], f"Error loading dataset: {str(e)}"
+                continue
+            if s.strip().startswith("names:"):
+                in_names = True
+                rest = s.split(":", 1)[1].strip()
+                if rest.startswith("["):
+                    inner = rest.strip("[]")
+                    names = [
+                        p.strip().strip("'\"")
+                        for p in inner.split(",")
+                        if p.strip()
+                    ]
+                    return names
+                continue
+            if in_names:
+                st = s.strip()
+                if st.startswith("- "):
+                    names.append(st[2:].strip().strip("'\""))
+                elif re.match(r"^\d+\s*:", st):
+                    names.append(st.split(":", 1)[1].strip().strip("'\""))
+                else:
+                    break
+        if names:
+            return names
+    return None
 
 
+def _parse_classes_txt(root: str) -> Optional[List[str]]:
+    for name in CLASS_FILE_NAMES:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    names = [
+                        l.strip().strip("'\"")
+                        for l in f
+                        if l.strip() and not l.strip().startswith("#")
+                    ]
+                if names:
+                    return names
+            except OSError:
+                continue
+    return None
 
+
+# --------------------------------------------------------------------------- #
+# Layout / split detection
+# --------------------------------------------------------------------------- #
+
+
+def _detect_layout_and_splits(info: DatasetInfo) -> None:
+    root = info.root
+    try:
+        entries = set(os.listdir(root))
+    except OSError:
+        entries = set()
+    lower = {e.lower() for e in entries}
+
+    # Case 1: explicit train/valid/test subfolders
+    split_dirs = []
+    for s in ("train", "valid", "val", "test", "validation"):
+        if s in lower:
+            sp = os.path.join(root, s)
+            if os.path.isdir(sp):
+                split_dirs.append(sp)
+
+    if split_dirs:
+        # Determine per-split layout (mixed or images/labels)
+        any_sep = False
+        any_mixed = False
+        for sp in split_dirs:
+            sub = set(os.listdir(sp)) if os.path.isdir(sp) else set()
+            sub_lower = {e.lower() for e in sub}
+            if "images" in sub_lower and "labels" in sub_lower:
+                any_sep = True
+            else:
+                any_mixed = True
+        info.layout = "splits_sep" if any_sep and not any_mixed else (
+            "splits_single" if any_mixed and not any_sep else "splits_mixed"
+        )
+        for sp in split_dirs:
+            name = os.path.basename(sp).lower()
+            name = SPLIT_ALIASES.get(name, name)
+            split = _build_split(name, sp)
+            info.splits.append(split)
+        return
+
+    # Case 2: images/ + labels/ at root
+    if "images" in lower and "labels" in lower:
+        info.layout = "images_labels"
+        info.splits.append(
+            SplitInfo(
+                name="root",
+                path=root,
+                image_dir=os.path.join(root, "images"),
+                label_dirs=[os.path.join(root, "labels")],
+            )
+        )
+        return
+
+    # Case 3: single folder, images + labels mixed
+    info.layout = "single_mixed"
+    info.splits.append(
+        SplitInfo(
+            name="root",
+            path=root,
+            image_dir=root,
+            label_dirs=[root],
+        )
+    )
+
+
+def _build_split(name: str, sp: str) -> SplitInfo:
+    sub = set(os.listdir(sp)) if os.path.isdir(sp) else set()
+    sub_lower = {e.lower() for e in sub}
+    if "images" in sub_lower and "labels" in sub_lower:
+        return SplitInfo(
+            name=name,
+            path=sp,
+            image_dir=os.path.join(sp, "images"),
+            label_dirs=[os.path.join(sp, "labels")],
+        )
+    # mixed: images and labels together
+    return SplitInfo(
+        name=name,
+        path=sp,
+        image_dir=sp,
+        label_dirs=[sp],
+    )
+
+
+def _list_images(folder: str) -> List[str]:
+    if not os.path.isdir(folder):
+        return []
+    try:
+        files = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if f.lower().endswith(IMAGE_EXTENSIONS)
+        ]
+    except OSError:
+        return []
+    files.sort()
+    return files
+
+
+# --------------------------------------------------------------------------- #
+# Label-format detection per split
+# --------------------------------------------------------------------------- #
+
+
+def _detect_label_format_for_split(split: SplitInfo, info: DatasetInfo) -> Tuple[Optional[str], Optional[str]]:
+    """Detect the label format for a split by probing the first image.
+
+    Returns (format_name, label_path_for_first_image).
+    """
+    if not split.images:
+        return None, None
+
+    # If classes are known, try every format in priority order against the
+    # first image; first one that yields >=1 box wins.
+    sample = split.images[0]
+    img_size = _image_size(sample)
+    for name, fmt in all_formats():
+        try:
+            lp = fmt.find_label_file(sample, split.label_dirs)
+        except Exception:
+            lp = None
+        if not lp:
+            continue
+        try:
+            boxes = fmt.load(lp, img_size, info.classes)
+        except LabelParseError:
+            continue
+        if boxes:
+            return name, lp
+
+    # Fallback: no boxes found, but a label file exists. Pick the first format
+    # that finds ANY file, so we can at least report the format.
+    for name, fmt in all_formats():
+        try:
+            lp = fmt.find_label_file(sample, split.label_dirs)
+        except Exception:
+            lp = None
+        if lp:
+            return name, lp
+
+    return None, None
+
+
+def _image_size(path: str) -> Optional[Tuple[int, int]]:
+    """Return (width, height) without loading the full image when possible."""
+    try:
+        import cv2
+
+        # imread with reduced load is faster but still decodes; fall back to
+        # full read if needed.
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        return (w, h)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Backward-compat shims so the old main.py imports keep working
+# --------------------------------------------------------------------------- #
+
+
+def import_dataset_dialog(parent, folder_path):
+    """Minimal stand-in. Returns a config dict consumed by load_dataset()."""
+    info = scan_dataset(folder_path)
+    return {
+        "folder_path": folder_path,
+        "info": info,
+        "splits": [s.name for s in info.splits],
+        "format": info.label_format,
+    }
+
+
+def load_dataset(parent, config, frame_annotations, class_colors, bbox_cls):
+    """Backward-compat wrapper matching the old (image_files, message) return."""
+    info: DatasetInfo = config["info"]
+    result = load_dataset_into_app(parent, info, bbox_cls)
+    msg = (
+        f"Loaded {len(result['image_files'])} images "
+        f"({', '.join(f'{k}={v}' for k, v in result['per_split_counts'].items())}); "
+        f"{len(result['classes'])} classes from {info.classes_source}."
+    )
+    if info.classes_conflict:
+        msg += f"  WARNING: {info.classes_conflict}"
+    if result["warnings"]:
+        msg += f"  ({len(result['warnings'])} warnings)"
+    # Attach split info to app for later use (filtering, ops)
+    parent._viat_dataset_info = info
+    parent._viat_frame_to_split = result["frame_to_split"]
+    return result["image_files"], msg
+
+
+# --------------------------------------------------------------------------- #
+# Backward-compat: export / create dataset
+# --------------------------------------------------------------------------- #
+# main.py calls these four functions. The ORIGINAL utils/dataset_manager.py
+# (which this module replaced) implemented them; we provide working versions
+# here that use the label_format plugins so your existing Export/Create
+# Dataset menu items keep working without any main.py changes.
+# --------------------------------------------------------------------------- #
 
 
 def export_dataset_dialog(parent, image_files, frame_annotations):
-    """
-    Show a dialog to export a dataset with various options.
+    """Dialog for exporting the current image dataset to a chosen format.
 
-    Args:
-        parent: Parent widget
-        image_files (list): List of image file paths
-        frame_annotations (dict): Dictionary of annotations by frame
-
-    Returns:
-        dict: Export configuration or None if cancelled
+    Returns a config dict, or None if the user cancelled.
     """
+    from PyQt5.QtWidgets import (
+        QDialog, QVBoxLayout, QFormLayout, QComboBox, QLineEdit,
+        QCheckBox, QDialogButtonBox, QFileDialog, QLabel, QSpinBox,
+    )
+
     dialog = QDialog(parent)
-    dialog.setWindowTitle("Export Dataset")
-    dialog.setMinimumWidth(500)
-
+    dialog.setWindowTitle("Export Image Dataset")
+    dialog.setMinimumWidth(420)
     layout = QVBoxLayout(dialog)
 
-    # Format selection
-    format_group = QGroupBox("Export Format")
-    format_layout = QFormLayout(format_group)
+    info_label = QLabel(
+        f"Exporting {len(image_files)} images, "
+        f"{sum(len(v) for v in frame_annotations.values())} annotations."
+    )
+    layout.addWidget(info_label)
+
+    form = QFormLayout()
 
     format_combo = QComboBox()
-    format_combo.addItems(["COCO JSON", "YOLO TXT", "Pascal VOC XML"])
-    format_layout.addRow("Format:", format_combo)
+    format_combo.addItems(["YOLO", "COCO JSON", "Pascal VOC XML"])
+    form.addRow("Format:", format_combo)
 
-    layout.addWidget(format_group)
+    output_edit = QLineEdit()
+    output_edit.setPlaceholderText("Output folder...")
+    from PyQt5.QtWidgets import QPushButton, QHBoxLayout
+    out_row = QHBoxLayout()
+    out_row.addWidget(output_edit)
+    browse_btn = QPushButton("Browse...")
+    def _browse():
+        d = QFileDialog.getExistingDirectory(dialog, "Select Output Folder")
+        if d:
+            output_edit.setText(d)
+    browse_btn.clicked.connect(_browse)
+    out_row.addWidget(browse_btn)
+    form.addRow("Output dir:", out_row)
 
-    # Structure options
-    structure_group = QGroupBox("Dataset Structure")
-    structure_layout = QFormLayout(structure_group)
+    split_check = QCheckBox("Create train/valid/test split (90/10)")
+    split_check.setChecked(False)
+    form.addRow("", split_check)
 
-    structure_combo = QComboBox()
-    structure_combo.addItems(
-        [
-            "Flat (all images in one folder)",
-            "Split (train/val/test folders)",
-            "Parallel (separate images and labels folders)",
-        ]
-    )
-    structure_layout.addRow("Structure:", structure_combo)
+    split_spin = QSpinBox()
+    split_spin.setRange(1, 50)
+    split_spin.setValue(10)  # % for validation
+    split_spin.setEnabled(False)
+    split_check.toggled.connect(split_spin.setEnabled)
+    form.addRow("Validation %:", split_spin)
 
-    # Split options (initially hidden)
-    split_options = QGroupBox("Split Options")
-    split_options.setVisible(False)
-    split_layout = QFormLayout(split_options)
+    layout.addLayout(form)
 
-    train_spin = QLineEdit("80")
-    val_spin = QLineEdit("10")
-    test_spin = QLineEdit("10")
-
-    split_layout.addRow("Train %:", train_spin)
-    split_layout.addRow("Validation %:", val_spin)
-    split_layout.addRow("Test %:", test_spin)
-
-    # Show/hide split options based on structure selection
-    def update_split_visibility():
-        split_options.setVisible(structure_combo.currentText().startswith("Split"))
-
-    structure_combo.currentTextChanged.connect(update_split_visibility)
-
-    structure_layout.addWidget(split_options)
-    layout.addWidget(structure_group)
-
-    # Output options
-    output_group = QGroupBox("Output Options")
-    output_layout = QFormLayout(output_group)
-
-    output_path = QLineEdit()
-    output_path.setReadOnly(True)
-
-    browse_button = QPushButton("Browse...")
-
-    def browse_output():
-        folder = QFileDialog.getExistingDirectory(dialog, "Select Output Folder")
-        if folder:
-            output_path.setText(folder)
-
-    browse_button.clicked.connect(browse_output)
-
-    path_layout = QHBoxLayout()
-    path_layout.addWidget(output_path)
-    path_layout.addWidget(browse_button)
-
-    output_layout.addRow("Output folder:", path_layout)
-
-    copy_images = QCheckBox("Copy images to output folder")
-    copy_images.setChecked(True)
-    output_layout.addRow("", copy_images)
-
-    layout.addWidget(output_group)
-
-    # Buttons
     buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
 
-    # Validate before accepting
-    def validate_and_accept():
-        if not output_path.text():
-            QMessageBox.warning(dialog, "Error", "Please select an output folder.")
-            return
+    if dialog.exec_() != QDialog.Accepted:
+        return None
 
-        if structure_combo.currentText().startswith("Split"):
-            try:
-                train_pct = float(train_spin.text())
-                val_pct = float(val_spin.text())
-                test_pct = float(test_spin.text())
+    out_dir = output_edit.text().strip()
+    if not out_dir:
+        return None
 
-                if abs(train_pct + val_pct + test_pct - 100) > 0.01:
-                    QMessageBox.warning(
-                        dialog, "Error", "Split percentages must sum to 100%."
-                    )
-                    return
-            except ValueError:
-                QMessageBox.warning(
-                    dialog, "Error", "Split percentages must be valid numbers."
-                )
-                return
-
-        dialog.accept()
-
-    buttons.accepted.disconnect()
-    buttons.accepted.connect(validate_and_accept)
-
-    # Show dialog
-    if dialog.exec_() == QDialog.Accepted:
-        config = {
-            "format": format_combo.currentText(),
-            "structure": structure_combo.currentText(),
-            "output_path": output_path.text(),
-            "copy_images": copy_images.isChecked(),
-        }
-
-        if structure_combo.currentText().startswith("Split"):
-            config["train_pct"] = float(train_spin.text())
-            config["val_pct"] = float(val_spin.text())
-            config["test_pct"] = float(test_spin.text())
-
-        return config
-
-    return None
+    fmt_map = {"YOLO": "yolo", "COCO JSON": "coco", "Pascal VOC XML": "pascal_voc"}
+    return {
+        "output_dir": out_dir,
+        "format": fmt_map[format_combo.currentText()],
+        "make_splits": split_check.isChecked(),
+        "valid_pct": split_spin.value(),
+    }
 
 
 def export_dataset(parent, config, image_files, frame_annotations, class_colors):
+    """Write the current image dataset to disk in the chosen format.
+
+    Uses the label_format plugins. Returns a status message string.
     """
-    Export a dataset based on the provided configuration.
+    out_dir = config["output_dir"]
+    fmt_name = config.get("format", "yolo")
+    make_splits = config.get("make_splits", False)
+    valid_pct = config.get("valid_pct", 10)
 
-    Args:
-        parent: Parent widget for progress dialog
-        config (dict): Dataset export configuration
-        image_files (list): List of image file paths
-        frame_annotations (dict): Dictionary of annotations by frame
-        class_colors (dict): Dictionary of class colors
+    fmt = get_format(fmt_name)
+    if fmt is None:
+        return f"Unknown format: {fmt_name}"
 
-    Returns:
-        str: Success message or None if failed
-    """
-    from utils import (
-        export_image_dataset_pascal_voc,
-        export_image_dataset_yolo,
-        export_image_dataset_coco,
-    )
+    os.makedirs(out_dir, exist_ok=True)
 
-    output_path = config["output_path"]
-    export_format = config["format"]
-    structure = config["structure"]
-    copy_images = config["copy_images"]
+    # Build the class list (preserving insertion order from class_colors)
+    classes = list(class_colors.keys())
 
-    # Create progress dialog
-    progress = QDialog(parent)
-    progress.setWindowTitle("Exporting Dataset")
-    progress.setFixedSize(400, 100)
-    progress_layout = QVBoxLayout(progress)
+    # Determine split assignment for each image
+    if make_splits:
+        n_valid = max(1, int(len(image_files) * valid_pct / 100))
+        # even split: every Nth image goes to valid
+        split_of = {}
+        stride = max(1, len(image_files) // n_valid) if n_valid else len(image_files)
+        for i in range(len(image_files)):
+            split_of[i] = "valid" if (i % stride == 0 and i < stride * n_valid) else "train"
+        # any leftover -> train
+        subdirs = ["train", "valid"]
+    else:
+        split_of = {i: "root" for i in range(len(image_files))}
+        subdirs = ["root"]
 
-    status_label = QLabel("Preparing export...")
-    progress_layout.addWidget(status_label)
+    # For per-image formats: one file per image.
+    # For dataset-wide formats (COCO): one file per split.
+    import shutil
+    from .label_formats.coco import CocoLabelFormat
 
-    progress_bar = QProgressBar()
-    progress_bar.setRange(0, 100)
-    progress_layout.addWidget(progress_bar)
+    written = 0
+    for i, img_path in enumerate(image_files):
+        split = split_of[i]
+        if make_splits:
+            img_dest_dir = os.path.join(out_dir, split, "images")
+            lbl_dest_dir = os.path.join(out_dir, split, "labels")
+        else:
+            img_dest_dir = out_dir
+            lbl_dest_dir = out_dir
+        os.makedirs(img_dest_dir, exist_ok=True)
+        os.makedirs(lbl_dest_dir, exist_ok=True)
 
-    # Non-blocking progress dialog
-    progress.setModal(False)
-    progress.show()
-    QApplication.processEvents()
+        # Copy the image
+        img_name = os.path.basename(img_path)
+        try:
+            shutil.copy2(img_path, os.path.join(img_dest_dir, img_name))
+        except OSError:
+            pass
 
-    try:
-        # Create necessary directories based on structure
-        if structure.startswith("Flat"):
-            # Flat structure - all in one folder
-            os.makedirs(output_path, exist_ok=True)
+        # Get the boxes for this frame
+        anns = frame_annotations.get(i, [])
+        if not anns:
+            if not isinstance(fmt, CocoLabelFormat):
+                # write an empty label file for YOLO (some trainers expect it)
+                continue
+            boxes = []
+        else:
+            boxes = []
+            for ann in anns:
+                boxes.append({
+                    "class_name": getattr(ann, "class_name", "unknown"),
+                    "class_index": classes.index(ann.class_name) if ann.class_name in classes else 0,
+                    "x": ann.rect.x(),
+                    "y": ann.rect.y(),
+                    "w": ann.rect.width(),
+                    "h": ann.rect.height(),
+                    "score": getattr(ann, "score", 1.0),
+                })
 
-            if export_format == "YOLO TXT":
-                labels_dir = os.path.join(output_path, "labels")
-                os.makedirs(labels_dir, exist_ok=True)
-            elif export_format == "Pascal VOC XML":
-                annotations_dir = os.path.join(output_path, "annotations")
-                os.makedirs(annotations_dir, exist_ok=True)
+        if isinstance(fmt, CocoLabelFormat):
+            continue  # handled in the COCO batch pass below
 
-            if copy_images:
-                images_dir = os.path.join(output_path, "images")
-                os.makedirs(images_dir, exist_ok=True)
+        # Write the label file
+        try:
+            img_size = _image_size(img_path)
+            if img_size is None:
+                continue
+            content = fmt.dump(boxes, img_size, classes)
+            stem = os.path.splitext(img_name)[0]
+            lbl_path = os.path.join(lbl_dest_dir, stem + fmt.extensions[0])
+            with open(lbl_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            written += 1
+        except Exception:
+            continue
 
-            # Export annotations
-            if export_format == "COCO JSON":
-                status_label.setText("Exporting COCO annotations...")
-                QApplication.processEvents()
-
-                coco_file = os.path.join(output_path, "annotations.json")
-                export_image_dataset_coco(
-                    coco_file,
-                    image_files,
-                    frame_annotations,
-                    class_colors,
-                    640,
-                    480,  # Default dimensions, will be overridden by actual image sizes
-                )
-
-            elif export_format == "YOLO TXT":
-                status_label.setText("Exporting YOLO annotations...")
-                QApplication.processEvents()
-
-                export_image_dataset_yolo(
-                    output_path, image_files, frame_annotations, class_colors
-                )
-
-            elif export_format == "Pascal VOC XML":
-                status_label.setText("Exporting Pascal VOC annotations...")
-                QApplication.processEvents()
-
-                export_image_dataset_pascal_voc(
-                    output_path,
-                    image_files,
-                    frame_annotations,
-                    None,  # No pixmap needed, dimensions will be read from images
-                )
-
-            # Copy images if requested
-            if copy_images:
-                status_label.setText("Copying images...")
-                progress_bar.setValue(50)
-                QApplication.processEvents()
-
-                for i, img_path in enumerate(image_files):
-                    if i % 10 == 0:  # Update progress every 10 images
-                        progress_value = 50 + (i * 50 // len(image_files))
-                        progress_bar.setValue(progress_value)
-                        QApplication.processEvents()
-
-                    dest_path = os.path.join(images_dir, os.path.basename(img_path))
-                    shutil.copy2(img_path, dest_path)
-
-        elif structure.startswith("Split"):
-            # Split structure - train/val/test folders
-            train_pct = config.get("train_pct", 80)
-            val_pct = config.get("val_pct", 10)
-            test_pct = config.get("test_pct", 10)
-
-            # Create split directories
-            train_dir = os.path.join(output_path, "train")
-            val_dir = os.path.join(output_path, "val")
-            test_dir = os.path.join(output_path, "test")
-
-            os.makedirs(train_dir, exist_ok=True)
-            os.makedirs(val_dir, exist_ok=True)
-            os.makedirs(test_dir, exist_ok=True)
-
-            if copy_images:
-                os.makedirs(os.path.join(train_dir, "images"), exist_ok=True)
-                os.makedirs(os.path.join(train_dir, "images"), exist_ok=True)
-                os.makedirs(os.path.join(val_dir, "images"), exist_ok=True)
-                os.makedirs(os.path.join(test_dir, "images"), exist_ok=True)
-
-            if export_format == "YOLO TXT":
-                os.makedirs(os.path.join(train_dir, "labels"), exist_ok=True)
-                os.makedirs(os.path.join(val_dir, "labels"), exist_ok=True)
-                os.makedirs(os.path.join(test_dir, "labels"), exist_ok=True)
-            elif export_format == "Pascal VOC XML":
-                os.makedirs(os.path.join(train_dir, "annotations"), exist_ok=True)
-                os.makedirs(os.path.join(val_dir, "annotations"), exist_ok=True)
-                os.makedirs(os.path.join(test_dir, "annotations"), exist_ok=True)
-
-            # Split the dataset
-            import random
-
-            random.seed(42)  # For reproducibility
-
-            # Shuffle indices
-            indices = list(range(len(image_files)))
-            random.shuffle(indices)
-
-            # Calculate split sizes
-            train_size = int(len(indices) * train_pct / 100)
-            val_size = int(len(indices) * val_pct / 100)
-
-            # Split indices
-            train_indices = indices[:train_size]
-            val_indices = indices[train_size : train_size + val_size]
-            test_indices = indices[train_size + val_size :]
-
-            # Create split datasets
-            splits = {
-                "train": {"dir": train_dir, "indices": train_indices},
-                "val": {"dir": val_dir, "indices": val_indices},
-                "test": {"dir": test_dir, "indices": test_indices},
+    # COCO dataset-wide pass (one json per split)
+    if isinstance(fmt, CocoLabelFormat):
+        import json
+        for split in subdirs:
+            cat_id = {c: i for i, c in enumerate(classes, 1)}
+            images_json = []
+            anns_json = []
+            ann_id = 1
+            for i, img_path in enumerate(image_files):
+                if split_of[i] != split:
+                    continue
+                img_size = _image_size(img_path) or (0, 0)
+                img_name = os.path.basename(img_path)
+                images_json.append({
+                    "id": i, "file_name": img_name,
+                    "width": img_size[0], "height": img_size[1],
+                })
+                for b in (frame_annotations.get(i, [])):
+                    cat = cat_id.get(b.class_name, 0)
+                    anns_json.append({
+                        "id": ann_id, "image_id": i, "category_id": cat,
+                        "bbox": [b.rect.x(), b.rect.y(), b.rect.width(), b.rect.height()],
+                        "area": b.rect.width() * b.rect.height(),
+                        "iscrowd": 0,
+                    })
+                    ann_id += 1
+            coco = {
+                "images": images_json,
+                "annotations": anns_json,
+                "categories": [{"id": i, "name": c} for i, c in enumerate(classes, 1)],
             }
+            out_json = os.path.join(
+                out_dir, split if make_splits else "",
+                "_annotations.coco.json" if make_splits else "annotations.json"
+            ).strip()
+            os.makedirs(os.path.dirname(out_json), exist_ok=True)
+            with open(out_json, "w", encoding="utf-8") as f:
+                json.dump(coco, f, indent=2)
+            written += 1
 
-            # Export each split
-            for split_name, split_info in splits.items():
-                split_dir = split_info["dir"]
-                split_indices = split_info["indices"]
+    # Also write classes.txt / data.yaml so the export is a valid dataset
+    _write_class_files(out_dir, classes)
 
-                status_label.setText(f"Processing {split_name} split...")
-                QApplication.processEvents()
+    return f"Exported {len(image_files)} images ({written} label files) to {out_dir} as {fmt_name}."
 
-                # Get images and annotations for this split
-                split_images = [image_files[i] for i in split_indices]
-                split_annotations = {}
 
-                for i, img_idx in enumerate(split_indices):
-                    if img_idx in frame_annotations:
-                        split_annotations[i] = frame_annotations[img_idx]
+def _write_class_files(out_dir, classes):
+    """Write classes.txt and data.yaml for an exported dataset."""
+    try:
+        with open(os.path.join(out_dir, "classes.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(classes) + "\n")
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(out_dir, "data.yaml"), "w", encoding="utf-8") as f:
+            f.write(f"path: .\nnc: {len(classes)}\nnames: [{', '.join(classes)}]\n")
+    except OSError:
+        pass
 
-                # Export annotations for this split
-                if export_format == "COCO JSON":
-                    coco_file = os.path.join(
-                        split_dir, f"{split_name}_annotations.json"
-                    )
-                    export_image_dataset_coco(
-                        coco_file,
-                        split_images,
-                        split_annotations,
-                        class_colors,
-                        640,
-                        480,
-                    )
-                elif export_format == "YOLO TXT":
-                    export_image_dataset_yolo(
-                        split_dir, split_images, split_annotations, class_colors
-                    )
-                elif export_format == "Pascal VOC XML":
-                    export_image_dataset_pascal_voc(
-                        split_dir, split_images, split_annotations, None
-                    )
-
-                # Copy images if requested
-                if copy_images:
-                    images_dir = os.path.join(split_dir, "images")
-
-                    for img_path in split_images:
-                        dest_path = os.path.join(images_dir, os.path.basename(img_path))
-                        shutil.copy2(img_path, dest_path)
-
-        elif structure.startswith("Parallel"):
-            # Parallel structure - separate images and labels folders
-            images_dir = os.path.join(output_path, "images")
-            os.makedirs(images_dir, exist_ok=True)
-
-            if export_format == "YOLO TXT":
-                labels_dir = os.path.join(output_path, "labels")
-                os.makedirs(labels_dir, exist_ok=True)
-            elif export_format == "Pascal VOC XML":
-                annotations_dir = os.path.join(output_path, "annotations")
-                os.makedirs(annotations_dir, exist_ok=True)
-
-            # Export annotations
-            if export_format == "COCO JSON":
-                status_label.setText("Exporting COCO annotations...")
-                QApplication.processEvents()
-
-                coco_file = os.path.join(output_path, "annotations.json")
-                export_image_dataset_coco(
-                    coco_file, image_files, frame_annotations, class_colors, 640, 480
-                )
-            elif export_format == "YOLO TXT":
-                status_label.setText("Exporting YOLO annotations...")
-                QApplication.processEvents()
-
-                # Export class names
-                classes = list(class_colors.keys())
-                with open(os.path.join(output_path, "classes.txt"), "w") as f:
-                    for cls in classes:
-                        f.write(f"{cls}\n")
-
-                # Export each annotation to a separate file
-                for i, img_path in enumerate(image_files):
-                    if i % 10 == 0:
-                        progress_value = 30 + (i * 40 // len(image_files))
-                        progress_bar.setValue(progress_value)
-                        QApplication.processEvents()
-
-                    if i not in frame_annotations:
-                        continue
-
-                    base_name = os.path.splitext(os.path.basename(img_path))[0]
-                    label_file = os.path.join(labels_dir, f"{base_name}.txt")
-
-                    # Get image dimensions
-                    img = cv2.imread(img_path)
-                    if img is None:
-                        continue
-
-                    img_height, img_width = img.shape[:2]
-
-                    # Write YOLO format annotations
-                    with open(label_file, "w") as f:
-                        for ann in frame_annotations[i]:
-                            # Get class index
-                            class_idx = classes.index(ann.class_name)
-
-                            # Convert to YOLO format (normalized)
-                            x = ann.rect.x()
-                            y = ann.rect.y()
-                            w = ann.rect.width()
-                            h = ann.rect.height()
-
-                            # Calculate center point and normalized dimensions
-                            x_center = (x + w / 2) / img_width
-                            y_center = (y + h / 2) / img_height
-                            width = w / img_width
-                            height = h / img_height
-
-                            f.write(
-                                f"{class_idx} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n"
-                            )
-
-            elif export_format == "Pascal VOC XML":
-                status_label.setText("Exporting Pascal VOC annotations...")
-                QApplication.processEvents()
-
-                export_image_dataset_pascal_voc(
-                    output_path, image_files, frame_annotations, None
-                )
-
-            # Copy images if requested
-            if copy_images:
-                status_label.setText("Copying images...")
-                progress_bar.setValue(70)
-                QApplication.processEvents()
-
-                for i, img_path in enumerate(image_files):
-                    if i % 10 == 0:
-                        progress_value = 70 + (i * 30 // len(image_files))
-                        progress_bar.setValue(progress_value)
-                        QApplication.processEvents()
-
-                    dest_path = os.path.join(images_dir, os.path.basename(img_path))
-                    shutil.copy2(img_path, dest_path)
-
-        progress_bar.setValue(100)
-        status_label.setText("Export completed successfully!")
-        QApplication.processEvents()
-
-        # Close progress dialog after a short delay
-        import time
-
-        time.sleep(0.5)
-        progress.close()
-
-        # Return success message
-        return f"Dataset exported successfully to {output_path}"
-
-    except Exception as e:
-        progress.close()
-        QMessageBox.critical(
-            parent, "Export Error", f"An error occurred during export: {str(e)}"
-        )
-        return None
 
 def create_dataset_dialog(parent, image_files, frame_annotations, class_colors):
+    """Dialog for creating a NEW labeled dataset from current annotations.
+
+    Returns a config dict or None.
     """
-    Show a dialog to create a new dataset from the current annotations.
-    
-    Args:
-        parent: Parent widget
-        image_files (list): List of image file paths
-        frame_annotations (dict): Dictionary of annotations by frame
-        class_colors (dict): Dictionary of class colors
-        
-    Returns:
-        dict: Export configuration or None if cancelled
-    """
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Create Dataset")
-    dialog.setMinimumWidth(500)
-    
-    layout = QVBoxLayout(dialog)
-    
-    # Dataset format selection
-    format_group = QGroupBox("Dataset Format")
-    format_layout = QFormLayout(format_group)
-    
-    format_combo = QComboBox()
-    format_combo.addItems([
-        "COCO JSON",
-        "YOLO",
-        "Pascal VOC",
-        "Custom"
-    ])
-    format_layout.addRow("Format:", format_combo)
-    
-    # Output directory
-    output_group = QGroupBox("Output Directory")
-    output_layout = QFormLayout(output_group)
-    
-    output_path = QLineEdit()
-    output_path.setReadOnly(True)
-    
-    browse_button = QPushButton("Browse...")
-    browse_button.clicked.connect(lambda: select_output_directory(output_path))
-    
-    output_row = QHBoxLayout()
-    output_row.addWidget(output_path)
-    output_row.addWidget(browse_button)
-    
-    output_layout.addRow("Directory:", output_row)
-    
-    # Dataset structure options
-    structure_group = QGroupBox("Dataset Structure")
-    structure_layout = QFormLayout(structure_group)
-    
-    structure_combo = QComboBox()
-    structure_combo.addItems([
-        "Simple (all images in one folder)",
-        "Split (train/val/test folders)",
-        "Parallel (images and labels folders)"
-    ])
-    structure_layout.addRow("Structure:", structure_combo)
-    
-    # Split options
-    split_options = QGroupBox("Train/Val/Test Split")
-    split_options.setVisible(False)
-    split_layout = QFormLayout(split_options)
-    
-    train_split = QLineEdit("70")
-    val_split = QLineEdit("20")
-    test_split = QLineEdit("10")
-    
-    split_layout.addRow("Train %:", train_split)
-    split_layout.addRow("Val %:", val_split)
-    split_layout.addRow("Test %:", test_split)
-    
-    # Show/hide split options based on structure selection
-    def update_structure_visibility():
-        split_options.setVisible(structure_combo.currentText().startswith("Split"))
-    
-    structure_combo.currentTextChanged.connect(update_structure_visibility)
-    
-    # Add options to layout
-    layout.addWidget(format_group)
-    layout.addWidget(output_group)
-    layout.addWidget(structure_group)
-    layout.addWidget(split_options)
-    
-    # Buttons
-    buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    buttons.accepted.connect(dialog.accept)
-    buttons.rejected.connect(dialog.reject)
-    layout.addWidget(buttons)
-    
-    # Helper function to select output directory
-    def select_output_directory(line_edit):
-        directory = QFileDialog.getExistingDirectory(
-            dialog, "Select Output Directory", "", QFileDialog.ShowDirsOnly
-        )
-        if directory:
-            line_edit.setText(directory)
-    
-    # Show dialog
-    if dialog.exec_() == QDialog.Accepted:
-        # Validate inputs
-        if not output_path.text():
-            QMessageBox.warning(
-                parent, "Missing Output Directory", "Please select an output directory."
-            )
-            return None
-        
-        # Get split percentages if needed
-        splits = {}
-        if structure_combo.currentText().startswith("Split"):
-            try:
-                train_pct = int(train_split.text())
-                val_pct = int(val_split.text())
-                test_pct = int(test_split.text())
-                
-                if train_pct + val_pct + test_pct != 100:
-                    QMessageBox.warning(
-                        parent, "Invalid Split", "Split percentages must sum to 100%."
-                    )
-                    return None
-                
-                splits = {
-                    "train": train_pct / 100,
-                    "val": val_pct / 100,
-                    "test": test_pct / 100
-                }
-            except ValueError:
-                QMessageBox.warning(
-                    parent, "Invalid Split", "Split percentages must be integers."
-                )
-                return None
-        
-        return {
-            "format": format_combo.currentText(),
-            "output_dir": output_path.text(),
-            "structure": structure_combo.currentText(),
-            "splits": splits
-        }
-    
-    return None
+    return export_dataset_dialog(parent, image_files, frame_annotations)
+
 
 def create_dataset(parent, config, image_files, frame_annotations, class_colors):
-    """
-    Create a new dataset from the current annotations.
-    
-    Args:
-        parent: Parent widget for progress dialog
-        config (dict): Export configuration
-        image_files (list): List of image file paths
-        frame_annotations (dict): Dictionary of annotations by frame
-        class_colors (dict): Dictionary of class colors
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    from PyQt5.QtWidgets import QApplication
-    import os
-    import shutil
-    import random
-    
-    # Create progress dialog
-    progress = QDialog(parent)
-    progress.setWindowTitle("Creating Dataset")
-    progress.setFixedSize(400, 100)
-    progress_layout = QVBoxLayout(progress)
-    
-    status_label = QLabel("Preparing dataset...")
-    progress_layout.addWidget(status_label)
-    
-    progress_bar = QProgressBar()
-    progress_bar.setRange(0, len(image_files))
-    progress_layout.addWidget(progress_bar)
-    
-    # Non-blocking progress dialog
-    progress.setModal(False)
-    progress.show()
-    QApplication.processEvents()
-    
-    try:
-        output_dir = config["output_dir"]
-        format_type = config["format"]
-        structure = config["structure"]
-        
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Process based on structure
-        if structure.startswith("Simple"):
-            # Simple structure - all images in one folder
-            images_dir = os.path.join(output_dir, "images")
-            os.makedirs(images_dir, exist_ok=True)
-            
-            # Copy images
-            for i, image_path in enumerate(image_files):
-                progress_bar.setValue(i)
-                status_label.setText(f"Copying image {i+1}/{len(image_files)}...")
-                QApplication.processEvents()
-                
-                # Copy image to output directory
-                dest_path = os.path.join(images_dir, os.path.basename(image_path))
-                shutil.copy2(image_path, dest_path)
-            
-            # Export annotations based on format
-            progress_bar.setValue(len(image_files))
-            status_label.setText("Exporting annotations...")
-            QApplication.processEvents()
-            
-            if format_type == "COCO JSON":
-                from utils.file_operations import export_image_dataset_coco
-                annotations_dir = os.path.join(output_dir, "annotations")
-                os.makedirs(annotations_dir, exist_ok=True)
-                
-                export_image_dataset_coco(
-                    os.path.join(annotations_dir, "instances_default.json"),
-                    image_files,
-                    frame_annotations,
-                    class_colors,
-                    640, 480  # Default dimensions
-                )
-            
-            elif format_type == "YOLO":
-                from utils.file_operations import export_image_dataset_yolo
-                export_image_dataset_yolo(
-                    output_dir,
-                    image_files,
-                    frame_annotations,
-                    class_colors
-                )
-            
-            elif format_type == "Pascal VOC":
-                from utils.file_operations import export_image_dataset_pascal_voc
-                export_image_dataset_pascal_voc(
-                    output_dir,
-                    image_files,
-                    frame_annotations,
-                    None  # No pixmap available
-                )
-        
-        elif structure.startswith("Split"):
-            # Split structure - train/val/test folders
-            splits = config.get("splits", {"train": 0.7, "val": 0.2, "test": 0.1})
-            
-            # Create split directories
-            for split in splits:
-                os.makedirs(os.path.join(output_dir, split, "images"), exist_ok=True)
-                if format_type == "Pascal VOC":
-                    os.makedirs(os.path.join(output_dir, split, "annotations"), exist_ok=True)
-                elif format_type == "YOLO":
-                    os.makedirs(os.path.join(output_dir, split, "labels"), exist_ok=True)
-            
-            # Shuffle and split images
-            image_indices = list(range(len(image_files)))
-            random.shuffle(image_indices)
-            
-            train_end = int(len(image_indices) * splits.get("train", 0.7))
-            val_end = train_end + int(len(image_indices) * splits.get("val", 0.2))
-
-            split_indices = {
-                "train": image_indices[:train_end],
-                "val": image_indices[train_end:val_end],
-                "test": image_indices[val_end:]
-            }
-            
-            # Process each split
-            for split, indices in split_indices.items():
-                split_images = []
-                split_frame_annotations = {}
-                
-                # Copy images and collect annotations
-                for i, idx in enumerate(indices):
-                    progress_bar.setValue(i)
-                    status_label.setText(f"Processing {split} split: {i+1}/{len(indices)}...")
-                    QApplication.processEvents()
-                    
-                    image_path = image_files[idx]
-                    dest_path = os.path.join(output_dir, split, "images", os.path.basename(image_path))
-                    
-                    # Copy image
-                    shutil.copy2(image_path, dest_path)
-                    split_images.append(dest_path)
-                    
-                    # Copy annotations
-                    if idx in frame_annotations:
-                        split_frame_annotations[len(split_images) - 1] = frame_annotations[idx]
-                
-                # Export annotations based on format
-                if format_type == "COCO JSON":
-                    from utils.file_operations import export_image_dataset_coco
-                    annotations_dir = os.path.join(output_dir, split, "annotations")
-                    os.makedirs(annotations_dir, exist_ok=True)
-                    
-                    export_image_dataset_coco(
-                        os.path.join(annotations_dir, f"instances_{split}.json"),
-                        split_images,
-                        split_frame_annotations,
-                        class_colors,
-                        640, 480  # Default dimensions
-                    )
-                
-                elif format_type == "YOLO":
-                    from utils.file_operations import export_image_dataset_yolo
-                    export_image_dataset_yolo(
-                        os.path.join(output_dir, split),
-                        split_images,
-                        split_frame_annotations,
-                        class_colors
-                    )
-                
-                elif format_type == "Pascal VOC":
-                    from utils.file_operations import export_image_dataset_pascal_voc
-                    export_image_dataset_pascal_voc(
-                        os.path.join(output_dir, split),
-                        split_images,
-                        split_frame_annotations,
-                        None  # No pixmap available
-                    )
-        
-        elif structure.startswith("Parallel"):
-            # Parallel structure - images and labels folders
-            images_dir = os.path.join(output_dir, "images")
-            os.makedirs(images_dir, exist_ok=True)
-            
-            if format_type == "YOLO":
-                labels_dir = os.path.join(output_dir, "labels")
-                os.makedirs(labels_dir, exist_ok=True)
-            elif format_type == "Pascal VOC":
-                annotations_dir = os.path.join(output_dir, "annotations")
-                os.makedirs(annotations_dir, exist_ok=True)
-            elif format_type == "COCO JSON":
-                annotations_dir = os.path.join(output_dir, "annotations")
-                os.makedirs(annotations_dir, exist_ok=True)
-            
-            # Copy images
-            for i, image_path in enumerate(image_files):
-                progress_bar.setValue(i)
-                status_label.setText(f"Copying image {i+1}/{len(image_files)}...")
-                QApplication.processEvents()
-                
-                # Copy image to output directory
-                dest_path = os.path.join(images_dir, os.path.basename(image_path))
-                shutil.copy2(image_path, dest_path)
-            
-            # Export annotations based on format
-            progress_bar.setValue(len(image_files))
-            status_label.setText("Exporting annotations...")
-            QApplication.processEvents()
-            
-            if format_type == "COCO JSON":
-                from utils.file_operations import export_image_dataset_coco
-                export_image_dataset_coco(
-                    os.path.join(annotations_dir, "instances_default.json"),
-                    image_files,
-                    frame_annotations,
-                    class_colors,
-                    640, 480  # Default dimensions
-                )
-            
-            elif format_type == "YOLO":
-                from utils.file_operations import export_image_dataset_yolo
-                export_image_dataset_yolo(
-                    output_dir,
-                    image_files,
-                    frame_annotations,
-                    class_colors
-                )
-            
-            elif format_type == "Pascal VOC":
-                from utils.file_operations import export_image_dataset_pascal_voc
-                export_image_dataset_pascal_voc(
-                    output_dir,
-                    image_files,
-                    frame_annotations,
-                    None  # No pixmap available
-                )
-        
-        # Update progress
-        progress_bar.setValue(len(image_files))
-        status_label.setText("Dataset created successfully!")
-        QApplication.processEvents()
-        
-        # Close progress dialog after a short delay
-        import time
-        time.sleep(0.5)
-        progress.close()
-        
-        return True
-    
-    except Exception as e:
-        progress.close()
-        import traceback
-        traceback.print_exc()
-        QMessageBox.critical(
-            parent,
-            "Error Creating Dataset",
-            f"Failed to create dataset: {str(e)}"
-        )
-        return False
+    """Create a dataset on disk. Delegates to export_dataset()."""
+    msg = export_dataset(parent, config, image_files, frame_annotations, class_colors)
+    return bool(msg and not msg.startswith("Unknown"))
