@@ -879,3 +879,82 @@ def _img_size(path):
         return (w, h)
     except Exception:
         return None
+
+# --------------------------------------------------------------------------- #
+# Hash Duplicates, Format, Resolution (Wizard integration)
+# --------------------------------------------------------------------------- #
+
+def remove_hash_duplicates(app, dest_subfolder="removed/hash_duplicates") -> Dict:
+    import hashlib
+    image_files = list(getattr(app, "image_files", []) or [])
+    seen_hashes = {}
+    to_move = []
+
+    for idx, img_path in enumerate(image_files):
+        try:
+            with open(img_path, "rb") as f:
+                file_hash = hashlib.md5(f.read()).hexdigest()
+            if file_hash in seen_hashes:
+                to_move.append(idx)
+            else:
+                seen_hashes[file_hash] = idx
+        except OSError:
+            pass
+
+    if not to_move:
+        append_dataset_log(app, "Removed hash duplicates", affected=0, details="no duplicates found")
+        return {"moved_images": 0, "moved_indices": [], "dest_dir": None}
+
+    result = move_frames_to(
+        app, to_move,
+        dest_subfolder=dest_subfolder,
+        log_operation="Removed hash duplicates",
+        log_details=f"{len(to_move)} identical files -> {dest_subfolder}/",
+    )
+    result["moved_indices"] = to_move
+    return result
+
+def standardize_image_format(app, target_ext=".jpg") -> int:
+    import cv2
+    image_files = getattr(app, "image_files", []) or []
+    converted = 0
+    for idx, img_path in enumerate(image_files):
+        base, ext = os.path.splitext(img_path)
+        if ext.lower() == target_ext.lower():
+            continue
+        try:
+            img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                new_path = base + target_ext
+                cv2.imwrite(new_path, img)
+                os.remove(img_path)
+                image_files[idx] = new_path
+                converted += 1
+        except Exception:
+            pass
+    if converted > 0:
+        append_dataset_log(app, "Standardized format", affected=converted, details=f"converted to {target_ext}")
+    return converted
+
+def normalize_resolution(app, max_width=1920, max_height=1080) -> int:
+    import cv2
+    image_files = getattr(app, "image_files", []) or []
+    resized = 0
+    for img_path in image_files:
+        try:
+            img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            if w > max_width or h > max_height:
+                scale = min(max_width / w, max_height / h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                cv2.imwrite(img_path, img_resized)
+                resized += 1
+        except Exception:
+            pass
+    if resized > 0:
+        append_dataset_log(app, "Normalized resolution", affected=resized, details=f"downscaled to {max_width}x{max_height}")
+    return resized
+

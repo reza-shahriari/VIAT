@@ -104,6 +104,10 @@ class VideoCanvas(QWidget):
         # attributes['actor_id'] or ['track_id'] matches are drawn. Used by the
         # per-object visibility editing mode.
         self.object_filter = None
+        # Color pick mode (for segmentation video labeling): when True, the
+        # next click on the canvas picks a color instead of drawing.
+        self.color_pick_mode = False
+        self.color_pick_callback = None
         self._display_rect_cache = {}  # Cache for display rectangles
         self._last_display_rect = None  # Cache the last display rectangle
         self._last_zoom_level = 1.0    # Track zoom level for cache invalidation
@@ -760,6 +764,16 @@ class VideoCanvas(QWidget):
         return None
 
     def mousePressEvent(self, event):
+        # Color pick mode (patch10): if active, pick color and return
+        if getattr(self, 'color_pick_mode', False) and event.button() == 0x00000001:  # LeftButton
+            # Convert click position to image coordinates
+            img_pos = self.display_to_image_point(event.pos())
+            if img_pos and self.color_pick_callback:
+                self.color_pick_callback(img_pos.x(), img_pos.y())
+            # Exit pick mode
+            self.color_pick_mode = False
+            self.setCursor(Qt.ArrowCursor)
+            return
         """Handle mouse press events"""
         if not self.pixmap:
             return
@@ -1736,3 +1750,16 @@ class VideoCanvas(QWidget):
         sy = rect.y() + (y / float(self.pixmap.height())) * rect.height()
         from PyQt5.QtCore import QPoint
         return QPoint(int(sx), int(sy))
+
+    def display_to_image_point(self, pos):
+        """Convert a display-space click position to image-space (pixel) coords."""
+        rect = self.get_display_rect()
+        if not rect or not self.pixmap:
+            return None
+        from PyQt5.QtCore import QPoint
+        # Map display pos to image pixel
+        img_x = (pos.x() - rect.x()) * self.pixmap.width() / rect.width()
+        img_y = (pos.y() - rect.y()) * self.pixmap.height() / rect.height()
+        img_x = max(0, min(self.pixmap.width() - 1, int(img_x)))
+        img_y = max(0, min(self.pixmap.height() - 1, int(img_y)))
+        return QPoint(img_x, img_y)

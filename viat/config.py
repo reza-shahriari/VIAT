@@ -6,6 +6,7 @@ DEFAULT_SETTINGS = {
     "default_playback_speed": 1.0,
     "window_geometry": (100, 100, 1200, 800),
     "auto_save_interval": 300,  # seconds
+    "main_dataset_path": "",    # path to the main workspace dataset
 }
 
 # Style configurations

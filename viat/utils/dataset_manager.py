@@ -219,15 +219,25 @@ def load_dataset_into_app(
 
     # Build class colors on the canvas (preserve existing ones)
     existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    
+    # Remove default "Quad" class if the dataset provides its own classes and Quad isn't one of them
+    if info.classes and "Quad" in existing_colors and "Quad" not in info.classes:
+        del existing_colors["Quad"]
+        
     for cls in info.classes:
         if cls not in existing_colors:
             existing_colors[cls] = QColor(
                 random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
             )
     app.canvas.class_colors = existing_colors
+    
     # class_attributes defaults
     if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
         app.canvas.class_attributes = {}
+        
+    if info.classes and "Quad" in app.canvas.class_attributes and "Quad" not in info.classes:
+        del app.canvas.class_attributes["Quad"]
+        
     for cls in info.classes:
         if cls not in app.canvas.class_attributes:
             app.canvas.class_attributes[cls] = {

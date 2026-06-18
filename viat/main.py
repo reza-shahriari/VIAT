@@ -122,6 +122,11 @@ from utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibi
 # --- Performance + segmentation video (patch6) ---
 from utils.performance import PerformanceManager as _ViatPerformanceManager
 from utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
+# --- Dataset merger + toolbar visibility + click-pick (patch10) ---
+from utils.dataset_merger import (
+    merge_dataset_into_target as _viat_merge_dataset,
+    find_unmatched_classes as _viat_find_unmatched_classes,
+)
 from utils.icon_provider import IconProvider
 from natsort import natsorted
 from copy import deepcopy
@@ -156,8 +161,24 @@ class VideoAnnotationTool(QMainWindow):
         # Install event filter to handle global shortcuts
         QApplication.instance().installEventFilter(self)
 
+        self.dark_mode_enabled = False
+
         # Load last project if available
         QTimer.singleShot(100, self.load_last_project)
+
+    def toggle_dark_mode(self, enabled: bool):
+        self.dark_mode_enabled = enabled
+        if enabled:
+            try:
+                import os
+                style_path = os.path.join(os.path.dirname(__file__), "styles.qss")
+                with open(style_path, "r") as f:
+                    self.setStyleSheet(f.read())
+            except Exception as e:
+                print(f"Failed to load stylesheet: {e}")
+        else:
+            self.setStyleSheet("")
+
 
     # -------------------------------------------------------------------------
     # Initialization and Setup Methods
@@ -190,6 +211,8 @@ class VideoAnnotationTool(QMainWindow):
         self.duplicate_frames_enabled = True
         self.duplicate_frames_cache = {}  # Maps frame hash to list of frame numbers
         self.frame_hashes = {}
+        self.integration_mode = False
+        self.integration_main_dataset = ""
         self.undo_stack = []
         self.redo_stack = []
         self.max_undo_steps = 20
@@ -305,6 +328,21 @@ class VideoAnnotationTool(QMainWindow):
         playback_controls = self.ui_creator.create_playback_controls()
         layout.addWidget(playback_controls)
 
+        # Integration Mode Banner (hidden by default)
+        self.integration_banner = QWidget()
+        banner_layout = QHBoxLayout(self.integration_banner)
+        banner_layout.setContentsMargins(5, 5, 5, 5)
+        self.integration_label = QLabel("<b>Integration Mode Active:</b> Please review the dataset and apply labels.")
+        self.integration_label.setStyleSheet("color: #E6A23C;")
+        self.btn_finish_integration = QPushButton("Finish & Merge")
+        self.btn_finish_integration.setStyleSheet("background-color: #67C23A; color: white; font-weight: bold; padding: 5px;")
+        self.btn_finish_integration.clicked.connect(self.viat_finish_integration)
+        banner_layout.addWidget(self.integration_label)
+        banner_layout.addStretch()
+        banner_layout.addWidget(self.btn_finish_integration)
+        self.integration_banner.setVisible(False)
+        layout.addWidget(self.integration_banner)
+
         # Set layout margins
         layout.setContentsMargins(5, 5, 5, 5)
 
@@ -380,6 +418,16 @@ class VideoAnnotationTool(QMainWindow):
         act = img_menu.addAction("Auto-Import Detections (move to review_label)...")
         act.triggered.connect(lambda: self.viat_auto_import_detections())
 
+        img_menu.addSeparator()
+
+        act = img_menu.addAction("Merge Dataset into Current...")
+        act.triggered.connect(lambda: self.viat_merge_dataset())
+
+        img_menu.addSeparator()
+
+        act = img_menu.addAction("Dataset Integration Wizard (Roadmap)...")
+        act.triggered.connect(lambda: self.viat_launch_integration_wizard())
+
         # Video annotation operations
         vid_menu = dataset_menu.addMenu("Video Annotation Operations")
 
@@ -439,6 +487,92 @@ class VideoAnnotationTool(QMainWindow):
         # Store reference so we can re-inject if needed
         self._viat_extra_menus = dataset_menu
 
+    @log_exceptions
+    def viat_launch_integration_wizard(self):
+        """Launches the Dataset Integration Roadmap Setup."""
+        from widgets.dataset_wizard_dialog import DatasetWizardDialog
+        from PyQt5.QtWidgets import QDialog, QMessageBox
+        
+        dialog = DatasetWizardDialog(self, parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            settings = dialog.settings
+            if not settings: return
+            
+            # 0. Offline Auto Tasks (run directly on folder before loading)
+            try:
+                from managers.dataset_integration import DatasetIntegrationManager
+                manager = DatasetIntegrationManager(self)
+                if settings.get("preflight"):
+                    manager.run_preflight_check(settings["new_dataset"])
+                if settings.get("remove_hash_duplicates"):
+                    manager.remove_duplicates(settings["new_dataset"])
+                if settings.get("standardize_format"):
+                    manager.standardize_format(settings["new_dataset"])
+                if settings.get("normalize_res"):
+                    manager.normalize_resolution(settings["new_dataset"])
+            except Exception as e:
+                QMessageBox.warning(self, "Offline Task Error", f"Error during preflight/hash checks:\n{e}")
+            
+            # 1. Open the new dataset in the UI
+            self.load_image_dataset_path(settings["new_dataset"])
+            
+            # 2. Enter Integration Mode
+            self.integration_mode = True
+            self.integration_main_dataset = settings["main_dataset"]
+            
+            # 3. Apply the Online Auto Tasks (if any)
+            if settings["remove_grayscale"]:
+                self.viat_remove_grayscale()
+            if settings["remove_duplicates"]:
+                self.viat_remove_duplicates()
+            if settings["auto_import"] and settings["json_path"]:
+                try:
+                    from utils.dataset_ops import auto_import_detections
+                    auto_import_detections(self, settings["json_path"])
+                    # Refresh UI
+                    if self.current_frame >= self.total_frames:
+                        self.current_frame = max(0, self.total_frames - 1)
+                    self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+                    self.load_current_image()
+                    self.update_frame_info()
+                    self.update_annotation_list()
+                except Exception as e:
+                    QMessageBox.warning(self, "Auto-Import Error", f"Error applying auto-import:\n{e}")
+                
+            # 4. Show the Finish Banner
+            self.integration_banner.setVisible(True)
+            self.statusBar.showMessage("Integration Mode active. Please review the dataset.", 10000)
+
+    @log_exceptions
+    def viat_finish_integration(self):
+        """Finalizes the integration mode and merges the dataset."""
+        from PyQt5.QtWidgets import QMessageBox
+        if not self.integration_mode or not self.integration_main_dataset:
+            return
+            
+        reply = QMessageBox.question(
+            self, "Finish Integration",
+            "Are you done reviewing? This will merge the current dataset into the Main Dataset.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            source_folder = ""
+            if hasattr(self, "_viat_dataset_info") and self._viat_dataset_info:
+                source_folder = self._viat_dataset_info.root
+            elif self.image_files:
+                source_folder = os.path.dirname(self.image_files[0])
+                
+            if not source_folder:
+                QMessageBox.warning(self, "Error", "Could not determine current dataset path.")
+                return
+                
+            # Launch the merge dialog directly, skipping the source folder selection
+            self.viat_merge_dataset(source_folder=source_folder, target_folder=self.integration_main_dataset)
+            
+            # Clean up integration mode
+            self.integration_mode = False
+            self.integration_main_dataset = ""
+            self.integration_banner.setVisible(False)
     @log_exceptions
     def setup_playback_timer(self):
         """Set up the timer for video playback."""
@@ -598,21 +732,17 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def open_image_folder(self):
-        """Open a folder of images OR a labeled dataset.
-
-        Uses utils.dataset_manager.scan_dataset() to auto-detect:
-          - single folder with images+labels mixed
-          - images/ + labels/ subfolders
-          - train/valid/test splits (each split either of the above)
-          - Roboflow YOLO exports (data.yaml)
-        and loads ALL splits + ALL labels in one pass.
-        """
+        """Open a folder of images OR a labeled dataset via file dialog."""
         folder_path = QFileDialog.getExistingDirectory(
             self, "Open Image Folder / Dataset", "", QFileDialog.ShowDirsOnly
         )
         if not folder_path:
             return
+        self.load_image_dataset_path(folder_path)
 
+    @log_exceptions
+    def load_image_dataset_path(self, folder_path):
+        """Load a folder of images OR a labeled dataset directly from a path."""
         # Reset existing state
         self.reset_media_state()
 
@@ -799,9 +929,24 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.critical(self, "Error", "No image files could be loaded.")
             return False
 
-        # Reload labels from disk (fresh), overwriting the project-saved ones
-        # so edits on disk since last save are reflected.
+        # Save the annotations and classes that were just loaded from the .viat file
+        saved_annotations = getattr(self, "frame_annotations", {})
+        saved_class_colors = getattr(self.canvas, "class_colors", {})
+        saved_class_attrs = getattr(self.canvas, "class_attributes", {})
+
+        # Load labels from disk to catch any new images/labels added externally
         result = load_dataset_into_app(self, info, BoundingBox)
+        
+        # CRITICAL FIX: The .viat project file is the source of truth for edits made in VIAT.
+        # We must overlay the project-saved annotations and classes on top of the disk scan
+        # so that unsaved VIAT edits and custom class names are not lost!
+        for frame_idx, anns in saved_annotations.items():
+            self.frame_annotations[frame_idx] = anns
+            
+        self.canvas.class_colors.update(saved_class_colors)
+        self.canvas.class_attributes.update(saved_class_attrs)
+        self.class_colors = self.canvas.class_colors
+        self.class_attributes = self.canvas.class_attributes
         self._viat_frame_to_split = result["frame_to_split"]
         self.image_files = result["image_files"]
         self.total_frames = len(self.image_files)
@@ -1057,6 +1202,16 @@ class VideoAnnotationTool(QMainWindow):
             and value != self.current_frame
         ):
             self.interpolation_manager.reset_cycle()
+
+        if hasattr(self, "object_visibility_manager") and self.object_visibility_manager and self.object_visibility_manager.active:
+            visible_frames = self.object_visibility_manager.get_visible_frame_numbers()
+            if visible_frames and value not in visible_frames:
+                # Value is outside the active range, force slider back to valid frame and ignore this event
+                self.frame_slider.blockSignals(True)
+                self.frame_slider.setValue(self.current_frame)
+                self.frame_slider.blockSignals(False)
+                return
+
 
         if hasattr(self, "is_image_dataset") and self.is_image_dataset:
             if 0 <= value < len(self.image_files):
@@ -1885,9 +2040,11 @@ class VideoAnnotationTool(QMainWindow):
             # Set up the application with the loaded data
             self.canvas.annotations = annotations
             self.class_colors = class_colors
+            self.canvas.class_colors = class_colors  # CRITICAL FIX
             self.current_frame = current_frame
             self.frame_annotations = frame_annotations
             self.class_attributes = class_attributes
+            self.canvas.class_attributes = class_attributes  # CRITICAL FIX
             self.current_style = current_style
             self.auto_show_attribute_dialog = auto_show_attribute_dialog
             self.use_previous_attributes = use_previous_attributes
@@ -4922,18 +5079,19 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def viat_start_object_visibility_mode(self):
-        """Enter per-object visibility editing mode."""
+        """Enter per-object visibility editing mode (toolbar-based, no dialog)."""
         if not self.frame_annotations:
             QMessageBox.warning(self, "Object Visibility", "No annotations loaded.")
             return
         if self.object_visibility_manager and self.object_visibility_manager.active:
-            return  # already active
-        self.object_visibility_manager = _ViatObjectVisibilityManager(self)
+            return
+        from utils.object_visibility import ObjectVisibilityManager
+        self.object_visibility_manager = ObjectVisibilityManager(self)
         if not self.object_visibility_manager.start():
             QMessageBox.warning(self, "Object Visibility", "No objects found (need actor_id attributes).")
             self.object_visibility_manager = None
             return
-        self._viat_show_object_visibility_dialog()
+        self._viat_show_object_visibility_toolbar()
 
     @log_exceptions
     def viat_exit_object_visibility_mode(self):
@@ -4941,290 +5099,248 @@ class VideoAnnotationTool(QMainWindow):
         if self.object_visibility_manager and self.object_visibility_manager.active:
             self.object_visibility_manager.exit()
         self.object_visibility_manager = None
-        if hasattr(self, '_viat_visibility_dialog') and self._viat_visibility_dialog:
-            self._viat_visibility_dialog.close()
-            self._viat_visibility_dialog = None
+        self._viat_hide_object_visibility_toolbar()
         self.statusBar.showMessage("Exited object visibility mode", 3000)
 
-    def _viat_show_object_visibility_dialog(self):
-        """Show the object visibility editing dialog."""
+    def _viat_show_object_visibility_toolbar(self):
+        """Create a toolbar with object-visibility controls (no dialog)."""
+        from PyQt5.QtWidgets import QToolBar, QLabel, QPushButton, QWidget, QHBoxLayout
         mgr = self.object_visibility_manager
         if not mgr or not mgr.active:
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Object Visibility Mode")
-        dialog.setMinimumWidth(500)
-        layout = QVBoxLayout(dialog)
 
-        # Status label
-        status_label = QLabel()
-        layout.addWidget(status_label)
+        # Remove old toolbar if it exists
+        if hasattr(self, '_viat_visibility_toolbar'):
+            self.removeToolBar(self._viat_visibility_toolbar)
 
-        # Object selector
-        obj_layout = QHBoxLayout()
-        obj_layout.addWidget(QLabel("Object:"))
-        obj_combo = QComboBox()
-        obj_combo.addItems(mgr.sorted_objects)
-        obj_combo.setCurrentText(mgr.current_object)
-        obj_layout.addWidget(obj_combo, 1)
-        layout.addLayout(obj_layout)
+        toolbar = QToolBar("Object Visibility", self)
+        toolbar.setObjectName("ObjectVisibilityToolbar")
+        self.addToolBar(toolbar)
 
-        # Ranges display
-        ranges_label = QLabel()
-        ranges_label.setWordWrap(True)
-        layout.addWidget(ranges_label)
+        # Status labels
+        self._viat_obj_label = QLabel()
+        toolbar.addWidget(self._viat_obj_label)
+
+        toolbar.addSeparator()
+
+        self._viat_range_label = QLabel()
+        toolbar.addWidget(self._viat_range_label)
+
+        toolbar.addSeparator()
 
         # Buttons
-        btn_layout = QHBoxLayout()
-        trim_start_btn = QPushButton("Set Start Here")
-        trim_end_btn = QPushButton("Set End Here")
-        del_frame_btn = QPushButton("Delete on This Frame")
-        del_obj_btn = QPushButton("Delete Whole Object")
-        btn_layout.addWidget(trim_start_btn)
-        btn_layout.addWidget(trim_end_btn)
-        btn_layout.addWidget(del_frame_btn)
-        btn_layout.addWidget(del_obj_btn)
-        layout.addLayout(btn_layout)
+        btn_prev_obj = QPushButton("< Prev Obj")
+        btn_next_obj = QPushButton("Next Obj >")
+        btn_prev_range = QPushButton("< Prev Range")
+        btn_next_range = QPushButton("Next Range >")
+        btn_set_start = QPushButton("Set Start")
+        btn_set_end = QPushButton("Set End")
+        btn_del_frame = QPushButton("Delete Frame")
+        btn_del_obj = QPushButton("Delete Object")
+        btn_finish = QPushButton("FINISH")
+        btn_finish.setStyleSheet("font-weight: bold; background-color: #4CAF50; color: white;")
+        btn_exit = QPushButton("Exit")
 
-        # Navigation
-        nav_layout = QHBoxLayout()
-        prev_obj_btn = QPushButton("< Prev Object")
-        next_obj_btn = QPushButton("Next Object >")
-        finish_btn = QPushButton("FINISH (Next Object)")
-        finish_btn.setStyleSheet("font-weight: bold; background-color: #4CAF50; color: white;")
-        exit_btn = QPushButton("Exit Mode")
-        nav_layout.addWidget(prev_obj_btn)
-        nav_layout.addWidget(next_obj_btn)
-        nav_layout.addWidget(finish_btn)
-        nav_layout.addWidget(exit_btn)
-        layout.addLayout(nav_layout)
+        for btn in [btn_prev_obj, btn_next_obj, btn_prev_range, btn_next_range,
+                    btn_set_start, btn_set_end, btn_del_frame, btn_del_obj,
+                    btn_finish, btn_exit]:
+            toolbar.addWidget(btn)
 
-        def update_status():
+        # Store widgets for updates
+        mgr.toolbar_widgets = {
+            'obj_label': self._viat_obj_label,
+            'range_label': self._viat_range_label,
+            'prev_obj': btn_prev_obj, 'next_obj': btn_next_obj,
+            'prev_range': btn_prev_range, 'next_range': btn_next_range,
+            'set_start': btn_set_start, 'set_end': btn_set_end,
+            'del_frame': btn_del_frame, 'del_obj': btn_del_obj,
+            'finish': btn_finish, 'exit': btn_exit,
+        }
+
+        def update_labels():
             s = mgr.get_status()
-            status_label.setText(
-                f"Object {s['object_index']+1}/{s['total_objects']}: "
-                f"{s['current_object']}  |  Frame: {s['current_frame']}  |  "
-                f"Object appears in {len(s['current_object_frames'])} frames"
+            self._viat_obj_label.setText(
+                f"Object: {s['current_object']} ({s['object_index']+1}/{s['total_objects']})"
             )
-            ranges = s['visible_ranges']
-            if ranges:
-                ranges_str = ", ".join(f"{a}-{b}" for a, b in ranges)
-                ranges_label.setText(f"Visible ranges: {ranges_str}")
+            r = s['current_range']
+            if r:
+                self._viat_range_label.setText(
+                    f"Range: {r[0]}-{r[1]} ({s['range_index']+1}/{s['total_ranges']})"
+                )
             else:
-                ranges_label.setText("No visible ranges (object may have been deleted)")
+                self._viat_range_label.setText("No ranges")
 
-        def on_obj_change(text):
-            mgr.select_object(text)
-            update_status()
+        def on_prev_obj():
+            mgr.prev_object()
+            update_labels()
 
-        def on_trim_start():
+        def on_next_obj():
+            mgr.next_object()
+            update_labels()
+
+        def on_prev_range():
+            mgr.prev_range()
+            update_labels()
+
+        def on_next_range():
+            mgr.next_range()
+            update_labels()
+
+        def on_set_start():
             mgr.trim_current_frame_as_start()
-            update_status()
-            self.load_current_frame_annotations()
+            update_labels()
 
-        def on_trim_end():
+        def on_set_end():
             mgr.trim_current_frame_as_end()
-            update_status()
-            self.load_current_frame_annotations()
+            update_labels()
 
         def on_del_frame():
             n = mgr.delete_current_object_on_current_frame()
-            update_status()
-            self.load_current_frame_annotations()
+            update_labels()
             self.statusBar.showMessage(f"Deleted {n} annotation(s) on this frame", 2000)
 
         def on_del_obj():
             reply = QMessageBox.question(
-                dialog, "Delete Object",
+                self, "Delete Object",
                 f"Delete ALL annotations for '{mgr.current_object}' across all frames?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
                 n = mgr.delete_object()
                 if not mgr.sorted_objects:
-                    QMessageBox.information(dialog, "Done", "All objects processed.")
                     self.viat_exit_object_visibility_mode()
                     return
-                obj_combo.clear()
-                obj_combo.addItems(mgr.sorted_objects)
-                obj_combo.setCurrentText(mgr.current_object)
-                update_status()
-                self.load_current_frame_annotations()
-                self.statusBar.showMessage(f"Deleted {n} annotations for object", 3000)
-
-        def on_prev_obj():
-            if mgr.prev_object():
-                obj_combo.setCurrentText(mgr.current_object)
-                update_status()
-
-        def on_next_obj():
-            if mgr.next_object():
-                obj_combo.setCurrentText(mgr.current_object)
-                update_status()
-            else:
-                QMessageBox.information(dialog, "Done", "This was the last object.")
+                update_labels()
+                self.statusBar.showMessage(f"Deleted {n} annotations", 3000)
 
         def on_finish():
             if mgr.next_object():
-                obj_combo.setCurrentText(mgr.current_object)
-                update_status()
+                update_labels()
             else:
-                QMessageBox.information(dialog, "All Done", "All objects have been processed.")
+                QMessageBox.information(self, "All Done", "All objects have been processed.")
                 self.viat_exit_object_visibility_mode()
 
         def on_exit():
             self.viat_exit_object_visibility_mode()
 
-        obj_combo.currentTextChanged.connect(on_obj_change)
-        trim_start_btn.clicked.connect(on_trim_start)
-        trim_end_btn.clicked.connect(on_trim_end)
-        del_frame_btn.clicked.connect(on_del_frame)
-        del_obj_btn.clicked.connect(on_del_obj)
-        prev_obj_btn.clicked.connect(on_prev_obj)
-        next_obj_btn.clicked.connect(on_next_obj)
-        finish_btn.clicked.connect(on_finish)
-        exit_btn.clicked.connect(on_exit)
+        btn_prev_obj.clicked.connect(on_prev_obj)
+        btn_next_obj.clicked.connect(on_next_obj)
+        btn_prev_range.clicked.connect(on_prev_range)
+        btn_next_range.clicked.connect(on_next_range)
+        btn_set_start.clicked.connect(on_set_start)
+        btn_set_end.clicked.connect(on_set_end)
+        btn_del_frame.clicked.connect(on_del_frame)
+        btn_del_obj.clicked.connect(on_del_obj)
+        btn_finish.clicked.connect(on_finish)
+        btn_exit.clicked.connect(on_exit)
 
-        update_status()
-        self._viat_visibility_dialog = dialog
-        dialog.exec_()
+        self._viat_visibility_toolbar = toolbar
+        self._viat_update_visibility_labels = update_labels
+        update_labels()
 
-    # -----------------------------------------------------------------
-    # Patch 6: remove-unverified toggle, seg video, JSON export, perf
-    # -----------------------------------------------------------------
-
-    @log_exceptions
-    def viat_toggle_remove_unverified(self):
-        """Toggle whether unverified annotations are removed on frame change."""
-        self.remove_unverified = not self.remove_unverified
-        state = "ON" if self.remove_unverified else "OFF"
-        self.statusBar.showMessage(f"Remove unverified labels: {state}", 3000)
-
-    @log_exceptions
-    def viat_export_json(self):
-        """Export all annotations to VIAT JSON format."""
-        if not self.frame_annotations:
-            QMessageBox.warning(self, "Export JSON", "No annotations to export.")
-            return
-        default_name = "annotations.json"
-        if self.video_filename:
-            base = os.path.splitext(os.path.basename(self.video_filename))[0]
-            default_name = base + "_annotations.json"
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export VIAT JSON", default_name,
-            "JSON Files (*.json);;All Files (*)",
-        )
-        if not filename:
-            return
-        # Build boxes_by_frame from frame_annotations
-        from utils.label_formats.viat_json import ViatJsonLabelFormat
-        boxes_by_frame = {}
-        for frame_num, anns in self.frame_annotations.items():
-            boxes = []
-            for ann in anns:
-                attrs = getattr(ann, "attributes", {}) or {}
-                boxes.append({
-                    "class_name": ann.class_name,
-                    "actor_id": attrs.get("actor_id", f"actor_{frame_num}"),
-                    "x": ann.rect.x(),
-                    "y": ann.rect.y(),
-                    "w": ann.rect.width(),
-                    "h": ann.rect.height(),
-                    "verified": getattr(ann, "verified", False),
-                    "segmentation": getattr(ann, "segmentation", None),
-                })
-            boxes_by_frame[frame_num] = boxes
-        fmt = ViatJsonLabelFormat()
-        content = fmt.dump(boxes_by_frame, (0, 0), [])
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(content)
-        total = sum(len(v) for v in boxes_by_frame.values())
-        self.statusBar.showMessage(
-            f"Exported {len(boxes_by_frame)} frames / {total} annotations to {filename}",
-            5000,
-        )
+    def _viat_hide_object_visibility_toolbar(self):
+        """Remove the object visibility toolbar."""
+        if hasattr(self, '_viat_visibility_toolbar'):
+            self.removeToolBar(self._viat_visibility_toolbar)
+            self._viat_visibility_toolbar.deleteLater()
+            del self._viat_visibility_toolbar
 
     @log_exceptions
     def viat_seg_video_pick_color(self):
-        """Pick a color from the current frame and start tracking an object."""
+        """Pick a color from the canvas by CLICKING on it (no X/Y dialog).
+
+        Enables canvas color-pick mode. The user clicks on the canvas, the
+        color at that point is extracted, and a small non-blocking dialog
+        asks for the class name + actor ID.
+        """
         if not self.cap and not self.is_image_dataset:
             QMessageBox.warning(self, "Seg Video", "Open a video first.")
             return
-        # Get the current frame
-        if self.cap and self.cap.isOpened():
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                QMessageBox.warning(self, "Seg Video", "Could not read current frame.")
+
+        # Enable color-pick mode on the canvas
+        self.canvas.color_pick_mode = True
+        self.canvas.setCursor(Qt.CrossCursor)
+        self.statusBar.showMessage("Click on an object in the canvas to pick its color...", 0)
+
+        def on_color_picked(x, y):
+            """Called when the user clicks on the canvas."""
+            # Get the current frame
+            if self.cap and self.cap.isOpened():
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+                ret, frame = self.cap.read()
+                if not ret or frame is None:
+                    return
+            elif self.is_image_dataset and self.image_files:
+                frame = cv2.imread(self.image_files[self.current_frame])
+            else:
                 return
-        elif self.is_image_dataset and self.image_files:
-            frame = cv2.imread(self.image_files[self.current_frame])
-        else:
-            return
 
-        # Show a dialog asking the user to click on the canvas, OR enter x,y
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Pick Object Color")
-        dialog.setMinimumWidth(400)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Enter the pixel coordinates of the object to track,\n"
-                                 "or use the spin boxes to adjust. The color at that\n"
-                                 "pixel will be tracked across the video."))
-        form = QFormLayout()
-        x_spin = QSpinBox(); x_spin.setRange(0, 99999); x_spin.setValue(100)
-        y_spin = QSpinBox(); y_spin.setRange(0, 99999); y_spin.setValue(100)
-        form.addRow("X:", x_spin); form.addRow("Y:", y_spin)
-        class_edit = QLineEdit(); class_edit.setPlaceholderText("class name (e.g. Helicopter)")
-        form.addRow("Class:", class_edit)
-        actor_edit = QLineEdit(); actor_edit.setPlaceholderText("actor ID (auto if empty)")
-        form.addRow("Actor ID:", actor_edit)
-        tol_spin = QSpinBox(); tol_spin.setRange(1, 60); tol_spin.setValue(15)
-        form.addRow("Color tolerance:", tol_spin)
-        min_area_spin = QSpinBox(); min_area_spin.setRange(1, 99999); min_area_spin.setValue(100)
-        form.addRow("Min area (px):", min_area_spin)
-        layout.addLayout(form)
+            from utils.seg_video_labeler import SegmentationVideoLabeler
+            tmp_labeler = SegmentationVideoLabeler(self)
+            color_hsv = tmp_labeler.pick_color_from_frame(frame, x, y)
+            self.statusBar.showMessage(f"Picked color at ({x},{y}): HSV={color_hsv}", 5000)
 
-        # Preview label
-        preview_label = QLabel()
-        layout.addWidget(preview_label)
+            # Show a small non-blocking dialog for class name + actor ID
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Add Tracked Object (HSV={color_hsv})")
+            dialog.setMinimumWidth(350)
+            from PyQt5.QtWidgets import QVBoxLayout, QFormLayout, QDialogButtonBox
+            layout = QVBoxLayout(dialog)
+            form = QFormLayout()
 
-        def update_preview():
-            x, y = x_spin.value(), y_spin.value()
-            if y < frame.shape[0] and x < frame.shape[1]:
-                from utils.seg_video_labeler import SegmentationVideoLabeler
-                tmp = SegmentationVideoLabeler(self)
-                hsv = tmp.pick_color_from_frame(frame, x, y)
-                preview_label.setText(f"Color at ({x},{y}): HSV={hsv}")
+            from PyQt5.QtWidgets import QLineEdit, QSpinBox
+            class_edit = QLineEdit()
+            class_edit.setPlaceholderText("class name (e.g. Helicopter)")
+            form.addRow("Class:", class_edit)
 
-        x_spin.valueChanged.connect(update_preview)
-        y_spin.valueChanged.connect(update_preview)
-        update_preview()
+            actor_edit = QLineEdit()
+            actor_edit.setPlaceholderText("auto if empty")
+            form.addRow("Actor ID:", actor_edit)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        class_name = class_edit.text().strip()
-        if not class_name:
-            QMessageBox.warning(self, "Seg Video", "Class name is required.")
-            return
+            tol_spin = QSpinBox(); tol_spin.setRange(1, 60); tol_spin.setValue(15)
+            form.addRow("Tolerance:", tol_spin)
 
-        if self.seg_labeler is None:
-            self.seg_labeler = _ViatSegLabeler(self)
-        color_hsv = self.seg_labeler.pick_color_from_frame(frame, x_spin.value(), y_spin.value())
-        self.seg_labeler.add_tracked_object(
-            color_hsv=color_hsv,
-            class_name=class_name,
-            actor_id=actor_edit.text().strip() or None,
-            tolerance=tol_spin.value(),
-            min_area=min_area_spin.value(),
-        )
-        self.statusBar.showMessage(
-            f"Added tracked object '{class_name}' (HSV={color_hsv}). "
-            f"Total tracked: {len(self.seg_labeler.tracked_objects)}", 4000,
-        )
+            min_area_spin = QSpinBox(); min_area_spin.setRange(1, 99999); min_area_spin.setValue(100)
+            form.addRow("Min area:", min_area_spin)
+
+            from PyQt5.QtWidgets import QCheckBox
+            merge_all_cb = QCheckBox("Create one big bounding box (Merge regions)")
+            merge_all_cb.setChecked(False) # Default to false since user wants to track instances
+            form.addRow("", merge_all_cb)
+
+            connect_spin = QSpinBox(); connect_spin.setRange(0, 500); connect_spin.setValue(10)
+            connect_spin.setToolTip("Pixel distance to connect small disconnected regions")
+            form.addRow("Connect Threshold:", connect_spin)
+
+            layout.addLayout(form)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+
+            if dialog.exec_() == QDialog.Accepted:
+                class_name = class_edit.text().strip()
+                if not class_name:
+                    return
+                if self.seg_labeler is None:
+                    from utils.seg_video_labeler import SegmentationVideoLabeler
+                    self.seg_labeler = SegmentationVideoLabeler(self)
+                self.seg_labeler.add_tracked_object(
+                    color_hsv=color_hsv,
+                    class_name=class_name,
+                    actor_id=actor_edit.text().strip() or None,
+                    tolerance=tol_spin.value(),
+                    min_area=min_area_spin.value(),
+                    merge_all=merge_all_cb.isChecked(),
+                    connect_threshold=connect_spin.value(),
+                )
+                self.statusBar.showMessage(
+                    f"Added '{class_name}' (HSV={color_hsv}). Total: {len(self.seg_labeler.tracked_objects)}. "
+                    f"Click another object or track all.", 5000,
+                )
+
+        self.canvas.color_pick_callback = on_color_picked
 
     @log_exceptions
     def viat_seg_video_track_all(self):
@@ -5282,6 +5398,69 @@ class VideoAnnotationTool(QMainWindow):
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
         self.statusBar.showMessage(f"Exported seg video JSON to {filename}", 5000)
+
+    @log_exceptions
+    def viat_export_json(self):
+        """Export all current annotations to VIAT custom JSON format."""
+        # Ensure current frame's annotations are synchronized back to self.frame_annotations
+        self.frame_annotations[self.current_frame] = self.canvas.annotations.copy()
+
+        # Check if we have any annotations
+        has_annotations = any(self.frame_annotations.values())
+        if not has_annotations:
+            QMessageBox.warning(self, "Export VIAT JSON", "No annotations to export!")
+            return
+
+        default_name = "annotations.json"
+        default_dir = ""
+        if self.video_filename:
+            base = os.path.splitext(os.path.basename(self.video_filename))[0]
+            default_name = base + "_viat.json"
+            default_dir = os.path.dirname(self.video_filename)
+        elif hasattr(self, "is_image_dataset") and self.is_image_dataset and self.image_files:
+            image_folder = os.path.dirname(self.image_files[0])
+            folder_name = os.path.basename(image_folder)
+            default_name = folder_name + "_viat.json"
+            default_dir = image_folder
+
+        default_path = os.path.join(default_dir, default_name) if default_dir else default_name
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export VIAT JSON", default_path,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        boxes_by_frame = {}
+        for frame_num, annotations in self.frame_annotations.items():
+            if not annotations:
+                continue
+            boxes_by_frame[frame_num] = []
+            for ann in annotations:
+                box_dict = {
+                    "class_name": ann.class_name,
+                    "x": ann.rect.x(),
+                    "y": ann.rect.y(),
+                    "w": ann.rect.width(),
+                    "h": ann.rect.height(),
+                    "verified": getattr(ann, "verified", False),
+                    "segmentation": getattr(ann, "segmentation", None),
+                }
+                actor_id = ann.attributes.get("actor_id") if hasattr(ann, "attributes") else None
+                if actor_id:
+                    box_dict["actor_id"] = actor_id
+                boxes_by_frame[frame_num].append(box_dict)
+
+        try:
+            from utils.label_formats.viat_json import ViatJsonLabelFormat
+            fmt = ViatJsonLabelFormat()
+            content = fmt.dump(boxes_by_frame, (0, 0), [])
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(content)
+            self.statusBar.showMessage(f"Exported VIAT JSON to {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export VIAT JSON: {e}")
 
     @log_exceptions
     def viat_perf_stats(self):
@@ -5364,6 +5543,128 @@ class VideoAnnotationTool(QMainWindow):
         QMessageBox.information(self, "Auto-Import Detections", msg)
         self.statusBar.showMessage(
             f"Moved {result['moved_images']} images to review_label/", 5000,
+        )
+
+    @log_exceptions
+    def viat_merge_dataset(self, source_folder=None, target_folder=None):
+        """Merge another dataset into the current (target) dataset."""
+        if not target_folder:
+            if not self._viat_ensure_dataset():
+                return
+            target_folder = self._viat_dataset_info.root
+
+        # Select source dataset if not provided
+        if not source_folder:
+            source_folder = QFileDialog.getExistingDirectory(
+                self, "Select Source Dataset to Merge", "", QFileDialog.ShowDirsOnly
+            )
+            if not source_folder:
+                return
+
+        # Default dataset name = source folder name
+        default_name = os.path.basename(source_folder)
+
+        # Show dialog: dataset name, split mode, class mapping
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QFormLayout, QLineEdit, QComboBox,
+            QDialogButtonBox, QLabel, QSpinBox, QTableWidget, QTableWidgetItem,
+            QHeaderView,
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Merge Dataset")
+        dialog.setMinimumWidth(550)
+        layout = QVBoxLayout(dialog)
+
+        form = QFormLayout()
+        name_edit = QLineEdit(default_name)
+        form.addRow("Dataset name (file prefix):", name_edit)
+
+        split_combo = QComboBox()
+        split_combo.addItems([
+            "Keep original splits",
+            "Random split (specify %)",
+            "All in train",
+            "All in valid",
+            "All in test",
+        ])
+        form.addRow("Split mode:", split_combo)
+
+        valid_spin = QSpinBox(); valid_spin.setRange(1, 50); valid_spin.setValue(10)
+        form.addRow("Valid % (if random):", valid_spin)
+
+        layout.addLayout(form)
+
+        # Check for unmatched classes
+        check_result = _viat_find_unmatched_classes(source_folder, target_folder)
+        unmatched = check_result['unmatched']
+        target_classes = check_result['target_classes']
+
+        if unmatched:
+            layout.addWidget(QLabel(
+                f"The following source classes have no match in the target dataset.\n"
+                f"Map each to a target class (or type a new name to create it):"
+            ))
+            table = QTableWidget(len(unmatched), 2)
+            table.setHorizontalHeaderLabels(["Source class", "Map to (target class)"])
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            for i, src_cls in enumerate(unmatched):
+                table.setItem(i, 0, QTableWidgetItem(src_cls))
+                combo_text = target_classes[0] if target_classes else src_cls
+                table.setItem(i, 1, QTableWidgetItem(combo_text))
+            layout.addWidget(table)
+        else:
+            table = None
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        dataset_name = name_edit.text().strip() or default_name
+        split_mode_map = {
+            0: "keep", 1: "random", 2: "all_train", 3: "all_valid", 4: "all_test"
+        }
+        split_mode = split_mode_map[split_combo.currentIndex()]
+
+        # Build class mapping
+        class_mapping = dict(check_result['matched'])
+        if table:
+            for i in range(table.rowCount()):
+                src = table.item(i, 0).text()
+                tgt = table.item(i, 1).text()
+                class_mapping[src] = tgt
+
+        # Progress
+        self.statusBar.showMessage(f"Merging {dataset_name} into target...")
+        QApplication.processEvents()
+
+        result = _viat_merge_dataset(
+            self, source_folder, target_folder,
+            dataset_name=dataset_name,
+            split_mode=split_mode,
+            random_valid_pct=valid_spin.value(),
+            class_mapping=class_mapping,
+            progress_callback=lambda cur, tot, msg: self.statusBar.showMessage(f"Merging {cur}/{tot}: {msg}", 0),
+        )
+
+        if result.get('error'):
+            QMessageBox.warning(self, "Merge Error", result['error'])
+            return
+
+        msg = (
+            f"Merge complete:\n"
+            f"  Images copied: {result['images_copied']}\n"
+            f"  Labels copied: {result['labels_copied']}\n"
+            f"  Classes mapped: {result['classes_mapped']}\n"
+            f"  Skipped: {result['skipped']}\n"
+            f"  Dataset name: {result['dataset_name']}"
+        )
+        QMessageBox.information(self, "Merge Complete", msg)
+        self.statusBar.showMessage(
+            f"Merged {result['images_copied']} images from {dataset_name}", 5000
         )
 
     @log_exceptions

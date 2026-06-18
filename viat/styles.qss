@@ -1,0 +1,121 @@
+/* Main application styling */
+QMainWindow {
+    background-color: #1e2124;
+    color: #e0e0e0;
+}
+
+QWidget {
+    background-color: #1e2124;
+    color: #e0e0e0;
+    font-family: "Outfit", "Segoe UI", sans-serif;
+}
+
+/* Toolbars */
+QToolBar {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #2b2e33, stop: 1 #22252a);
+    border: none;
+    border-bottom: 1px solid #36393f;
+    border-top: 1px solid #36393f;
+    spacing: 5px;
+    padding: 5px;
+}
+
+QToolBar QPushButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 6px;
+    color: #e0e0e0;
+}
+
+QToolBar QPushButton:hover {
+    background-color: #36393f;
+    border: 1px solid #4f545c;
+}
+
+QToolBar QPushButton:pressed {
+    background-color: #4f545c;
+}
+
+/* Specific finish button style */
+QPushButton#FinishButton {
+    background-color: #4CAF50;
+    color: white;
+    font-weight: bold;
+    border-radius: 4px;
+    padding: 6px 12px;
+}
+QPushButton#FinishButton:hover {
+    background-color: #45a049;
+}
+
+/* Dock Widgets */
+QDockWidget {
+    titlebar-close-icon: url(close.png);
+    titlebar-normal-icon: url(float.png);
+    border: 1px solid #36393f;
+    color: #e0e0e0;
+}
+
+QDockWidget::title {
+    text-align: left;
+    background: #2b2e33;
+    padding-left: 10px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+/* Lists and Trees */
+QListView, QTreeView, QListWidget {
+    background-color: #2b2e33;
+    alternate-background-color: #36393f;
+    border: 1px solid #202225;
+    border-radius: 4px;
+    outline: none;
+}
+
+QListView::item, QTreeView::item {
+    padding: 6px;
+    border-bottom: 1px solid #36393f;
+}
+
+QListView::item:hover, QTreeView::item:hover {
+    background-color: #4f545c;
+}
+
+QListView::item:selected, QTreeView::item:selected {
+    background-color: #7289da;
+    color: white;
+}
+
+/* Sliders */
+QSlider::groove:horizontal {
+    border: 1px solid #202225;
+    height: 6px;
+    background: #36393f;
+    margin: 2px 0;
+    border-radius: 3px;
+}
+
+QSlider::handle:horizontal {
+    background: #7289da;
+    border: 1px solid #5b6eae;
+    width: 14px;
+    height: 14px;
+    margin: -4px 0;
+    border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #8ea1e1;
+}
+
+QSlider::sub-page:horizontal {
+    background: #7289da;
+    border-radius: 3px;
+}
+
+/* Labels */
+QLabel {
+    color: #e0e0e0;
+}

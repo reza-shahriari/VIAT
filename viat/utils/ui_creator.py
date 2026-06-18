@@ -48,18 +48,15 @@ class UICreator:
         # Edit menu
         self.create_edit_menu(menubar)
 
+        # View menu
+        self.create_view_menu(menubar)
+
         # Tools menu
         self.create_tools_menu(menubar)
 
-        # Settings menu
-        self.main_window.settings_menu = menubar.addMenu("Settings")
-        self.create_settings_menu(self.main_window.settings_menu)
-
-        # Style menu
-        self.create_style_menu(menubar)
-
         # Help menu
         self.create_help_menu(menubar)
+
 
     def create_file_menu(self, menubar):
         """Create the File menu and its actions."""
@@ -71,9 +68,10 @@ class UICreator:
         open_action.triggered.connect(self.main_window.open_video)
         file_menu.addAction(open_action)
 
+
         # Open Image Folder action
         open_image_folder_action = QAction("Open Image Folder", self.main_window)
-        open_image_folder_action.setShortcut("Ctrl+I")
+        open_image_folder_action.setShortcut("Ctrl+Shift+O")
         open_image_folder_action.triggered.connect(self.main_window.open_image_folder)
         file_menu.addAction(open_image_folder_action)
 
@@ -130,15 +128,45 @@ class UICreator:
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
 
-        # Clear Annotations action
-        clear_action = QAction("Clear Annotations", self.main_window)
-        clear_action.triggered.connect(self.main_window.clear_annotations)
-        edit_menu.addAction(clear_action)
+        # Undo action
+        undo_action = QAction("&Undo", self.main_window)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.setStatusTip("Undo the last action")
+        undo_action.triggered.connect(self.main_window.undo)
+        edit_menu.addAction(undo_action)
+
+        # Redo action
+        redo_action = QAction("&Redo", self.main_window)
+        redo_action.setShortcuts(["Ctrl+Y", "Ctrl+Shift+Z"])
+        redo_action.setStatusTip("Redo the last undone action")
+        redo_action.triggered.connect(self.main_window.redo)
+        edit_menu.addAction(redo_action)
+
+        edit_menu.addSeparator()
 
         # Add Annotation action
         add_action = QAction("Add Annotation", self.main_window)
         add_action.triggered.connect(self.main_window.add_annotation)
         edit_menu.addAction(add_action)
+
+        # Delete Selected action
+        delete_selected_action = QAction("Delete Selected", self.main_window)
+        delete_selected_action.setShortcut("Del")
+        delete_selected_action.triggered.connect(self.main_window.annotation_dock.delete_selected_annotation)
+        edit_menu.addAction(delete_selected_action)
+
+        # Clear Annotations action
+        clear_action = QAction("Clear All Annotations", self.main_window)
+        clear_action.triggered.connect(self.main_window.clear_annotations)
+        edit_menu.addAction(clear_action)
+
+        # Select All action
+        select_all_action = QAction("Select &All", self.main_window)
+        select_all_action.setShortcut("Ctrl+A")
+        select_all_action.triggered.connect(self.main_window.select_all_annotations)
+        edit_menu.addAction(select_all_action)
+
+        edit_menu.addSeparator()
 
         # Batch Edit Annotations action
         batch_edit_action = QAction("Batch Edit Annotations", self.main_window)
@@ -155,22 +183,29 @@ class UICreator:
 
         edit_menu.addSeparator()
 
-        undo_action = QAction("&Undo", self.main_window)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.setStatusTip("Undo the last action")
-        undo_action.triggered.connect(self.main_window.undo)
-        edit_menu.addAction(undo_action)
+        # Preferences / Settings
+        preferences_menu = edit_menu.addMenu("Preferences")
+        self.create_settings_menu(preferences_menu)
 
-        redo_action = QAction("&Redo", self.main_window)
-        redo_action.setShortcut("Ctrl+Y")
-        redo_action.setStatusTip("Redo the last undone action")
-        redo_action.triggered.connect(self.main_window.redo)
-        edit_menu.addAction(redo_action)
+    def create_view_menu(self, menubar):
+        """Create the View menu and its actions."""
+        view_menu = menubar.addMenu("View")
 
-        select_all_action = QAction("Select &All", self.main_window)
-        select_all_action.setShortcut("Ctrl+A")
-        select_all_action.triggered.connect(self.main_window.select_all_annotations)
-        edit_menu.addAction(select_all_action)
+        # Toggle Docks action
+        toggle_docks_action = QAction("Toggle Side Panel", self.main_window, checkable=True)
+        toggle_docks_action.setChecked(True)
+        def toggle_side_panel(checked):
+            if hasattr(self.main_window, 'annotation_dock'):
+                self.main_window.annotation_dock.setVisible(checked)
+            if hasattr(self.main_window, 'class_dock'):
+                self.main_window.class_dock.setVisible(checked)
+        toggle_docks_action.triggered.connect(toggle_side_panel)
+        view_menu.addAction(toggle_docks_action)
+
+        view_menu.addSeparator()
+
+        # Add Style Menu as a submenu
+        self.create_style_menu(view_menu)
 
     def create_tools_menu(self, menubar):
         """Create the Tools menu and its actions."""
@@ -290,18 +325,32 @@ class UICreator:
             self.main_window.change_annotation_method
         )
         self.main_window.toolbar.addWidget(self.main_window.method_selector)
-        # Add pan tool button
+
+        self.main_window.toolbar.addSeparator()
+
+        # Add Tracking Mode button (made into a cleaner tool button instead of large push button)
+        self.tracking_toggle_btn = QPushButton("Tracking Mode")
+        self.tracking_toggle_btn.setCheckable(True)
+        self.tracking_toggle_btn.setToolTip("Toggle automatic tracking ID assignment")
+        self.tracking_toggle_btn.toggled.connect(self.main_window.toggle_tracking_mode)
+        self.main_window.toolbar.addWidget(self.tracking_toggle_btn)
+        self.main_window.tracking_toggle_btn = self.tracking_toggle_btn
+
+        # Add pan tool action
         self.pan_tool_action = QAction("Pan Tool", self.main_window)
         self.pan_tool_action.setIcon(self.main_window.icon_provider.get_icon("pan-tool"))
+        self.pan_tool_action.setShortcut("P")
         self.pan_tool_action.setCheckable(True)
         self.pan_tool_action.setChecked(False)
-        self.pan_tool_action.setToolTip("Enable pan mode (left-click to pan the canvas)")
+        self.pan_tool_action.setToolTip("Enable pan mode (left-click to pan the canvas) [P]")
         self.pan_tool_action.triggered.connect(self.main_window.toggle_pan_mode)
         self.main_window.toolbar.addAction(self.pan_tool_action)
         self.main_window.pan_tool_action = self.pan_tool_action
+
+        self.main_window.toolbar.addSeparator()
        
         # Add verification mode toggle
-        self.verify_mode_action = QAction("Atuo Clean Mode", self.main_window)
+        self.verify_mode_action = QAction("Auto Clean Mode", self.main_window)
         self.verify_mode_action.setCheckable(True)
         self.verify_mode_action.setChecked(False)
         self.verify_mode_action.setToolTip("Toggle verification mode (delete unverified annotations when changing frames)")
@@ -320,14 +369,6 @@ class UICreator:
         verify_all_action.triggered.connect(self.main_window.verify_all_annotations)
         self.main_window.toolbar.addAction(verify_all_action)
 
-        # Add Track ID button
-        self.tracking_toggle_btn = QPushButton("Tracking Mode")
-        self.tracking_toggle_btn.setCheckable(True)
-        self.tracking_toggle_btn.setToolTip("Toggle automatic tracking ID assignment")
-        self.tracking_toggle_btn.toggled.connect(self.main_window.toggle_tracking_mode)
-        self.main_window.toolbar.addWidget(self.tracking_toggle_btn)
-        self.main_window.tracking_toggle_btn = self.tracking_toggle_btn
-
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
         # Annotation dock
@@ -341,6 +382,12 @@ class UICreator:
         self.main_window.addDockWidget(
             Qt.RightDockWidgetArea, self.main_window.class_dock
         )
+
+        # Tabify them to create a collapsible side panel
+        self.main_window.tabifyDockWidget(
+            self.main_window.annotation_dock, self.main_window.class_dock
+        )
+        self.main_window.annotation_dock.raise_()
 
     def create_status_bar(self):
         """Create the status bar."""
@@ -419,6 +466,12 @@ class UICreator:
 
     def create_settings_menu(self, menubar):
         """Create the Settings menu and its actions."""
+        # Dark mode toggle
+        darkmode_action = QAction("Enable Dark Mode", self.main_window, checkable=True)
+        darkmode_action.setChecked(getattr(self.main_window, "dark_mode_enabled", False))
+        darkmode_action.triggered.connect(self.main_window.toggle_dark_mode)
+        menubar.addAction(darkmode_action)
+
         # Auto-save toggle
         autosave_action = QAction("Enable Auto-save", self.main_window, checkable=True)
         autosave_action.setChecked(self.main_window.autosave_enabled)
@@ -427,6 +480,7 @@ class UICreator:
             "Automatically save the project at regular intervals"
         )
         menubar.addAction(autosave_action)
+
 
         # Auto-save interval submenu
         interval_menu = menubar.addMenu("Auto-save Interval")

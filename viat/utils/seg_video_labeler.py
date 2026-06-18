@@ -75,6 +75,8 @@ class SegmentationVideoLabeler:
         actor_id: str = None,
         tolerance: int = None,
         min_area: int = None,
+        merge_all: bool = True,
+        connect_threshold: int = 10,
     ) -> dict:
         """Register a new object to track by color.
 
@@ -84,6 +86,8 @@ class SegmentationVideoLabeler:
             actor_id: unique ID (auto-generated if None).
             tolerance: HSV tolerance (default self.default_tolerance).
             min_area: minimum contour area (default self.default_min_area).
+            merge_all: whether to merge all contours into a single bounding box.
+            connect_threshold: pixel distance to connect small disconnected regions.
 
         Returns the tracked-object dict.
         """
@@ -96,7 +100,9 @@ class SegmentationVideoLabeler:
             "min_area": min_area or self.default_min_area,
             "class_name": class_name,
             "actor_id": actor_id,
-            "boxes": {},  # {frame_num: box_dict}
+            "merge_all": merge_all,
+            "connect_threshold": connect_threshold,
+            "boxes": {},  # {frame_num: [box_dict_1, box_dict_2, ...]}
         }
         self.tracked_objects.append(obj)
         return obj
@@ -105,7 +111,7 @@ class SegmentationVideoLabeler:
     # Color tracking (core)
     # ------------------------------------------------------------------ #
 
-    def _build_mask(self, frame_hsv, color_hsv, tolerance) -> "np.ndarray":
+    def _build_mask(self, frame_hsv, color_hsv, tolerance, connect_threshold=10) -> "np.ndarray":
         """Build a binary mask for pixels matching the target HSV color."""
         h, s, v = color_hsv
         # Hue wraps around 0/180 in OpenCV, so handle the wrap
@@ -129,54 +135,78 @@ class SegmentationVideoLabeler:
         # Clean up: morphological opening then closing
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        if connect_threshold > 0:
+            k_size = max(3, connect_threshold)
+            close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        else:
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         return mask
 
-    def _mask_to_box(
-        self, mask, min_area: int, simplify: int = 10
-    ) -> Optional[dict]:
-        """Extract the largest contour from a mask and compute bbox + polygon.
+    def _mask_to_boxes(
+        self, mask, min_area: int, simplify: int = 10, merge_all: bool = True
+    ) -> List[dict]:
+        """Extract contours from a mask and compute bbox + polygon.
 
-        Returns None if no contour meets the min_area threshold.
+        Returns an empty list if no contour meets the min_area threshold.
+        If merge_all is True, returns a single bounding box containing all valid contours.
+        If merge_all is False, returns a list of bounding boxes, one for each valid contour.
         """
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            return None
+            return []
 
         # Keep only contours above min_area
         valid = [c for c in contours if cv2.contourArea(c) >= min_area]
         if not valid:
-            return None
+            return []
 
-        # Merge all valid contours' bounding box
-        all_points = np.vstack(valid)
-        x, y, w, h = cv2.boundingRect(all_points)
+        if merge_all:
+            # Merge all valid contours' bounding box
+            all_points = np.vstack(valid)
+            x, y, w, h = cv2.boundingRect(all_points)
 
-        # Build a simplified polygon from the largest contour
-        largest = max(valid, key=cv2.contourArea)
-        epsilon = simplify
-        approx = cv2.approxPolyDP(largest, epsilon, True)
-        polygon = [(int(p[0][0]), int(p[0][1])) for p in approx]
+            # Build a simplified polygon from the largest contour
+            largest = max(valid, key=cv2.contourArea)
+            epsilon = simplify
+            approx = cv2.approxPolyDP(largest, epsilon, True)
+            polygon = [(int(p[0][0]), int(p[0][1])) for p in approx]
 
-        return {
-            "x": int(x),
-            "y": int(y),
-            "w": int(w),
-            "h": int(h),
-            "segmentation": polygon if len(polygon) >= 3 else None,
-            "area": int(cv2.contourArea(largest)),
-        }
+            return [{
+                "x": int(x),
+                "y": int(y),
+                "w": int(w),
+                "h": int(h),
+                "segmentation": polygon if len(polygon) >= 3 else None,
+                "area": int(cv2.contourArea(largest)),
+            }]
+        else:
+            boxes = []
+            for c in valid:
+                x, y, w, h = cv2.boundingRect(c)
+                epsilon = simplify
+                approx = cv2.approxPolyDP(c, epsilon, True)
+                polygon = [(int(p[0][0]), int(p[0][1])) for p in approx]
+                boxes.append({
+                    "x": int(x),
+                    "y": int(y),
+                    "w": int(w),
+                    "h": int(h),
+                    "segmentation": polygon if len(polygon) >= 3 else None,
+                    "area": int(cv2.contourArea(c)),
+                })
+            return boxes
 
-    def track_object_on_frame(self, obj: dict, frame) -> Optional[dict]:
+    def track_object_on_frame(self, obj: dict, frame) -> List[dict]:
         """Track a single object on a single frame.
 
-        Returns the box dict, or None if the object isn't visible.
+        Returns a list of box dicts.
         """
         if frame is None:
-            return None
+            return []
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = self._build_mask(hsv, obj["color_hsv"], obj["tolerance"])
-        return self._mask_to_box(mask, obj["min_area"], self.default_simplify)
+        mask = self._build_mask(hsv, obj["color_hsv"], obj["tolerance"], obj.get("connect_threshold", 10))
+        return self._mask_to_boxes(mask, obj["min_area"], self.default_simplify, obj.get("merge_all", True))
 
     def track_all_objects(
         self,
@@ -222,12 +252,12 @@ class SegmentationVideoLabeler:
 
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             for obj in self.tracked_objects:
-                mask = self._build_mask(hsv, obj["color_hsv"], obj["tolerance"])
-                box = self._mask_to_box(mask, obj["min_area"], self.default_simplify)
-                if box:
-                    obj["boxes"][frame_num] = box
-                    per_object[obj["actor_id"]] += 1
-                    total_boxes += 1
+                mask = self._build_mask(hsv, obj["color_hsv"], obj["tolerance"], obj.get("connect_threshold", 10))
+                boxes = self._mask_to_boxes(mask, obj["min_area"], self.default_simplify, obj.get("merge_all", True))
+                if boxes:
+                    obj["boxes"][frame_num] = boxes
+                    per_object[obj["actor_id"]] += len(boxes)
+                    total_boxes += len(boxes)
 
             frames_processed += 1
             if progress_callback:
@@ -271,23 +301,26 @@ class SegmentationVideoLabeler:
                 )
 
             color = app.canvas.class_colors[class_name]
-            for frame_num, box in obj["boxes"].items():
-                rect = QRect(box["x"], box["y"], max(1, box["w"]), max(1, box["h"]))
-                ann = bbox_cls(
-                    rect=rect,
-                    class_name=class_name,
-                    attributes={"actor_id": actor_id},
-                    color=color,
-                    source="manual",
-                    score=1.0,
-                    segmentation=box.get("segmentation"),
-                )
-                ann.verified = True  # user picked this, so it's accepted
-
-                if frame_num not in app.frame_annotations:
-                    app.frame_annotations[frame_num] = []
-                app.frame_annotations[frame_num].append(ann)
-                added += 1
+            for frame_num, boxes in obj["boxes"].items():
+                if isinstance(boxes, dict):
+                    boxes = [boxes]
+                for box in boxes:
+                    rect = QRect(box["x"], box["y"], max(1, box["w"]), max(1, box["h"]))
+                    ann = bbox_cls(
+                        rect=rect,
+                        class_name=class_name,
+                        attributes={"actor_id": actor_id},
+                        color=color,
+                        source="manual",
+                        score=1.0,
+                        segmentation=box.get("segmentation"),
+                    )
+                    ann.verified = True  # user picked this, so it's accepted
+    
+                    if frame_num not in app.frame_annotations:
+                        app.frame_annotations[frame_num] = []
+                    app.frame_annotations[frame_num].append(ann)
+                    added += 1
 
         return added
 
@@ -301,19 +334,22 @@ class SegmentationVideoLabeler:
 
         boxes_by_frame = {}
         for obj in self.tracked_objects:
-            for frame_num, box in obj["boxes"].items():
-                if frame_num not in boxes_by_frame:
-                    boxes_by_frame[frame_num] = []
-                boxes_by_frame[frame_num].append({
-                    "class_name": obj["class_name"],
-                    "actor_id": obj["actor_id"],
-                    "x": box["x"],
-                    "y": box["y"],
-                    "w": box["w"],
-                    "h": box["h"],
-                    "verified": True,
-                    "segmentation": box.get("segmentation"),
-                })
+            for frame_num, boxes in obj["boxes"].items():
+                if isinstance(boxes, dict):
+                    boxes = [boxes]
+                for box in boxes:
+                    if frame_num not in boxes_by_frame:
+                        boxes_by_frame[frame_num] = []
+                    boxes_by_frame[frame_num].append({
+                        "class_name": obj["class_name"],
+                        "actor_id": obj["actor_id"],
+                        "x": box["x"],
+                        "y": box["y"],
+                        "w": box["w"],
+                        "h": box["h"],
+                        "verified": True,
+                        "segmentation": box.get("segmentation"),
+                    })
 
         fmt = ViatJsonLabelFormat()
         return fmt.dump(boxes_by_frame, (0, 0), [])
