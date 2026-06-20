@@ -477,6 +477,7 @@ def remove_class_and_images(
     app,
     class_names: List[str],
     *,
+    remove_images: bool = True,
     dest_subfolder: str = "removed/class_filtered",
 ) -> Dict:
     """Move all frames whose labels contain any of *class_names* to a subfolder.
@@ -488,34 +489,105 @@ def remove_class_and_images(
     Args:
         app: main window.
         class_names: list of class names to remove (e.g. ["car", "truck"]).
-        dest_subfolder: where to move the frames.
+        remove_images: whether to move the frames (True) or just remove labels (False).
+        dest_subfolder: where to move the frames (if remove_images is True).
 
     Returns:
-        dict: moved_images, matched_frames (list), dest_dir
+        dict: moved_images, matched_frames (list), dest_dir, etc.
     """
     target = set(class_names)
     matched = []
-    for fidx, anns in getattr(app, "frame_annotations", {}).items():
-        for ann in anns:
-            if getattr(ann, "class_name", None) in target:
-                matched.append(fidx)
-                break
 
-    if not matched:
-        append_dataset_log(
-            app, "Removed class+images", affected=0,
-            details=f"no frames matched classes {class_names}",
+    if remove_images:
+        for fidx, anns in getattr(app, "frame_annotations", {}).items():
+            for ann in anns:
+                if getattr(ann, "class_name", None) in target:
+                    matched.append(fidx)
+                    break
+
+        if not matched:
+            append_dataset_log(
+                app, "Removed class+images", affected=0,
+                details=f"no frames matched classes {class_names}",
+            )
+            return {"moved_images": 0, "matched_frames": [], "dest_dir": None}
+
+        result = move_frames_to(
+            app, matched,
+            dest_subfolder=dest_subfolder,
+            log_operation="Removed class + images",
+            log_details=f"classes={list(target)}, {len(matched)} frames -> {dest_subfolder}/",
         )
-        return {"moved_images": 0, "matched_frames": [], "dest_dir": None}
+        result["matched_frames"] = matched
+        return result
+    else:
+        # Just remove labels
+        affected_frames = 0
+        removed_boxes = 0
+        info = getattr(app, "_viat_dataset_info", None)
+        
+        # We need the format to write back to disk
+        fmt = None
+        if info:
+            try:
+                from utils.dataset_manager import get_dataset_format
+                fmt = get_dataset_format(app, info)
+            except Exception:
+                pass
 
-    result = move_frames_to(
-        app, matched,
-        dest_subfolder=dest_subfolder,
-        log_operation="Removed class + images",
-        log_details=f"classes={list(target)}, {len(matched)} frames -> {dest_subfolder}/",
-    )
-    result["matched_frames"] = matched
-    return result
+        for fidx, anns in getattr(app, "frame_annotations", {}).items():
+            new_anns = [a for a in anns if getattr(a, "class_name", None) not in target]
+            if len(new_anns) != len(anns):
+                removed_boxes += (len(anns) - len(new_anns))
+                affected_frames += 1
+                app.frame_annotations[fidx] = new_anns
+                matched.append(fidx)
+
+                # Save back to disk if format is available
+                if fmt and fidx < len(getattr(app, "image_files", [])):
+                    import cv2
+                    img_path = app.image_files[fidx]
+                    img_h, img_w = 1080, 1920
+                    # Quick size read
+                    try:
+                        from utils.dataset_ops import _img_size
+                        size = _img_size(img_path)
+                        if size:
+                            img_w, img_h = size
+                        else:
+                            img_obj = cv2.imread(img_path)
+                            if img_obj is not None:
+                                img_h, img_w = img_obj.shape[:2]
+                    except Exception:
+                        pass
+                        
+                    boxes_for_dump = []
+                    for ann in new_anns:
+                        boxes_for_dump.append({
+                            "class_name": getattr(ann, "class_name", ""),
+                            "x": ann.rect.x(), "y": ann.rect.y(),
+                            "w": ann.rect.width(), "h": ann.rect.height()
+                        })
+                    
+                    try:
+                        label_content = fmt.dump(boxes_for_dump, (img_w, img_h), info.classes)
+                        label_path = _find_label_for_frame(app, info, fidx)
+                        if label_path:
+                            os.makedirs(os.path.dirname(label_path), exist_ok=True)
+                            with open(label_path, "w", encoding="utf-8") as lf:
+                                lf.write(label_content)
+                    except Exception as e:
+                        print(f"Error saving label for frame {fidx}: {e}")
+
+        append_dataset_log(
+            app, "Removed class labels", affected=removed_boxes,
+            details=f"classes={list(target)}, from {affected_frames} frames",
+        )
+        # We might also want to remove the class from app.canvas.class_colors and info.classes?
+        # Often keeping it is safer unless asked, but usually if we delete all instances we don't necessarily delete the class definition.
+        # But we'll leave it in the class list.
+
+        return {"moved_images": 0, "matched_frames": matched, "affected_frames": affected_frames, "removed_boxes": removed_boxes, "dest_dir": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -525,178 +597,196 @@ def remove_class_and_images(
 
 def auto_import_detections(
     app,
-    json_path: str,
+    json_paths,
     *,
     move_to_review: bool = True,
     add_as_annotations: bool = False,
+    target_classes=None,
     review_subfolder: str = "review_label",
     bbox_cls=None,
-) -> Dict:
-    """Import a YOLO-detections JSON and move flagged images to review_label/.
+) -> dict:
+    """Import YOLO-detections JSON(s) and move flagged images to review_label/.
 
-    Reads the JSON produced by yolo_detect.py. For each image that has
-    detections:
-      1. Moves the image + its existing label to review_label/.
-      2. (optionally) Copies the detections JSON to review_label/ so the user
-         can import them when reviewing.
-
-    Note: detections are NOT added to the main frame_annotations, because the
-    images are moved OUT of the main dataset. The detections JSON is preserved
-    alongside the moved images so the user can import it when they open the
-    review_label/ folder.
-
-    Args:
-        app: the VideoAnnotationTool main window.
-        json_path: path to the _viat_detections.json file.
-        move_to_review: if True, move flagged images to review_label/.
-        add_as_annotations: if True, add YOLO detections to frame_annotations
-            for images that AREN'T moved (rarely useful). Default False.
-        review_subfolder: where to move flagged images.
-        bbox_cls: the BoundingBox class (for constructing annotations).
-
-    Returns:
-        dict: {flagged_images, moved_images, annotations_added, total_detections,
-               json_copied_to}
+    Reads the JSON(s) produced by yolo_detect.py.
+    Filters by `target_classes` if provided.
+    Injects the detections into the label file on disk *before* moving.
     """
     import json
     import shutil as _shutil
+    import os
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+    import random
 
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    if isinstance(json_paths, str):
+        json_paths = [json_paths]
+    
+    if target_classes is not None:
+        target_classes = [c.lower() for c in target_classes]
 
-    # The JSON has { "_metadata": {...}, "frames": { "0000": {"actors": {...}} } }
-    metadata = data.get("_metadata", {})
-    frames = data.get("frames", data)  # fallback: top-level is frames
-
-    # Map: image file path -> detections
-    image_files_list = metadata.get("image_files", [])
     flagged_paths = []
     detections_by_path = {}
     total_detections = 0
 
-    for frame_key, frame_data in frames.items():
+    # 1. Parse all JSONs
+    for jpath in json_paths:
         try:
-            frame_idx = int(frame_key)
-        except (ValueError, TypeError):
+            with open(jpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
             continue
 
-        actors = frame_data.get("actors", {}) if isinstance(frame_data, dict) else {}
-        if not actors:
-            continue
+        metadata = data.get("_metadata", {})
+        frames = data.get("frames", data)
+        image_files_list = metadata.get("image_files", [])
 
-        # Find the image path for this frame index
-        if frame_idx < len(image_files_list):
-            img_path = image_files_list[frame_idx]
-        else:
-            continue
+        for frame_key, frame_data in frames.items():
+            try:
+                frame_idx = int(frame_key)
+            except (ValueError, TypeError):
+                continue
 
-        flagged_paths.append(img_path)
-        detections_by_path[img_path] = list(actors.values())
-        total_detections += len(actors)
+            actors = frame_data.get("actors", {}) if isinstance(frame_data, dict) else {}
+            if not actors:
+                continue
+
+            if frame_idx < len(image_files_list):
+                img_path = image_files_list[frame_idx]
+            else:
+                continue
+
+            # Filter by target_classes
+            filtered_actors = []
+            for act in actors.values():
+                cls_name = act.get("class", "").lower()
+                if not target_classes or cls_name in target_classes:
+                    filtered_actors.append(act)
+                    
+            if not filtered_actors:
+                continue
+
+            if img_path not in detections_by_path:
+                flagged_paths.append(img_path)
+                detections_by_path[img_path] = []
+                
+            detections_by_path[img_path].extend(filtered_actors)
+            total_detections += len(filtered_actors)
 
     if not flagged_paths:
         append_dataset_log(
             app, "Auto-import detections", affected=0,
-            details="no detections found in JSON",
+            details="no relevant detections found in JSON(s)",
         )
         return {
-            "flagged_images": 0,
-            "moved_images": 0,
-            "annotations_added": 0,
-            "total_detections": 0,
+            "flagged_images": 0, "moved_images": 0,
+            "annotations_added": 0, "total_detections": 0,
             "json_copied_to": None,
         }
 
-    # Find frame indices in app.image_files that match flagged paths
+    # Match paths to internal image_files
     image_files = list(getattr(app, "image_files", []) or [])
-    flagged_abspaths = {os.path.abspath(p) for p in flagged_paths}
+    flagged_abspaths = {os.path.abspath(p): p for p in flagged_paths}
     flagged_indices = []
+    idx_to_img_path = {}
     for idx, img_path in enumerate(image_files):
-        if os.path.abspath(img_path) in flagged_abspaths:
+        abs_p = os.path.abspath(img_path)
+        if abs_p in flagged_abspaths:
             flagged_indices.append(idx)
+            idx_to_img_path[idx] = flagged_abspaths[abs_p]
 
-    # Move flagged images to review_label/
+    # 2. Inject annotations
+    annotations_added = 0
+    if bbox_cls is None:
+        try:
+            from widgets.canvas import BoundingBox
+            bbox_cls = BoundingBox
+        except ImportError:
+            pass
+
+    existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
+        app.canvas.class_attributes = {}
+
+    from utils.dataset_manager import get_dataset_format, scan_dataset
+    if hasattr(app, "_viat_dataset_info") and app._viat_dataset_info:
+        info = app._viat_dataset_info
+    else:
+        info = scan_dataset(os.path.dirname(image_files[0]))
+    fmt = get_dataset_format(app, info)
+
+    for idx in flagged_indices:
+        orig_path = idx_to_img_path[idx]
+        dets = detections_by_path[orig_path]
+        
+        if idx not in app.frame_annotations:
+            app.frame_annotations[idx] = []
+            
+        for det_idx, det in enumerate(dets):
+            class_name = det.get("class", "unknown")
+            if target_classes and class_name.lower() not in target_classes:
+                continue
+                
+            bbox = det.get("bbox", [0, 0, 0, 0])
+            if len(bbox) != 4:
+                continue
+            x, y, w, h = bbox
+
+            # Add class to master list if missing
+            if class_name not in info.classes:
+                info.classes.append(class_name)
+                
+            if class_name not in existing_colors:
+                existing_colors[class_name] = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+            if class_name not in app.canvas.class_attributes:
+                app.canvas.class_attributes[class_name] = {"Size": {"type": "int", "default": -1}, "Quality": {"type": "int", "default": -1}}
+            
+            if bbox_cls:
+                rect = QRect(int(x), int(y), max(1, int(w)), max(1, int(h)))
+                ann = bbox_cls(
+                    rect=rect, class_name=class_name,
+                    attributes={"actor_id": f"yolo_{det_idx}"},
+                    color=existing_colors[class_name], source="detected",
+                    score=float(det.get("score", 1.0))
+                )
+                ann.verified = False
+                app.frame_annotations[idx].append(ann)
+                annotations_added += 1
+
+        # Save label file BEFORE moving it
+        if fmt:
+            import cv2
+            img_h, img_w = 1080, 1920
+            img_obj = cv2.imread(image_files[idx])
+            if img_obj is not None:
+                img_h, img_w = img_obj.shape[:2]
+                
+            boxes_for_dump = []
+            for ann in app.frame_annotations[idx]:
+                boxes_for_dump.append({
+                    "class_name": ann.class_name,
+                    "x": ann.rect.x(), "y": ann.rect.y(),
+                    "w": ann.rect.width(), "h": ann.rect.height()
+                })
+            
+            label_content = fmt.dump(boxes_for_dump, (img_w, img_h), info.classes)
+            label_path = fmt.get_label_path(image_files[idx])
+            if label_path:
+                os.makedirs(os.path.dirname(label_path), exist_ok=True)
+                with open(label_path, "w", encoding="utf-8") as lf:
+                    lf.write(label_content)
+
+    app.canvas.class_colors = existing_colors
+    app.class_attributes = app.canvas.class_attributes
+
+    # 3. Move images (which will now move the updated label file)
     moved_images = 0
-    review_dir = None
     if move_to_review and flagged_indices:
         result = move_to_review_label(app, flagged_indices)
         moved_images = result["moved_images"]
-        review_dir = result.get("dest_dir")
-
-    # Copy the detections JSON into review_label/ so it travels with the images
-    json_copied_to = None
-    if review_dir and os.path.isdir(review_dir):
-        json_dest = os.path.join(review_dir, "_viat_detections.json")
-        try:
-            _shutil.copy2(json_path, json_dest)
-            json_copied_to = json_dest
-        except OSError:
-            pass
-
-    # Optionally add annotations (only for images that weren't moved, which
-    # is rare since all flagged images get moved). This is a no-op when
-    # move_to_review=True (default).
-    annotations_added = 0
-    if add_as_annotations and bbox_cls is not None:
-        from PyQt5.QtCore import QRect
-        from PyQt5.QtGui import QColor
-        import random
-
-        existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
-        if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
-            app.canvas.class_attributes = {}
-
-        new_image_files = list(getattr(app, "image_files", []) or [])
-        path_to_new_idx = {}
-        for new_idx, img_path in enumerate(new_image_files):
-            path_to_new_idx[os.path.abspath(img_path)] = new_idx
-
-        for img_path, dets in detections_by_path.items():
-            abs_path = os.path.abspath(img_path)
-            if abs_path not in path_to_new_idx:
-                continue  # image was moved out
-            new_idx = path_to_new_idx[abs_path]
-
-            for det_idx, det in enumerate(dets):
-                class_name = det.get("class", "unknown")
-                bbox = det.get("bbox", [0, 0, 0, 0])
-                if len(bbox) != 4:
-                    continue
-                x, y, w, h = bbox
-
-                if class_name not in existing_colors:
-                    existing_colors[class_name] = QColor(
-                        random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-                    )
-                if class_name not in app.canvas.class_attributes:
-                    app.canvas.class_attributes[class_name] = {
-                        "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
-                        "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
-                    }
-                color = existing_colors[class_name]
-
-                rect = QRect(int(x), int(y), max(1, int(w)), max(1, int(h)))
-                ann = bbox_cls(
-                    rect=rect,
-                    class_name=class_name,
-                    attributes={"actor_id": f"yolo_{det_idx}"},
-                    color=color,
-                    source="detected",
-                    score=float(det.get("score", 1.0)),
-                )
-                ann.verified = False
-
-                if new_idx not in app.frame_annotations:
-                    app.frame_annotations[new_idx] = []
-                app.frame_annotations[new_idx].append(ann)
-                annotations_added += 1
-
-        app.canvas.class_colors = existing_colors
-        app.class_attributes = app.canvas.class_attributes
 
     append_dataset_log(
         app, "Auto-import YOLO detections", affected=moved_images,
-        details=f"{total_detections} detections in {len(flagged_paths)} images -> {review_subfolder}/",
+        details=f"{total_detections} target detections in {len(flagged_paths)} images -> {review_subfolder}/",
     )
 
     return {

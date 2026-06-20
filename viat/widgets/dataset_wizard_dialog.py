@@ -42,6 +42,14 @@ class DatasetWizardDialog(QDialog):
         new_dataset_layout = QHBoxLayout()
         self.new_dataset_input = QLineEdit()
         self.new_dataset_input.setReadOnly(True)
+        
+        # Pre-fill with currently opened dataset if available
+        if getattr(self.main_window, "is_image_dataset", False):
+            if hasattr(self.main_window, "_viat_dataset_info") and self.main_window._viat_dataset_info:
+                self.new_dataset_input.setText(self.main_window._viat_dataset_info.root)
+            elif hasattr(self.main_window, "image_files") and self.main_window.image_files:
+                self.new_dataset_input.setText(os.path.dirname(self.main_window.image_files[0]))
+                
         btn_browse_new = QPushButton("Browse...")
         btn_browse_new.clicked.connect(self.browse_new_dataset)
         new_dataset_layout.addWidget(self.new_dataset_input)
@@ -72,22 +80,35 @@ class DatasetWizardDialog(QDialog):
         self.chk_normalize_res.setChecked(False)
         
         # Auto import JSON
-        auto_import_layout = QHBoxLayout()
+        auto_import_layout = QVBoxLayout()
+        
+        json_row = QHBoxLayout()
         self.chk_auto_import = QCheckBox("Auto-Import Detections & Isolate Unmapped to 'review_label'")
         self.chk_auto_import.setChecked(False)
         self.json_path_input = QLineEdit()
-        self.json_path_input.setPlaceholderText("Path to _viat_detections.json")
+        self.json_path_input.setPlaceholderText("Paths to _viat_detections.json (multiple allowed)")
         self.json_path_input.setEnabled(False)
-        btn_browse_json = QPushButton("Browse JSON")
+        btn_browse_json = QPushButton("Browse JSON(s)")
         btn_browse_json.setEnabled(False)
         btn_browse_json.clicked.connect(self.browse_json)
+        json_row.addWidget(self.chk_auto_import)
+        json_row.addWidget(self.json_path_input)
+        json_row.addWidget(btn_browse_json)
+        
+        target_row = QHBoxLayout()
+        target_row.setContentsMargins(20, 0, 0, 0)
+        self.target_classes_input = QLineEdit()
+        self.target_classes_input.setPlaceholderText("Target Classes (comma-separated, e.g. car, person) - leave empty for all")
+        self.target_classes_input.setEnabled(False)
+        target_row.addWidget(QLabel("Target Classes:"))
+        target_row.addWidget(self.target_classes_input)
         
         self.chk_auto_import.toggled.connect(self.json_path_input.setEnabled)
         self.chk_auto_import.toggled.connect(btn_browse_json.setEnabled)
+        self.chk_auto_import.toggled.connect(self.target_classes_input.setEnabled)
         
-        auto_import_layout.addWidget(self.chk_auto_import)
-        auto_import_layout.addWidget(self.json_path_input)
-        auto_import_layout.addWidget(btn_browse_json)
+        auto_import_layout.addLayout(json_row)
+        auto_import_layout.addLayout(target_row)
         
         options_layout.addWidget(self.chk_preflight)
         options_layout.addWidget(self.chk_grayscale)
@@ -123,9 +144,9 @@ class DatasetWizardDialog(QDialog):
             self.new_dataset_input.setText(folder)
             
     def browse_json(self):
-        file, _ = QFileDialog.getOpenFileName(self, "Select Detections JSON", "", "JSON Files (*.json)")
-        if file:
-            self.json_path_input.setText(file)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Detections JSON(s)", "", "JSON Files (*.json)")
+        if files:
+            self.json_path_input.setText(";".join(files))
 
     def accept_settings(self):
         main_ds = self.main_dataset_input.text()
@@ -139,6 +160,14 @@ class DatasetWizardDialog(QDialog):
             QMessageBox.warning(self, "Error", "Please select a valid New Dataset folder.")
             return
             
+        json_paths = []
+        if self.chk_auto_import.isChecked() and self.json_path_input.text():
+            json_paths = [p.strip() for p in self.json_path_input.text().split(';') if p.strip()]
+            
+        target_classes = []
+        if self.chk_auto_import.isChecked() and self.target_classes_input.text():
+            target_classes = [c.strip() for c in self.target_classes_input.text().split(',') if c.strip()]
+
         self.settings = {
             "main_dataset": main_ds,
             "new_dataset": new_ds,
@@ -149,6 +178,7 @@ class DatasetWizardDialog(QDialog):
             "standardize_format": self.chk_standardize_format.isChecked(),
             "normalize_res": self.chk_normalize_res.isChecked(),
             "auto_import": self.chk_auto_import.isChecked(),
-            "json_path": self.json_path_input.text() if self.chk_auto_import.isChecked() else None
+            "json_paths": json_paths,
+            "target_classes": target_classes
         }
         self.accept()

@@ -40,6 +40,8 @@ class ClassDock(QDockWidget):
         add_btn.clicked.connect(self.add_class)
         import_btn = QPushButton("Import YAML")
         import_btn.clicked.connect(self.import_yaml_classes)
+        info_btn = QPushButton("Info")
+        info_btn.clicked.connect(self.show_class_info)
         edit_btn = QPushButton("Edit")
         edit_btn.clicked.connect(self.edit_class)
         delete_btn = QPushButton("Delete")
@@ -47,6 +49,7 @@ class ClassDock(QDockWidget):
 
         controls_layout.addWidget(add_btn)
         controls_layout.addWidget(import_btn)
+        controls_layout.addWidget(info_btn)
         controls_layout.addWidget(edit_btn)
         controls_layout.addWidget(delete_btn)
 
@@ -201,3 +204,15 @@ class ClassDock(QDockWidget):
             self.edit_class()
         elif action == delete_action:
             self.delete_class()
+
+    def show_class_info(self):
+        """Show information and images for the selected class."""
+        selected_items = self.classes_list.selectedItems()
+        if not selected_items:
+            return
+            
+        class_name = selected_items[0].text()
+        from .class_info_dialog import ClassInfoDialog
+        
+        dialog = ClassInfoDialog(self.main_window, class_name, self)
+        dialog.exec_()

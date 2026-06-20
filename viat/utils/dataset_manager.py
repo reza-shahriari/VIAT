@@ -125,7 +125,7 @@ def detect_folder_type(folder_path: str) -> str:
         return "simple"
 
     # Roboflow / Ultralytics markers
-    if "data.yaml" in entries or "data.yml" in entries:
+    if "data.yaml" in entries or "data.yml" in entries or "dataset.yaml" in entries or "dataset.yml" in entries:
         return "dataset"
     # images/labels split
     if "images" in entries and "labels" in entries:
@@ -217,33 +217,31 @@ def load_dataset_into_app(
     frame_to_split: List[str] = []
     per_split: Dict[str, int] = {}
 
-    # Build class colors on the canvas (preserve existing ones)
-    existing_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    # Keep only class colors/attributes that are present in the new dataset
+    old_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    old_attributes = dict(getattr(app.canvas, "class_attributes", {}) or {})
     
-    # Remove default "Quad" class if the dataset provides its own classes and Quad isn't one of them
-    if info.classes and "Quad" in existing_colors and "Quad" not in info.classes:
-        del existing_colors["Quad"]
-        
+    new_colors = {}
+    new_attributes = {}
+    
     for cls in info.classes:
-        if cls not in existing_colors:
-            existing_colors[cls] = QColor(
+        if cls in old_colors:
+            new_colors[cls] = old_colors[cls]
+        else:
+            new_colors[cls] = QColor(
                 random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
             )
-    app.canvas.class_colors = existing_colors
-    
-    # class_attributes defaults
-    if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
-        app.canvas.class_attributes = {}
-        
-    if info.classes and "Quad" in app.canvas.class_attributes and "Quad" not in info.classes:
-        del app.canvas.class_attributes["Quad"]
-        
-    for cls in info.classes:
-        if cls not in app.canvas.class_attributes:
-            app.canvas.class_attributes[cls] = {
+            
+        if cls in old_attributes:
+            new_attributes[cls] = old_attributes[cls]
+        else:
+            new_attributes[cls] = {
                 "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
                 "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
             }
+            
+    app.canvas.class_colors = new_colors
+    app.canvas.class_attributes = new_attributes
     app.class_attributes = app.canvas.class_attributes  # legacy alias
 
     # Reset frame annotations (caller usually already did, but be safe)
@@ -293,11 +291,23 @@ def load_dataset_into_app(
 
             anns = []
             for b in boxes:
+                cls_name = b["class_name"]
+                if cls_name not in app.canvas.class_colors:
+                    app.canvas.class_colors[cls_name] = QColor(
+                        random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+                    )
+                    app.canvas.class_attributes[cls_name] = {
+                        "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+                        "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
+                    }
+                    if cls_name not in info.classes:
+                        info.classes.append(cls_name)
+
                 rect = QRect(b["x"], b["y"], max(1, b["w"]), max(1, b["h"]))
-                color = app.canvas.class_colors.get(b["class_name"], QColor(255, 0, 0))
+                color = app.canvas.class_colors[cls_name]
                 ann = bbox_cls(
                     rect=rect,
-                    class_name=b["class_name"],
+                    class_name=cls_name,
                     attributes=b.get("attributes", {}),
                     color=color,
                     source=b.get("source", "manual"),
@@ -459,7 +469,7 @@ def _parse_data_yaml_classes(root: str) -> Optional[List[str]]:
         # Minimal fallback parser (handles the common ``names: [a, b, c]``
         # and ``names:\n  0: a`` forms) so VIAT works without PyYAML.
         return _parse_data_yaml_fallback(root)
-    for name in ("data.yaml", "data.yml"):
+    for name in ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml"):
         p = os.path.join(root, name)
         if os.path.isfile(p):
             try:
@@ -481,7 +491,7 @@ def _sort_key(x):
 
 
 def _parse_data_yaml_fallback(root: str) -> Optional[List[str]]:
-    for name in ("data.yaml", "data.yml"):
+    for name in ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml"):
         p = os.path.join(root, name)
         if not os.path.isfile(p):
             continue

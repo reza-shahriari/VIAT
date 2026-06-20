@@ -1450,8 +1450,17 @@ class VideoCanvas(QWidget):
             elif event.key() == Qt.Key_M and self.selected_annotation:
                 if hasattr(self.selected_annotation, 'verified') and not self.selected_annotation.verified:
                         self.verify_annotation(self.selected_annotation)
+            elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                if self.main_window:
+                    if hasattr(self, "selected_annotations") and self.selected_annotations:
+                        self.main_window.delete_selected_annotations()
+                    elif self.selected_annotation:
+                        self.main_window.delete_selected_annotation()
             else:
                 super().keyPressEvent(event)
+        else:
+            # If no annotation is selected and key is unhandled
+            super().keyPressEvent(event)
 
     def update_annotation_after_edit(self):
         """Update UI after annotation has been edited"""

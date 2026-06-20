@@ -152,7 +152,10 @@ class UICreator:
         # Delete Selected action
         delete_selected_action = QAction("Delete Selected", self.main_window)
         delete_selected_action.setShortcut("Del")
-        delete_selected_action.triggered.connect(self.main_window.annotation_dock.delete_selected_annotation)
+        delete_selected_action.triggered.connect(
+            lambda: self.main_window.annotation_dock.delete_selected_annotation()
+            if hasattr(self.main_window, 'annotation_dock') and self.main_window.annotation_dock else None
+        )
         edit_menu.addAction(delete_selected_action)
 
         # Clear Annotations action
@@ -368,6 +371,30 @@ class UICreator:
         verify_all_action.setToolTip("Mark all annotations in current frame as verified")
         verify_all_action.triggered.connect(self.main_window.verify_all_annotations)
         self.main_window.toolbar.addAction(verify_all_action)
+
+        self.main_window.finish_integration_sep = self.main_window.toolbar.addSeparator()
+        self.main_window.finish_integration_sep.setVisible(False)
+
+        # Finish & Merge Integration Mode action
+        btn_finish = QPushButton("Finish Integration & Merge")
+        btn_finish.setStyleSheet("background-color: #67C23A; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;")
+        btn_finish.setToolTip("Finish reviewing and merge the dataset into the main dataset")
+        btn_finish.clicked.connect(self.main_window.viat_finish_integration)
+        
+        self.finish_integration_action = self.main_window.toolbar.addWidget(btn_finish)
+        self.main_window.finish_integration_action = self.finish_integration_action
+        self.finish_integration_action.setVisible(False)
+
+        # Move Integration Mode action
+        btn_move = QPushButton("Move to Review")
+        btn_move.setStyleSheet("background-color: #E6A23C; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;")
+        btn_move.setToolTip("Move the dataset to a different folder and add details")
+        if hasattr(self.main_window, "viat_finish_integration_move"):
+            btn_move.clicked.connect(self.main_window.viat_finish_integration_move)
+        
+        self.finish_integration_move_action = self.main_window.toolbar.addWidget(btn_move)
+        self.main_window.finish_integration_move_action = self.finish_integration_move_action
+        self.finish_integration_move_action.setVisible(False)
 
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""

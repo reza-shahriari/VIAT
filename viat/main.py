@@ -314,20 +314,6 @@ class VideoAnnotationTool(QMainWindow):
         # Create layout
         layout = QVBoxLayout(central_widget)
 
-        # Create canvas
-        self.canvas = VideoCanvas(self)
-        layout.addWidget(self.canvas)
-
-        if hasattr(self.canvas, "annotationChanged"):
-            self.canvas.annotationChanged.connect(self.save_undo_state)
-        if hasattr(self.canvas, "annotationMoved"):
-            self.canvas.annotationMoved.connect(self.save_undo_state)
-        if hasattr(self.canvas, "annotationResized"):
-            self.canvas.annotationResized.connect(self.save_undo_state)
-        # Add playback controls
-        playback_controls = self.ui_creator.create_playback_controls()
-        layout.addWidget(playback_controls)
-
         # Integration Mode Banner (hidden by default)
         self.integration_banner = QWidget()
         banner_layout = QHBoxLayout(self.integration_banner)
@@ -342,6 +328,20 @@ class VideoAnnotationTool(QMainWindow):
         banner_layout.addWidget(self.btn_finish_integration)
         self.integration_banner.setVisible(False)
         layout.addWidget(self.integration_banner)
+
+        # Create canvas
+        self.canvas = VideoCanvas(self)
+        layout.addWidget(self.canvas)
+
+        if hasattr(self.canvas, "annotationChanged"):
+            self.canvas.annotationChanged.connect(self.save_undo_state)
+        if hasattr(self.canvas, "annotationMoved"):
+            self.canvas.annotationMoved.connect(self.save_undo_state)
+        if hasattr(self.canvas, "annotationResized"):
+            self.canvas.annotationResized.connect(self.save_undo_state)
+        # Add playback controls
+        playback_controls = self.ui_creator.create_playback_controls()
+        layout.addWidget(playback_controls)
 
         # Set layout margins
         layout.setContentsMargins(5, 5, 5, 5)
@@ -424,6 +424,15 @@ class VideoAnnotationTool(QMainWindow):
         act.triggered.connect(lambda: self.viat_merge_dataset())
 
         img_menu.addSeparator()
+
+        act = img_menu.addAction("Extract Single Class from Datasets...")
+        act.triggered.connect(lambda: self.viat_extract_single_class_dataset())
+
+        act = img_menu.addAction("Batch Prediction Queue Builder...")
+        act.triggered.connect(lambda: self.viat_launch_batch_prediction_queue())
+        
+        act = img_menu.addAction("Remove Background Images (Percentage)...")
+        act.triggered.connect(lambda: self.viat_remove_background_images())
 
         act = img_menu.addAction("Dataset Integration Wizard (Roadmap)...")
         act.triggered.connect(lambda: self.viat_launch_integration_wizard())
@@ -525,10 +534,10 @@ class VideoAnnotationTool(QMainWindow):
                 self.viat_remove_grayscale()
             if settings["remove_duplicates"]:
                 self.viat_remove_duplicates()
-            if settings["auto_import"] and settings["json_path"]:
+            if settings["auto_import"] and settings.get("json_paths"):
                 try:
                     from utils.dataset_ops import auto_import_detections
-                    auto_import_detections(self, settings["json_path"])
+                    auto_import_detections(self, settings["json_paths"], target_classes=settings.get("target_classes"))
                     # Refresh UI
                     if self.current_frame >= self.total_frames:
                         self.current_frame = max(0, self.total_frames - 1)
@@ -539,14 +548,20 @@ class VideoAnnotationTool(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Auto-Import Error", f"Error applying auto-import:\n{e}")
                 
-            # 4. Show the Finish Banner
-            self.integration_banner.setVisible(True)
+            # 4. Show the Finish Button in Toolbar
+            if hasattr(self, 'finish_integration_action'):
+                self.finish_integration_action.setVisible(True)
+            if hasattr(self, 'finish_integration_move_action'):
+                self.finish_integration_move_action.setVisible(True)
+            if hasattr(self, 'finish_integration_sep'):
+                self.finish_integration_sep.setVisible(True)
             self.statusBar.showMessage("Integration Mode active. Please review the dataset.", 10000)
 
     @log_exceptions
     def viat_finish_integration(self):
         """Finalizes the integration mode and merges the dataset."""
-        from PyQt5.QtWidgets import QMessageBox
+        from PyQt5.QtWidgets import QMessageBox, QInputDialog
+        import cv2
         if not self.integration_mode or not self.integration_main_dataset:
             return
             
@@ -566,13 +581,127 @@ class VideoAnnotationTool(QMainWindow):
                 QMessageBox.warning(self, "Error", "Could not determine current dataset path.")
                 return
                 
+            # Prompt for resizing
+            text, ok = QInputDialog.getText(
+                self, "Resize Dataset",
+                "Resize all images before merging? Enter W,H (or clear to skip):",
+                text="640,640"
+            )
+            if ok and text.strip():
+                try:
+                    parts = text.split(',')
+                    w, h = int(parts[0].strip()), int(parts[1].strip())
+                    resized_count = 0
+                    for root, dirs, files in os.walk(source_folder):
+                        if "removed" in root or "review" in root:
+                            continue
+                        for file in files:
+                            ext = os.path.splitext(file)[1].lower()
+                            if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}:
+                                img_path = os.path.join(root, file)
+                                img = cv2.imread(img_path)
+                                if img is not None:
+                                    img_resized = cv2.resize(img, (w, h))
+                                    cv2.imwrite(img_path, img_resized)
+                                    resized_count += 1
+                    self.statusBar.showMessage(f"Resized {resized_count} images to {w}x{h}", 5000)
+                except Exception as e:
+                    QMessageBox.warning(self, "Resize Error", f"Failed to resize images:\n{e}")
+
             # Launch the merge dialog directly, skipping the source folder selection
             self.viat_merge_dataset(source_folder=source_folder, target_folder=self.integration_main_dataset)
             
             # Clean up integration mode
             self.integration_mode = False
             self.integration_main_dataset = ""
-            self.integration_banner.setVisible(False)
+            if hasattr(self, 'finish_integration_action'):
+                self.finish_integration_action.setVisible(False)
+            if hasattr(self, 'finish_integration_move_action'):
+                self.finish_integration_move_action.setVisible(False)
+            if hasattr(self, 'finish_integration_sep'):
+                self.finish_integration_sep.setVisible(False)
+
+    @log_exceptions
+    def viat_finish_integration_move(self):
+        """Moves the dataset to a review folder instead of merging."""
+        from PyQt5.QtWidgets import QMessageBox, QInputDialog, QFileDialog
+        import shutil
+        import os
+        from datetime import datetime
+        
+        if not self.integration_mode:
+            return
+            
+        reply = QMessageBox.question(
+            self, "Move Dataset",
+            "Are you sure you want to move this dataset to a review folder instead of merging?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            source_folder = ""
+            if hasattr(self, "_viat_dataset_info") and self._viat_dataset_info:
+                source_folder = self._viat_dataset_info.root
+            elif self.image_files:
+                source_folder = os.path.dirname(self.image_files[0])
+                
+            if not source_folder:
+                QMessageBox.warning(self, "Error", "Could not determine current dataset path.")
+                return
+                
+            # Prompt for target folder
+            target_folder = QFileDialog.getExistingDirectory(
+                self, "Select Review/Destination Folder", "", QFileDialog.ShowDirsOnly
+            )
+            if not target_folder:
+                return
+                
+            # Prompt for details
+            details, ok = QInputDialog.getMultiLineText(
+                self, "Dataset Details",
+                "Enter details for this dataset (will be saved to details.md):"
+            )
+            
+            if ok:
+                try:
+                    # Save details.md in the target_folder (appending if exists)
+                    dataset_name = os.path.basename(source_folder)
+                    details_file = os.path.join(target_folder, "details.md")
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    with open(details_file, "a", encoding="utf-8") as f:
+                        f.write(f"\n## Dataset: {dataset_name} ({timestamp})\n")
+                        if details.strip():
+                            f.write(f"{details.strip()}\n")
+                        else:
+                            f.write("No details provided.\n")
+                    
+                    # Clear state to release file locks before moving
+                    self.reset_media_state()
+                    
+                    dest_path = os.path.join(target_folder, dataset_name)
+                    
+                    # Handle name collision if dest_path already exists
+                    if os.path.exists(dest_path):
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        dataset_name = f"{dataset_name}_{timestamp}"
+                        dest_path = os.path.join(target_folder, dataset_name)
+                        
+                    shutil.move(source_folder, dest_path)
+                    
+                    self.statusBar.showMessage(f"Moved dataset to {dest_path}", 5000)
+                    
+                    # Clean up integration mode
+                    self.integration_mode = False
+                    self.integration_main_dataset = ""
+                    if hasattr(self, 'finish_integration_action'):
+                        self.finish_integration_action.setVisible(False)
+                    if hasattr(self, 'finish_integration_move_action'):
+                        self.finish_integration_move_action.setVisible(False)
+                    if hasattr(self, 'finish_integration_sep'):
+                        self.finish_integration_sep.setVisible(False)
+                        
+                except Exception as e:
+                    QMessageBox.warning(self, "Move Error", f"Failed to move dataset:\n{e}")
     @log_exceptions
     def setup_playback_timer(self):
         """Set up the timer for video playback."""
@@ -4489,7 +4618,7 @@ class VideoAnnotationTool(QMainWindow):
         """Handle keyboard shortcuts that are NOT frame navigation.
         Arrow keys are handled globally in eventFilter so there is a
         single owner of frame stepping (no double jumps)."""
-        if event.key() == Qt.Key_Delete:
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             if (
                 hasattr(self.canvas, "selected_annotations")
                 and self.canvas.selected_annotations
@@ -4792,7 +4921,49 @@ class VideoAnnotationTool(QMainWindow):
         lines.append(f"Classes source: {info.classes_source}")
         if info.classes_conflict:
             lines.append(f"⚠ {info.classes_conflict}")
-        QMessageBox.information(self, "Dataset Statistics", "\n".join(lines))
+            
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Dataset Statistics")
+        msg_box.setText("\n".join(lines))
+        msg_box.setIcon(QMessageBox.Information)
+        
+        plot_btn = msg_box.addButton("Plot Details", QMessageBox.ActionRole)
+        msg_box.addButton(QMessageBox.Ok)
+        
+        msg_box.exec_()
+        
+        if msg_box.clickedButton() == plot_btn:
+            try:
+                import matplotlib.pyplot as plt
+                
+                plt.figure(figsize=(10, 5))
+                
+                # Subplot 1: Classes
+                plt.subplot(1, 2, 1)
+                classes = list(per_class.keys())
+                counts = list(per_class.values())
+                plt.bar(classes, counts, color='skyblue')
+                plt.xlabel('Classes')
+                plt.ylabel('Box Count')
+                plt.title('Annotations per Class')
+                plt.xticks(rotation=45, ha='right')
+                
+                # Subplot 2: Splits
+                plt.subplot(1, 2, 2)
+                splits = list(per_split.keys())
+                split_counts = list(per_split.values())
+                plt.bar(splits, split_counts, color='lightgreen')
+                plt.xlabel('Splits')
+                plt.ylabel('Annotated Frames')
+                plt.title('Frames per Split')
+                plt.xticks(rotation=45, ha='right')
+                
+                plt.tight_layout()
+                plt.show()
+            except ImportError:
+                QMessageBox.warning(self, "Plotting Error", "Matplotlib is not installed. Cannot plot details.")
+            except Exception as e:
+                QMessageBox.warning(self, "Plotting Error", f"An error occurred while plotting: {e}")
 
     # -----------------------------------------------------------------
     # New dataset ops (patch3): move, grayscale, duplicates, class filter,
@@ -4895,24 +5066,36 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def viat_remove_class_and_images_dialog(self):
-        """Move all frames whose labels contain a selected class."""
+        """Move all frames whose labels contain a selected class, or just remove the labels."""
         if not self._viat_ensure_dataset():
             return
         classes = sorted(getattr(self.canvas, "class_colors", {}).keys())
         if not classes:
-            QMessageBox.information(self, "Remove Class + Images", "No classes loaded.")
+            QMessageBox.information(self, "Remove Class", "No classes loaded.")
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("Remove Class + Images")
+        dialog.setWindowTitle("Remove Class")
         dialog.setMinimumWidth(380)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Select classes to remove (all images containing\n"
-                                 "any of these classes will be moved to removed/class_filtered/):"))
+        layout.addWidget(QLabel("Select classes to remove:"))
         checks = []
         for c in classes:
             cb = QCheckBox(c)
             checks.append((c, cb))
             layout.addWidget(cb)
+            
+        remove_images_cb = QCheckBox("Remove images as well (move frames to removed/class_filtered/)")
+        remove_images_cb.setChecked(True)
+        remove_images_cb.setStyleSheet("""
+            QCheckBox {
+                font-weight: bold;
+                color: #e74c3c;
+                margin-top: 10px;
+                margin-bottom: 5px;
+            }
+        """)
+        layout.addWidget(remove_images_cb)
+        
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -4922,24 +5105,43 @@ class VideoAnnotationTool(QMainWindow):
         selected = [c for c, cb in checks if cb.isChecked()]
         if not selected:
             return
-        reply = QMessageBox.question(
-            self, "Remove Class + Images",
-            f"Move all frames containing classes {selected} to removed/class_filtered/?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
+            
+        remove_images = remove_images_cb.isChecked()
+        
+        if remove_images:
+            reply = QMessageBox.question(
+                self, "Remove Class + Images",
+                f"Move all frames containing classes {selected} to removed/class_filtered/?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+        else:
+            reply = QMessageBox.question(
+                self, "Remove Class Labels",
+                f"Remove labels for classes {selected} from all frames (keep images)?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            
         if reply != QMessageBox.Yes:
             return
-        result = _viat_remove_class_and_images(self, selected)
+            
+        result = _viat_remove_class_and_images(self, selected, remove_images=remove_images)
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
-        self.statusBar.showMessage(
-            f"Moved {result['moved_images']} frames (classes={selected}) -> {result['dest_dir']}",
-            5000,
-        )
+        
+        if remove_images:
+            self.statusBar.showMessage(
+                f"Moved {result.get('moved_images', 0)} frames (classes={selected}) -> {result.get('dest_dir', '')}",
+                5000,
+            )
+        else:
+            self.statusBar.showMessage(
+                f"Removed {result.get('removed_boxes', 0)} labels for {selected} in {result.get('affected_frames', 0)} frames.",
+                5000,
+            )
 
     @log_exceptions
     def viat_toggle_segmentation(self):
@@ -5666,6 +5868,27 @@ class VideoAnnotationTool(QMainWindow):
         self.statusBar.showMessage(
             f"Merged {result['images_copied']} images from {dataset_name}", 5000
         )
+
+    @log_exceptions
+    def viat_extract_single_class_dataset(self):
+        """Show the single class dataset extraction dialog."""
+        from widgets.single_class_extractor_dialog import SingleClassExtractorDialog
+        dialog = SingleClassExtractorDialog(self)
+        dialog.exec_()
+
+    @log_exceptions
+    def viat_launch_batch_prediction_queue(self):
+        """Show the batch prediction queue builder dialog."""
+        from widgets.batch_prediction_dialog import BatchPredictionDialog
+        dialog = BatchPredictionDialog(self)
+        dialog.exec_()
+
+    @log_exceptions
+    def viat_remove_background_images(self):
+        """Show the background remover dialog."""
+        from widgets.background_remover_dialog import BackgroundRemoverDialog
+        dialog = BackgroundRemoverDialog(self)
+        dialog.exec_()
 
     @log_exceptions
     def show_about(self):
