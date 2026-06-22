@@ -259,26 +259,6 @@ class ObjectVisibilityManager:
         """Rebuild the object index and refresh the display."""
         self._build_object_index()
         self.sorted_objects = self._sort_objects_by_time()
-        def remove_current_range(self) -> int:
-            """Delete all annotations of the current object within the active range.
-            Returns the number of removed annotations."""
-            r = self.get_current_range()
-            if not r:
-                return 0
-            start, end = r
-            removed = 0
-            for frame_num in range(start, end + 1):
-                removed += self._remove_object_from_frame(frame_num)
-            self._rebuild_and_refresh()
-            return removed
-
-        def get_visible_frame_numbers(self) -> list:
-            """Return a list of frame numbers belonging to the current range.
-            If no range is active, returns an empty list."""
-            r = self.get_current_range()
-            if not r:
-                return []
-            return list(range(r[0], r[1] + 1))
 
         # Clamp range index
         ranges = self.get_visible_ranges()
@@ -361,6 +341,7 @@ class ObjectVisibilityManager:
         for frame_num in range(start, end + 1):
             removed += self._remove_object_from_frame(frame_num)
         self._rebuild_and_refresh()
+        self._jump_to_range_start()
         return removed
 
     def get_visible_frame_numbers(self) -> list:

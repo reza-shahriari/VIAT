@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QTextEdit,
 )
-from PyQt5.QtCore import Qt,QTimer
+from PyQt5.QtCore import Qt, QTimer, QEvent
 
 
 class ClassDock(QDockWidget):
@@ -30,6 +30,7 @@ class ClassDock(QDockWidget):
         self.classes_list.itemClicked.connect(self.on_class_selected)
         self.classes_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.classes_list.customContextMenuRequested.connect(self.show_context_menu)
+        self.classes_list.installEventFilter(self)
         
         # Make sure the list widget has a minimum height to be visible
         self.classes_list.setMinimumHeight(100)
@@ -72,6 +73,13 @@ class ClassDock(QDockWidget):
         # Update the class list - defer this to ensure canvas is ready
         QTimer.singleShot(100, self.update_class_list)
 
+
+    def eventFilter(self, obj, event):
+        if obj == self.classes_list and event.type() == QEvent.KeyPress:
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+                self.delete_class()
+                return True
+        return super().eventFilter(obj, event)
 
     def update_class_list(self):
         """Update the class list with available classes"""

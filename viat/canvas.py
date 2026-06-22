@@ -143,6 +143,8 @@ class VideoCanvas(QWidget):
         else:
             # Make continuous if not already
             rgb_frame = cv2.cvtColor(frame.copy(), cv2.COLOR_BGR2RGB)
+            
+        self.current_frame_array = rgb_frame.copy()
         
         # Create QImage without copying data when possible
         bytes_per_line = 3 * w
@@ -795,6 +797,10 @@ class VideoCanvas(QWidget):
             if not img_pos:
                 return
 
+            if getattr(self.main_window, "auto_bbox_mode", False):
+                self.handle_auto_bbox_click(img_pos)
+                return
+
             # First, check if we're clicking on an existing annotation
             annotation = self.find_annotation_at_pos(event.pos())
             
@@ -936,6 +942,62 @@ class VideoCanvas(QWidget):
           
                 self.update()
                 return
+
+    def handle_auto_bbox_click(self, img_pos):
+        """Handle clicking for Auto BBox feature using SAM."""
+        if not hasattr(self, 'current_frame_array') or self.current_frame_array is None:
+            return
+            
+        if not hasattr(self.main_window, 'sam_manager') or not self.main_window.sam_manager.is_available():
+            return
+            
+        self.main_window.statusBar.showMessage("Generating bounding box...", 3000)
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QRect
+        from PyQt5.QtGui import QColor
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        
+        try:
+            bbox = self.main_window.sam_manager.predict_bbox_from_point(
+                self.current_frame_array, int(img_pos.x()), int(img_pos.y())
+            )
+            
+            if bbox:
+                x_min, y_min, x_max, y_max = bbox
+                rect = QRect(x_min, y_min, x_max - x_min, y_max - y_min)
+                
+                # Check bounds
+                if self.pixmap:
+                    rect = rect.intersected(QRect(0, 0, self.pixmap.width(), self.pixmap.height()))
+                
+                if rect.width() > 0 and rect.height() > 0:
+                    from .annotation import BoundingBox
+                    annotation = BoundingBox(
+                        rect=rect,
+                        class_name=self.current_class,
+                        color=self.class_colors.get(self.current_class, QColor(255, 0, 0)),
+                        frame=self.main_window.current_frame,
+                        score=1.0,
+                    )
+                    self.annotations.append(annotation)
+                    if hasattr(self.main_window, "annotation_dock"):
+                        self.main_window.annotation_dock.add_annotation_to_list(annotation)
+                        
+                    self.selected_annotation = annotation
+                    self.selected_annotations = [annotation]
+                    
+                    if hasattr(self.main_window, "annotation_dock"):
+                        self.main_window.annotation_dock.select_annotation_in_list(annotation)
+                        
+                    self.update()
+                    self.main_window.statusBar.showMessage("Bounding box created automatically.", 3000)
+                else:
+                    self.main_window.statusBar.showMessage("Could not generate valid bounding box.", 3000)
+            else:
+                self.main_window.statusBar.showMessage("Auto BBox failed to find object.", 3000)
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""

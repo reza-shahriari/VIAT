@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QMessageBox
 )
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QIcon
 from viat.utils import create_thumbnail
 
 class ClassInfoDialog(QDialog):
@@ -109,7 +109,7 @@ class ClassInfoDialog(QDialog):
                 
                 # Create item
                 item = QListWidgetItem(self.thumbnail_list)
-                item.setIcon(pixmap)
+                item.setIcon(QIcon(pixmap))
                 
                 # Label item with image name or frame number
                 if getattr(self.main_window, "is_image_dataset", False):

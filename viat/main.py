@@ -51,6 +51,8 @@ from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions
+from .widgets.auto_annotate_dialog import AutoAnnotateDialog
+from .utils.zero_shot_manager import ZeroShotManager
 from .tracking.nossort import NOCSORT
 
 logger = VIATLogger()
@@ -128,6 +130,7 @@ from utils.dataset_merger import (
     find_unmatched_classes as _viat_find_unmatched_classes,
 )
 from utils.icon_provider import IconProvider
+from utils.sam_manager import SamManager
 from natsort import natsorted
 from copy import deepcopy
 from pathlib import Path
@@ -244,6 +247,14 @@ class VideoAnnotationTool(QMainWindow):
         self.current_frame = 0
         self.total_frames = 0
         self.zoom_level = 1.0
+
+        # AI Auto BBox
+        self.auto_bbox_mode = False
+        self.sam_model_type = "sam2_s.pt" # Default model
+        
+        # Zero-shot Detection Manager
+        self.zero_shot_manager = None
+        self.sam_manager = SamManager()
 
         # Add annotation attribute settings
         self.auto_show_attribute_dialog = (
@@ -581,6 +592,9 @@ class VideoAnnotationTool(QMainWindow):
                 QMessageBox.warning(self, "Error", "Could not determine current dataset path.")
                 return
                 
+            # Save the project before merging so that all in-memory changes are written to disk!
+            self.save_project()
+                
             # Prompt for resizing
             text, ok = QInputDialog.getText(
                 self, "Resize Dataset",
@@ -728,6 +742,9 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def open_video(self):
         """Open a video file."""
+        if not self.check_unsaved_changes():
+            return
+            
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Open Video",
@@ -862,6 +879,9 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def open_image_folder(self):
         """Open a folder of images OR a labeled dataset via file dialog."""
+        if not self.check_unsaved_changes():
+            return
+            
         folder_path = QFileDialog.getExistingDirectory(
             self, "Open Image Folder / Dataset", "", QFileDialog.ShowDirsOnly
         )
@@ -886,26 +906,17 @@ class VideoAnnotationTool(QMainWindow):
             )
             return
 
-        # Load everything (all splits by default) into frame_annotations.
-        result = load_dataset_into_app(self, info, BoundingBox)
-        self._viat_frame_to_split = result["frame_to_split"]
-
-        self.image_files = result["image_files"]
-        self.total_frames = len(self.image_files)
-        self.current_frame = 0
+        # Load everything (all splits by default) into frame_annotations asynchronously
         self.is_image_dataset = True
-
-        self.load_current_image()
-        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
-        self.update_frame_info()
+        self.current_frame = 0
+        self.statusBar.showMessage("Loading dataset in background...", 5000)
+        
+        result = load_dataset_into_app(self, info, BoundingBox)
 
         # Window title shows layout + per-split counts
         folder_name = os.path.basename(folder_path)
-        counts = ", ".join(
-            f"{k}={v}" for k, v in result["per_split_counts"].items()
-        )
         self.setWindowTitle(
-            f"VIAT - {folder_name} [{info.layout}] ({counts})"
+            f"VIAT - {folder_name} [{info.layout}] (Loading...)"
         )
 
         if hasattr(self, "play_button"):
@@ -919,21 +930,8 @@ class VideoAnnotationTool(QMainWindow):
             self.autosave_timer.start(self.autosave_interval)
 
         # Status message: classes source + conflict warning
-        msg = (
-            f"Loaded {self.total_frames} images across "
-            f"{len(info.splits)} split(s); {len(info.classes)} classes "
-            f"from {info.classes_source or 'labels (inferred)'}; "
-            f"format={info.label_format or 'none'}"
-        )
         if info.classes_conflict:
-            msg += f"  ⚠ {info.classes_conflict}"
             QMessageBox.warning(self, "Class Name Conflict", info.classes_conflict)
-        if result["warnings"]:
-            msg += f"  ({len(result['warnings'])} parse warnings)"
-        self.statusBar.showMessage(msg, 8000)
-
-        self.update_annotation_list()
-        self.refresh_class_ui()
 
         # Initialize the dataset workflow log (DATASET_LOG.md)
         try:
@@ -944,6 +942,9 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def open_simple_image_folder(self, folder_path):
         """Open a simple folder of images."""
+        if not self.check_unsaved_changes():
+            return
+            
         # Reset existing state
         self.reset_media_state()
 
@@ -1063,34 +1064,33 @@ class VideoAnnotationTool(QMainWindow):
         saved_class_colors = getattr(self.canvas, "class_colors", {})
         saved_class_attrs = getattr(self.canvas, "class_attributes", {})
 
-        # Load labels from disk to catch any new images/labels added externally
-        result = load_dataset_into_app(self, info, BoundingBox)
-        
-        # CRITICAL FIX: The .viat project file is the source of truth for edits made in VIAT.
-        # We must overlay the project-saved annotations and classes on top of the disk scan
-        # so that unsaved VIAT edits and custom class names are not lost!
-        for frame_idx, anns in saved_annotations.items():
-            self.frame_annotations[frame_idx] = anns
-            
-        self.canvas.class_colors.update(saved_class_colors)
-        self.canvas.class_attributes.update(saved_class_attrs)
-        self.class_colors = self.canvas.class_colors
-        self.class_attributes = self.canvas.class_attributes
-        self._viat_frame_to_split = result["frame_to_split"]
-        self.image_files = result["image_files"]
-        self.total_frames = len(self.image_files)
-        self.current_frame = min(current_frame, self.total_frames - 1)
+        # Load labels from disk asynchronously
         self.is_image_dataset = True
+        self.current_frame = current_frame
+        
+        load_dataset_into_app(self, info, BoundingBox)
+        
+        # Connect to the finished loading signal to apply project overlays
+        if hasattr(self, "_dataset_loader") and self._dataset_loader:
+            def apply_project_overlay(stats):
+                for frame_idx, anns in saved_annotations.items():
+                    self.frame_annotations[frame_idx] = anns
+                self.canvas.class_colors.update(saved_class_colors)
+                self.canvas.class_attributes.update(saved_class_attrs)
+                self.class_colors = self.canvas.class_colors
+                self.class_attributes = self.canvas.class_attributes
+                
+                self.current_frame = min(self.current_frame, max(0, self.total_frames - 1))
+                self.frame_slider.setMinimum(0)
+                self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+                self.frame_slider.setValue(self.current_frame)
+                self.load_current_image()
+                self.update_frame_info()
 
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
-        self.frame_slider.setValue(self.current_frame)
-
-        self.load_current_image()
-        self.update_frame_info()
+            self._dataset_loader.finishedLoading.connect(apply_project_overlay)
 
         folder_name = os.path.basename(base_folder)
-        self.setWindowTitle(f"VIAT - Image Dataset: {folder_name}")
+        self.setWindowTitle(f"VIAT - Image Dataset: {folder_name} (Loading...)")
 
         if hasattr(self, "play_button"):
             self.play_button.setEnabled(True)
@@ -1583,6 +1583,14 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def load_current_frame_annotations(self):
         """Load annotations for the current frame into the canvas."""
+        mgr = getattr(self, "object_visibility_manager", None)
+        if mgr and getattr(mgr, "auto_erase_mode", False) and not getattr(self, "_in_auto_erase", False):
+            self._in_auto_erase = True
+            mgr.delete_current_object_on_current_frame()
+            if getattr(self, "_viat_update_visibility_labels", None):
+                self._viat_update_visibility_labels()
+            self._in_auto_erase = False
+
         # Clear canvas selection
         self.canvas.selected_annotation = None
 
@@ -2031,25 +2039,38 @@ class VideoAnnotationTool(QMainWindow):
             class_attributes = getattr(self.canvas, "class_attributes", {})
             backup_before_save(filename)
             # Save project with additional data
-            save_project(
+            from utils.task_runner import run_task_with_progress
+            from utils.file_operations import save_project_generator
+            
+            # Create shallow copies of lists/dicts to prevent thread iteration issues
+            frame_annotations_copy = {k: list(v) for k, v in self.frame_annotations.items()}
+            class_colors_copy = dict(self.canvas.class_colors)
+            annotations_copy = list(self.canvas.annotations)
+            
+            result = run_task_with_progress(
+                self,
+                "Saving Project",
+                "Saving project to disk...",
+                save_project_generator,
                 filename,
-                self.canvas.annotations,
-                self.canvas.class_colors,
+                annotations_copy,
+                class_colors_copy,
                 video_path=video_path,
                 current_frame=self.current_frame,
-                frame_annotations=self.frame_annotations,
+                frame_annotations=frame_annotations_copy,
                 class_attributes=class_attributes,
                 current_style=self.current_style,
                 auto_show_attribute_dialog=self.auto_show_attribute_dialog,
                 use_previous_attributes=self.use_previous_attributes,
                 duplicate_frames_enabled=self.duplicate_frames_enabled,
-                frame_hashes=self.frame_hashes,
-                duplicate_frames_cache=self.duplicate_frames_cache,
+                frame_hashes=dict(self.frame_hashes) if hasattr(self, "frame_hashes") else None,
+                duplicate_frames_cache=dict(self.duplicate_frames_cache) if hasattr(self, "duplicate_frames_cache") else None,
                 image_dataset_info=image_dataset_info,
                 tracking_mode_enabled=self.tracking_mode_enabled,
                 interpolation_mode_active=self.interpolation_manager.is_active,
                 verification_mode_enabled=self.verification_mode,
                 annotations_imported_list=list(self._annotations_imported) if hasattr(self, "_annotations_imported") else [],
+                maximum=100
             )
 
             self.project_file = filename
@@ -2126,6 +2147,8 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def load_project(self, filename=None):
         """Load a project from a file."""
+        if not self.check_unsaved_changes():
+            return
 
         if not filename:
             # Ask for a file name
@@ -2495,11 +2518,17 @@ class VideoAnnotationTool(QMainWindow):
                     QFileDialog.ShowDirsOnly,
                 )
                 if export_dir:
-                    export_image_dataset_yolo(
+                    from utils.task_runner import run_task_with_progress
+                    run_task_with_progress(
+                        self,
+                        "Exporting YOLO",
+                        "Exporting to YOLO format...",
+                        export_image_dataset_yolo,
                         export_dir,
                         self.image_files,
                         self.frame_annotations,
                         self.canvas.class_colors,
+                        maximum=100
                     )
                     self.statusBar.showMessage(
                         f"Annotations exported to YOLO format in {os.path.basename(export_dir)}"
@@ -2528,11 +2557,17 @@ class VideoAnnotationTool(QMainWindow):
                     QFileDialog.ShowDirsOnly,
                 )
                 if export_dir:
-                    export_image_dataset_pascal_voc(
+                    from utils.task_runner import run_task_with_progress
+                    run_task_with_progress(
+                        self,
+                        "Exporting Pascal VOC",
+                        "Exporting to Pascal VOC format...",
+                        export_image_dataset_pascal_voc,
                         export_dir,
                         self.image_files,
                         self.frame_annotations,
                         self.canvas.pixmap,
+                        maximum=100
                     )
                     self.statusBar.showMessage(
                         f"Annotations exported to Pascal VOC format in {os.path.basename(export_dir)}"
@@ -2581,13 +2616,19 @@ class VideoAnnotationTool(QMainWindow):
                     and self.is_image_dataset
                     and export_format == "coco"
                 ):
-                    export_image_dataset_coco(
+                    from utils.task_runner import run_task_with_progress
+                    run_task_with_progress(
+                        self,
+                        "Exporting COCO",
+                        "Exporting to COCO format...",
+                        export_image_dataset_coco,
                         filename,
                         self.image_files,
                         self.frame_annotations,
                         self.canvas.class_colors,
                         image_width,
                         image_height,
+                        maximum=100
                     )
                 else:
 
@@ -2628,17 +2669,23 @@ class VideoAnnotationTool(QMainWindow):
         if not config:
             return  # User cancelled
 
-        # Export the dataset
-        result = export_dataset(
+        # Export the dataset in background thread
+        from utils.task_runner import run_task_with_progress
+        result = run_task_with_progress(
+            self,
+            "Exporting Dataset",
+            "Initializing export...",
+            export_dataset,
             self,
             config,
             self.image_files,
             self.frame_annotations,
             self.canvas.class_colors,
+            maximum=100
         )
 
         if result:
-            self.statusBar.showMessage(result, 5000)
+            self.statusBar.showMessage("Export complete", 5000)
 
     @log_exceptions
     def create_dataset(self):
@@ -4128,6 +4175,56 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage("Pan mode disabled.", 3000)
 
     @log_exceptions
+    def toggle_auto_bbox_mode(self):
+        """Toggle Auto BBox mode using AI."""
+        if not hasattr(self, 'auto_bbox_action'):
+            return
+            
+        self.auto_bbox_mode = self.auto_bbox_action.isChecked()
+        if self.auto_bbox_mode:
+            # Check availability
+            if not self.sam_manager.is_available():
+                QMessageBox.warning(self, "AI Not Available", "Ultralytics is not installed. Please run: pip install ultralytics")
+                self.auto_bbox_mode = False
+                self.auto_bbox_action.setChecked(False)
+                return
+                
+            self.statusBar.showMessage("Auto BBox enabled. Left-click on an object to segment it.", 5000)
+            self.canvas.setCursor(Qt.CrossCursor)
+            
+            # Load model lazily
+            success, msg = self.sam_manager.load_model(self.sam_model_type)
+            if not success:
+                QMessageBox.warning(self, "Model Error", msg)
+                self.auto_bbox_mode = False
+                self.auto_bbox_action.setChecked(False)
+                self.canvas.setCursor(Qt.ArrowCursor)
+        else:
+            self.statusBar.showMessage("Auto BBox disabled.", 3000)
+            self.canvas.setCursor(Qt.ArrowCursor)
+
+    @log_exceptions
+    def change_sam_model(self, model_display_name):
+        """Change the active SAM model."""
+        if "sam2_s" in model_display_name:
+            self.sam_model_type = "sam2_s.pt"
+        elif "sam2_l" in model_display_name:
+            self.sam_model_type = "sam2_l.pt"
+        elif "sam3_s" in model_display_name:
+            self.sam_model_type = "sam3_s.pt"
+        elif "sam3_l" in model_display_name:
+            self.sam_model_type = "sam3_l.pt"
+        if self.auto_bbox_mode:
+            self.statusBar.showMessage(f"Loading model {self.sam_model_type}...", 3000)
+            # Force UI update so status bar shows
+            QApplication.processEvents()
+            success, msg = self.sam_manager.load_model(self.sam_model_type)
+            if not success:
+                QMessageBox.warning(self, "Model Error", msg)
+            else:
+                self.statusBar.showMessage(f"Model {self.sam_model_type} loaded successfully.", 3000)
+
+    @log_exceptions
     def set_autosave_interval(self, interval_ms):
         """Set the auto-save interval."""
         self.autosave_interval = interval_ms
@@ -4179,24 +4276,73 @@ class VideoAnnotationTool(QMainWindow):
             # Use the project file for auto-save
             self.autosave_file = self.project_file
 
+        # Check if autosave is already running
+        if hasattr(self, "_autosave_thread") and self._autosave_thread.isRunning():
+            return
+
         try:
-            # Store the original project_path
-            original_project_path = self.project_path if hasattr(self, "project_path") else None
+            # Gather all arguments synchronously
+            video_path = None
+            image_dataset_info = None
+
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                if self.image_files:
+                    base_folder = os.path.dirname(self.image_files[0])
+                    image_dataset_info = {
+                        "is_image_dataset": True,
+                        "base_folder": base_folder,
+                        "image_files": [
+                            os.path.relpath(f, base_folder) for f in self.image_files
+                        ],
+                    }
+            else:
+                video_path = getattr(self, "video_filename", None)
+
+            class_attributes = getattr(self.canvas, "class_attributes", {})
             
-            # Temporarily set project_path to autosave_file
-            self.project_path = self.autosave_file
-            success = self.save_project(self.autosave_file)
+            # Create shallow copies of lists/dicts to prevent dictionary changed size errors during thread iteration
+            from copy import copy
+            frame_annotations_copy = {k: list(v) for k, v in self.frame_annotations.items()}
             
-            # Restore the original project_path
-            self.project_path = original_project_path
+            project_data_args = {
+                "annotations": list(self.canvas.annotations),
+                "class_colors": dict(self.canvas.class_colors),
+                "video_path": video_path,
+                "current_frame": self.current_frame,
+                "frame_annotations": frame_annotations_copy,
+                "class_attributes": dict(class_attributes),
+                "current_style": self.current_style,
+                "auto_show_attribute_dialog": self.auto_show_attribute_dialog,
+                "use_previous_attributes": self.use_previous_attributes,
+                "duplicate_frames_enabled": self.duplicate_frames_enabled,
+                "frame_hashes": dict(self.frame_hashes) if hasattr(self, "frame_hashes") else None,
+                "duplicate_frames_cache": dict(self.duplicate_frames_cache) if hasattr(self, "duplicate_frames_cache") else None,
+                "image_dataset_info": image_dataset_info,
+                "tracking_mode_enabled": getattr(self, "tracking_mode_enabled", False),
+                "interpolation_mode_active": self.interpolation_manager.is_active if hasattr(self, "interpolation_manager") else False,
+                "verification_mode_enabled": getattr(self, "verification_mode", False),
+                "annotations_imported_list": list(self._annotations_imported) if hasattr(self, "_annotations_imported") else [],
+            }
+
+            from utils.task_runner import AutoSaveThread
+            self._autosave_thread = AutoSaveThread(self.autosave_file, project_data_args, self)
             
-            if success:
-                self.last_autosave_time = QDateTime.currentDateTime()
-                self.statusBar.showMessage(
-                    f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000
-                )
+            def on_autosave_finished(success, message):
+                if success:
+                    from PyQt5.QtCore import QDateTime
+                    import os
+                    self.last_autosave_time = QDateTime.currentDateTime()
+                    self.statusBar.showMessage(
+                        f"Auto-saved to {os.path.basename(self.autosave_file)}", 3000
+                    )
+                else:
+                    print(f"Auto-save failed: {message}")
+                    
+            self._autosave_thread.finished_autosave.connect(on_autosave_finished)
+            self._autosave_thread.start()
+
         except Exception as e:
-            print(f"Auto-save failed: {str(e)}")
+            print(f"Auto-save preparation failed: {str(e)}")
 
     # -------------------------------------------------------------------------
     # Zoom and View Control Methods
@@ -4226,19 +4372,133 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def auto_label(self):
-        """Auto-label objects in the current frame."""
+        """Auto-label objects using zero-shot detection."""
         if not self.canvas.pixmap:
-            QMessageBox.warning(self, "Auto Label", "Please open a video first!")
+            QMessageBox.warning(self, "Auto Annotate", "Please open a video or image first!")
             return
 
-        # This is a placeholder for actual auto-labeling functionality
-        QMessageBox.information(
-            self,
-            "Auto Label",
-            "Auto-labeling functionality is not implemented in this demo.\n\n"
-            "In a real implementation, this would use a pre-trained model (like YOLO, SSD, or Faster R-CNN) "
-            "to automatically detect and label objects in the current frame.",
-        )
+        dialog = AutoAnnotateDialog(self)
+        if dialog.exec_():
+            config = dialog.get_config()
+            self.run_auto_label_dataset(config)
+
+    @log_exceptions
+    def run_auto_label_dataset(self, config):
+        classes = config["classes"]
+        if not classes:
+            QMessageBox.warning(self, "Auto Annotate", "Please enter at least one class to detect.")
+            return
+
+        det_model = config["det_model"]
+        seg_model = config["seg_model"]
+        scope = config["scope"]
+
+        # Initialize manager if needed
+        if self.zero_shot_manager is None:
+            self.zero_shot_manager = ZeroShotManager()
+
+        if not self.zero_shot_manager.is_available():
+            QMessageBox.warning(self, "Auto Annotate Error", "Ultralytics package is missing. Please run: pip install ultralytics")
+            return
+
+        # Setup Progress Dialog
+        total_frames = self.total_frames if scope == "all" else 1
+        progress = QProgressBar(self)
+        progress.setRange(0, total_frames)
+        progress.setValue(0)
+        self.statusBar.addPermanentWidget(progress)
+
+        self.statusBar.showMessage(f"Loading Zero-Shot Model {det_model}...")
+        QApplication.processEvents()
+
+        success, msg = self.zero_shot_manager.load_model(det_model)
+        if not success:
+            QMessageBox.warning(self, "Auto Annotate Error", msg)
+            self.statusBar.removeWidget(progress)
+            return
+
+        self.zero_shot_manager.set_classes(classes)
+
+        # Ensure all classes exist in ClassManager
+        for c in classes:
+            if c not in self.class_manager.classes:
+                self.class_manager.add_class(c)
+
+        # Setup SAM if requested
+        if seg_model:
+            self.statusBar.showMessage(f"Loading Segmentation Refiner {seg_model}...")
+            QApplication.processEvents()
+            s_success, s_msg = self.sam_manager.load_model(seg_model)
+            if not s_success:
+                QMessageBox.warning(self, "Auto Annotate Error", f"SAM Model failed: {s_msg}\nFalling back to bounding boxes.")
+                seg_model = None
+
+        frames_to_process = range(self.total_frames) if scope == "all" else [self.current_frame]
+
+        self.statusBar.showMessage(f"Running Zero-Shot Annotation ({len(frames_to_process)} frames)...")
+        
+        # Save current position if doing all frames
+        original_frame = self.current_frame
+
+        for i, f_idx in enumerate(frames_to_process):
+            # Load frame
+            if scope == "all":
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                ret, frame = self.cap.read()
+                if not ret:
+                    continue
+            else:
+                # current frame
+                frame = self.canvas.current_frame_array
+                if frame is None:
+                    continue
+            
+            # Predict
+            detections = self.zero_shot_manager.predict(frame)
+            
+            # Initialize frame annotations if empty
+            if f_idx not in self.frame_annotations:
+                self.frame_annotations[f_idx] = []
+
+            for det in detections:
+                box = det["box"]
+                c_name = det["class_name"]
+                score = det["score"]
+                
+                # Get polygon if seg_model is used
+                polygon = None
+                if seg_model:
+                    polygon = self.sam_manager.predict_mask_from_box(frame, box)
+
+                # Create QRect
+                rect = QRect(box[0], box[1], box[2] - box[0], box[3] - box[1])
+                
+                # Default class color
+                color = self.canvas.class_colors.get(c_name, QColor(0, 255, 0))
+                
+                # Add BoundingBox
+                annotation = BoundingBox(
+                    rect=rect,
+                    class_name=c_name,
+                    color=color,
+                    source="detected",
+                    score=score,
+                    segmentation=polygon
+                )
+                self.frame_annotations[f_idx].append(annotation)
+
+            progress.setValue(i + 1)
+            QApplication.processEvents()
+
+        # Restore original frame
+        if scope == "all":
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame)
+            ret, _ = self.cap.read()
+
+        self.statusBar.removeWidget(progress)
+        self.statusBar.showMessage(f"Auto-Annotation complete!", 5000)
+        self.update_frame_display()
+        self.update_frame_annotations()
 
     @log_exceptions
     def track_objects(self):
@@ -4670,10 +4930,9 @@ class VideoAnnotationTool(QMainWindow):
             return
         super().keyPressEvent(event)
 
-    @log_exceptions
-    def closeEvent(self, event):
-        """Handle application close event."""
-        if self.project_modified:
+    def check_unsaved_changes(self):
+        """Prompt user to save if project is modified. Returns False if cancelled."""
+        if getattr(self, "project_modified", False):
             reply = QMessageBox.question(
                 self,
                 "Save Project",
@@ -4681,16 +4940,23 @@ class VideoAnnotationTool(QMainWindow):
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save,
             )
-
             if reply == QMessageBox.Save:
                 self.save_project()
-                event.accept()
+                return True
             elif reply == QMessageBox.Cancel:
-                event.ignore()
+                return False
             else:
-                event.accept()
-        else:
-            event.accept()
+                return True
+        return True
+
+    @log_exceptions
+    def closeEvent(self, event):
+        """Handle application close event."""
+        if not self.check_unsaved_changes():
+            event.ignore()
+            return
+            
+        event.accept()
 
         # Save application state
         self.save_application_state()
@@ -5024,9 +5290,19 @@ class VideoAnnotationTool(QMainWindow):
         )
         if reply != QMessageBox.Yes:
             return
-        self.statusBar.showMessage("Scanning for grayscale images...")
-        QApplication.processEvents()
-        result = _viat_remove_grayscale(self)
+
+        from utils.task_runner import run_task_with_progress
+        result = run_task_with_progress(
+            self,
+            "Removing Grayscale Images",
+            "Scanning for grayscale images...",
+            _viat_remove_grayscale,
+            self,
+            maximum=100
+        )
+        if result is None:
+            return
+
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
@@ -5044,14 +5320,26 @@ class VideoAnnotationTool(QMainWindow):
         if not self._viat_ensure_dataset():
             return
         reply = QMessageBox.question(
-            self, "Remove Roboflow Duplicates",
-            "Group images by their Roboflow base name (before .rf.) and\n"
-            "move duplicates to removed/duplicates/ (keeping 1 random per group)?",
+            self, "Remove .rf. Duplicates",
+            "Find Roboflow augmentations (e.g. image_001.rf.abc.jpg) and keep only "
+            "one random image per group?\n\nOthers are moved to removed/duplicates/.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        result = _viat_remove_dup_groups(self)
+
+        from utils.task_runner import run_task_with_progress
+        result = run_task_with_progress(
+            self,
+            "Removing Duplicate Images",
+            "Scanning for duplicates...",
+            _viat_remove_dup_groups,
+            self,
+            maximum=100
+        )
+        if result is None:
+            return
+
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
@@ -5059,8 +5347,7 @@ class VideoAnnotationTool(QMainWindow):
         self.update_frame_info()
         self.update_annotation_list()
         self.statusBar.showMessage(
-            f"Removed {result['moved_images']} duplicates from "
-            f"{result['groups_processed']} groups -> {result['dest_dir']}",
+            f"Removed {result['moved_images']} duplicates from {result['groups_processed']} groups",
             5000,
         )
 
@@ -5307,6 +5594,7 @@ class VideoAnnotationTool(QMainWindow):
     def _viat_show_object_visibility_toolbar(self):
         """Create a toolbar with object-visibility controls (no dialog)."""
         from PyQt5.QtWidgets import QToolBar, QLabel, QPushButton, QWidget, QHBoxLayout
+        from PyQt5.QtCore import Qt
         mgr = self.object_visibility_manager
         if not mgr or not mgr.active:
             return
@@ -5317,7 +5605,7 @@ class VideoAnnotationTool(QMainWindow):
 
         toolbar = QToolBar("Object Visibility", self)
         toolbar.setObjectName("ObjectVisibilityToolbar")
-        self.addToolBar(toolbar)
+        self.addToolBar(Qt.BottomToolBarArea, toolbar)
 
         # Status labels
         self._viat_obj_label = QLabel()
@@ -5338,14 +5626,27 @@ class VideoAnnotationTool(QMainWindow):
         btn_set_start = QPushButton("Set Start")
         btn_set_end = QPushButton("Set End")
         btn_del_frame = QPushButton("Delete Frame")
+        btn_del_range = QPushButton("Delete Range")
         btn_del_obj = QPushButton("Delete Object")
+        
+        btn_auto_erase = QPushButton("Auto Erase: OFF")
+        btn_auto_erase.setCheckable(True)
+        def on_auto_erase_toggled(checked):
+            mgr.auto_erase_mode = checked
+            btn_auto_erase.setText("Auto Erase: ON" if checked else "Auto Erase: OFF")
+            if checked:
+                btn_auto_erase.setStyleSheet("font-weight: bold; background-color: #f44336; color: white;")
+            else:
+                btn_auto_erase.setStyleSheet("")
+        btn_auto_erase.toggled.connect(on_auto_erase_toggled)
+
         btn_finish = QPushButton("FINISH")
         btn_finish.setStyleSheet("font-weight: bold; background-color: #4CAF50; color: white;")
         btn_exit = QPushButton("Exit")
 
         for btn in [btn_prev_obj, btn_next_obj, btn_prev_range, btn_next_range,
-                    btn_set_start, btn_set_end, btn_del_frame, btn_del_obj,
-                    btn_finish, btn_exit]:
+                    btn_set_start, btn_set_end, btn_del_frame, btn_del_range, btn_del_obj,
+                    btn_auto_erase, btn_finish, btn_exit]:
             toolbar.addWidget(btn)
 
         # Store widgets for updates
@@ -5355,7 +5656,7 @@ class VideoAnnotationTool(QMainWindow):
             'prev_obj': btn_prev_obj, 'next_obj': btn_next_obj,
             'prev_range': btn_prev_range, 'next_range': btn_next_range,
             'set_start': btn_set_start, 'set_end': btn_set_end,
-            'del_frame': btn_del_frame, 'del_obj': btn_del_obj,
+            'del_frame': btn_del_frame, 'del_range': btn_del_range, 'del_obj': btn_del_obj,
             'finish': btn_finish, 'exit': btn_exit,
         }
 
@@ -5369,8 +5670,16 @@ class VideoAnnotationTool(QMainWindow):
                 self._viat_range_label.setText(
                     f"Range: {r[0]}-{r[1]} ({s['range_index']+1}/{s['total_ranges']})"
                 )
+                self.frame_slider.blockSignals(True)
+                self.frame_slider.setMinimum(r[0])
+                self.frame_slider.setMaximum(r[1])
+                self.frame_slider.blockSignals(False)
             else:
                 self._viat_range_label.setText("No ranges")
+                self.frame_slider.blockSignals(True)
+                self.frame_slider.setMinimum(0)
+                self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+                self.frame_slider.blockSignals(False)
 
         def on_prev_obj():
             mgr.prev_object()
@@ -5401,6 +5710,29 @@ class VideoAnnotationTool(QMainWindow):
             update_labels()
             self.statusBar.showMessage(f"Deleted {n} annotation(s) on this frame", 2000)
 
+        def on_del_range():
+            r = mgr.get_current_range()
+            if not r:
+                return
+            reply = QMessageBox.question(
+                self, "Delete Range",
+                f"Delete ALL annotations for '{mgr.current_object}' in range {r[0]}-{r[1]}?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                n = mgr.remove_current_range()
+                if not mgr.sorted_objects:
+                    self.viat_exit_object_visibility_mode()
+                    return
+                # Handle case where the object itself is deleted
+                if mgr.current_object not in mgr.sorted_objects:
+                    mgr.current_object_index = min(mgr.current_object_index, len(mgr.sorted_objects) - 1)
+                    mgr.current_object = mgr.sorted_objects[mgr.current_object_index]
+                    mgr.current_range_index = 0
+                    mgr._apply_filter()
+                update_labels()
+                self.statusBar.showMessage(f"Deleted {n} annotations in range", 3000)
+
         def on_del_obj():
             reply = QMessageBox.question(
                 self, "Delete Object",
@@ -5416,7 +5748,9 @@ class VideoAnnotationTool(QMainWindow):
                 self.statusBar.showMessage(f"Deleted {n} annotations", 3000)
 
         def on_finish():
-            if mgr.next_object():
+            if mgr.next_range():
+                update_labels()
+            elif mgr.next_object():
                 update_labels()
             else:
                 QMessageBox.information(self, "All Done", "All objects have been processed.")
@@ -5432,6 +5766,7 @@ class VideoAnnotationTool(QMainWindow):
         btn_set_start.clicked.connect(on_set_start)
         btn_set_end.clicked.connect(on_set_end)
         btn_del_frame.clicked.connect(on_del_frame)
+        btn_del_range.clicked.connect(on_del_range)
         btn_del_obj.clicked.connect(on_del_obj)
         btn_finish.clicked.connect(on_finish)
         btn_exit.clicked.connect(on_exit)
@@ -5446,6 +5781,13 @@ class VideoAnnotationTool(QMainWindow):
             self.removeToolBar(self._viat_visibility_toolbar)
             self._viat_visibility_toolbar.deleteLater()
             del self._viat_visibility_toolbar
+        
+        # Restore slider range
+        if hasattr(self, 'frame_slider'):
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setMinimum(0)
+            self.frame_slider.setMaximum(max(0, getattr(self, 'total_frames', 1) - 1))
+            self.frame_slider.blockSignals(False)
 
     @log_exceptions
     def viat_seg_video_pick_color(self):
@@ -5714,12 +6056,21 @@ class VideoAnnotationTool(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        result = _viat_auto_import_detections(
+        from utils.task_runner import run_task_with_progress
+        result = run_task_with_progress(
+            self,
+            "Auto-Import Detections",
+            "Importing detections...",
+            _viat_auto_import_detections,
             self, filename,
             move_to_review=True,
             add_as_annotations=False,
             bbox_cls=BoundingBox,
+            maximum=100
         )
+        
+        if result is None:
+            return
 
         # Refresh UI
         if self.current_frame >= self.total_frames:

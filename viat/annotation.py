@@ -1506,65 +1506,40 @@ class ClassManager:
 
         class_name = item.text()
 
-        # Check if class is in use
-        in_use = any(
-            annotation.class_name == class_name
-            for annotation in self.main_window.canvas.annotations
-        )
+        # Remove annotations of this class from current frame
+        self.main_window.canvas.annotations = [
+            a for a in self.main_window.canvas.annotations if a.class_name != class_name
+        ]
 
-        # Also check if class is used in any frame
-        for frame_num, annotations in self.main_window.frame_annotations.items():
-            if any(annotation.class_name == class_name for annotation in annotations):
-                in_use = True
-                break
-
-        message = f"Are you sure you want to delete the class '{class_name}'?"
-        if in_use:
-            message += "\n\nThis class is currently in use by annotations. Deleting it will remove all annotations of this class."
-
-        reply = QMessageBox.question(
-            self.main_window,
-            "Delete Class",
-            message,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-
-        if reply == QMessageBox.Yes:
-            # Remove annotations of this class from current frame
-            self.main_window.canvas.annotations = [
-                a for a in self.main_window.canvas.annotations if a.class_name != class_name
+        # Remove annotations of this class from all frames
+        for frame_num in self.main_window.frame_annotations:
+            self.main_window.frame_annotations[frame_num] = [
+                a for a in self.main_window.frame_annotations[frame_num] if a.class_name != class_name
             ]
 
-            # Remove annotations of this class from all frames
-            for frame_num in self.main_window.frame_annotations:
-                self.main_window.frame_annotations[frame_num] = [
-                    a for a in self.main_window.frame_annotations[frame_num] if a.class_name != class_name
-                ]
+        # Remove class from colors dictionary
+        if class_name in self.main_window.canvas.class_colors:
+            del self.main_window.canvas.class_colors[class_name]
 
-            # Remove class from colors dictionary
-            if class_name in self.main_window.canvas.class_colors:
-                del self.main_window.canvas.class_colors[class_name]
+        # Remove class from class_attributes if it exists
+        if hasattr(self.main_window.canvas, "class_attributes") and class_name in self.main_window.canvas.class_attributes:
+            del self.main_window.canvas.class_attributes[class_name]
 
-            # Remove class from class_attributes if it exists
-            if hasattr(self.main_window.canvas, "class_attributes") and class_name in self.main_window.canvas.class_attributes:
-                del self.main_window.canvas.class_attributes[class_name]
+        # Update UI
+        self.main_window.toolbar.update_class_selector()
+        self.main_window.class_dock.update_class_list()
+        self.main_window.update_annotation_list()
 
-            # Update UI
-            self.main_window.toolbar.update_class_selector()
-            self.main_window.class_dock.update_class_list()
-            self.main_window.update_annotation_list()
-
-            # Update canvas
-            if hasattr(self.main_window, "class_selector") and self.main_window.class_selector.count() > 0:
-                self.main_window.canvas.set_current_class(self.main_window.class_selector.currentText())
-            self.main_window.canvas.update()
-            
-            # Mark project as modified
-            self.main_window.project_modified = True
-            
-            # Show success message
-            self.main_window.statusBar.showMessage(f"Deleted class '{class_name}' and all its annotations", 5000)
+        # Update canvas
+        if hasattr(self.main_window, "class_selector") and self.main_window.class_selector.count() > 0:
+            self.main_window.canvas.set_current_class(self.main_window.class_selector.currentText())
+        self.main_window.canvas.update()
+        
+        # Mark project as modified
+        self.main_window.project_modified = True
+        
+        # Show success message
+        self.main_window.statusBar.showMessage(f"Deleted class '{class_name}' and all its annotations", 5000)
 
     def import_classes_from_yolo_yaml(self, filepath):
         """Import annotation classes from a YOLO dataset YAML file."""

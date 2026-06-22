@@ -86,24 +86,22 @@ def backup_before_save(filename, use_timestamp=True, backup_limit=5):
                 print(f"Warning: Could not remove old backup {old_backup}: {e}")
 
 def save_json_atomically(filename, data):
-    file = QSaveFile(filename)
-    if file.open(QIODevice.WriteOnly | QIODevice.Text):
-        try:
-            json_str = json.dumps(data, indent=2)
-            file.write(bytes(json_str, encoding='utf-8'))
-        except Exception as e:
-            print("Error while saving JSON:", e)
-            file.cancelWriting()
-            return
-        if not file.commit():
-            print("Failed to commit file")
-        else:
-            backup_before_save(filename)
-    else:
-        print("Could not open file for writing")
+    tmp_filename = filename + ".tmp"
+    try:
+        with open(tmp_filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_filename, filename)
+        backup_before_save(filename)
+    except Exception as e:
+        print("Error while saving JSON:", e)
+        if os.path.exists(tmp_filename):
+            try:
+                os.remove(tmp_filename)
+            except:
+                pass
 
 
-def save_project(
+def save_project_generator(
     filename,
     annotations,
     class_colors,
@@ -124,28 +122,8 @@ def save_project(
     annotations_imported_list=None,
 
 ):
-    """
-    Save project to a JSON file.
-
-    Args:
-        filename (str): Path to save the project file
-        annotations (list): List of annotation objects
-        class_colors (dict): Dictionary mapping class names to colors
-        video_path (str, optional): Path to the video file
-        current_frame (int, optional): Current frame number
-        frame_annotations (dict, optional): Dictionary mapping frame numbers to annotations
-        class_attributes (dict, optional): Dictionary of class attribute configurations
-        current_style (str, optional): Current UI style
-        auto_show_attribute_dialog (bool, optional): Whether to show attribute dialog for new annotations
-        use_previous_attributes (bool, optional): Whether to use previous annotation attributes as default
-        duplicate_frames_enabled (bool, optional): Whether duplicate frame detection is enabled
-        frame_hashes (dict, optional): Dictionary mapping frame numbers to hash values
-        duplicate_frames_cache (dict, optional): Dictionary mapping hash values to lists of frame numbers
-        image_dataset_info (dict, optional): Information about image dataset if applicable
-        tracking_mode_enabled (bool, optional): Whether tracking mode is enabled
-        interpolation_mode_active (bool, optional): Whether interpolation mode is active
-        verification_mode_enabled (bool, optional): Whether verification mode is enabled
-    """
+    yield 10, "Serializing annotations..."
+    
     # Convert annotations to serializable format
     serialized_annotations = []
     for annotation in annotations:
@@ -159,7 +137,11 @@ def save_project(
     # Convert frame annotations to serializable format
     serialized_frame_annotations = {}
     if frame_annotations:
-        for frame_num, frame_anns in frame_annotations.items():
+        total_frames = len(frame_annotations)
+        for idx, (frame_num, frame_anns) in enumerate(frame_annotations.items()):
+            if idx % 100 == 0 and total_frames > 0:
+                yield 10 + int((idx / total_frames) * 70), f"Serializing frame {idx}/{total_frames}..."
+                
             serialized_frame_annotations[str(frame_num)] = [
                 ann.to_dict() for ann in frame_anns
             ]
@@ -199,11 +181,17 @@ def save_project(
     if image_dataset_info:
         project_data["image_dataset_info"] = image_dataset_info
 
+    yield 85, "Writing to disk..."
     # Save to file
     save_json_atomically(filename, project_data)
 
+    yield 95, "Updating recent projects..."
     # Update recent projects list
     update_recent_projects(filename)
+
+def save_project(*args, **kwargs):
+    for _ in save_project_generator(*args, **kwargs):
+        pass
 
 def load_project(filename, bbox_class):
     """
@@ -743,6 +731,10 @@ def export_image_dataset_pascal_voc(
     for frame_num, image_path in enumerate(image_files):
         # Skip if no annotations for this frame
         if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            xml_filename = os.path.join(output_dir, f"{base_name}.xml")
+            if os.path.exists(xml_filename):
+                os.remove(xml_filename)
             continue
 
         # Create XML structure
@@ -874,6 +866,9 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
     for frame_num, image_path in enumerate(image_files):
         # Skip if no annotations for this frame
         if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            txt_filename = os.path.join(output_dir, f"{base_name}.txt")
+            open(txt_filename, "w").close()
             continue
 
         # Get output .txt filename (same basename as image)
@@ -1146,6 +1141,32 @@ def detect_annotation_format(filename):
         ):
             return "YOLO"
 
+        # Check for generic Delimited format (CSV, TSV, semi-colon, etc.)
+        if lines:
+            for delim in [';', ',', '\t', ' ']:
+                valid_delim = True
+                valid_lines = 0
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = [p.strip() for p in line.split(delim) if p.strip()]
+                    if len(parts) >= 6:
+                        # Case 1: frame + n * (x1, y1, x2, y2, class) -> len = 1 + 5n
+                        # Case 2: frame + n * (x1, y1, x2, y2) + class -> len = 2 + 4n
+                        if (len(parts) - 1) % 5 == 0 or (len(parts) - 2) % 4 == 0:
+                            try:
+                                float(parts[0]) # Frame ID
+                                float(parts[1]) # x1
+                                valid_lines += 1
+                                continue
+                            except ValueError:
+                                pass
+                    valid_delim = False
+                    break
+                if valid_delim and valid_lines > 0:
+                    return "Delimited"
+
     # If no format detected, try more detailed analysis
     if ext == ".json":
         try:
@@ -1159,6 +1180,92 @@ def detect_annotation_format(filename):
             pass
 
     return None
+
+
+def import_delimited_annotations(filename, image_width, image_height, bbox_class, class_colors=None):
+    """
+    Import annotations from a generic delimited format.
+    Supports coordinates that are normalized or absolute.
+    """
+    if class_colors is None:
+        class_colors = {}
+        
+    frame_annotations = {}
+    
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+        
+    for line_idx, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+            
+        best_delim = None
+        best_parts = []
+        for delim in [';', ',', '\t', ' ']:
+            parts = [p.strip() for p in line.split(delim) if p.strip()]
+            if len(parts) > len(best_parts):
+                best_parts = parts
+                best_delim = delim
+                
+        parts = best_parts
+        if len(parts) < 6:
+            raise ValueError(f"Line {line_idx+1}: Not enough elements (found {len(parts)}, expected at least 6)")
+            
+        try:
+            frame_num = int(float(parts[0]))
+        except ValueError:
+            raise ValueError(f"Line {line_idx+1}: Invalid frame number '{parts[0]}'")
+            
+        bboxes = []
+        
+        # Determine format based on number of parts
+        # Case 1: frame_id, (x1, y1, x2, y2, class_id), ... -> length is 1 + 5n
+        if (len(parts) - 1) % 5 == 0:
+            for i in range(1, len(parts), 5):
+                try:
+                    x1, y1, x2, y2 = float(parts[i]), float(parts[i+1]), float(parts[i+2]), float(parts[i+3])
+                    class_id = str(parts[i+4])
+                    bboxes.append((x1, y1, x2, y2, class_id))
+                except ValueError:
+                    raise ValueError(f"Line {line_idx+1}: Invalid coordinate values")
+        # Case 2: frame_id, (x1, y1, x2, y2), ..., class_id -> length is 2 + 4n
+        elif (len(parts) - 2) % 4 == 0:
+            class_id = str(parts[-1])
+            for i in range(1, len(parts)-1, 4):
+                try:
+                    x1, y1, x2, y2 = float(parts[i]), float(parts[i+1]), float(parts[i+2]), float(parts[i+3])
+                    bboxes.append((x1, y1, x2, y2, class_id))
+                except ValueError:
+                    raise ValueError(f"Line {line_idx+1}: Invalid coordinate values")
+        else:
+            raise ValueError(f"Line {line_idx+1}: Unrecognized number of columns ({len(parts)}). Cannot match to a known delimited format.")
+            
+        if frame_num not in frame_annotations:
+            frame_annotations[frame_num] = []
+            
+        for x1, y1, x2, y2, class_id in bboxes:
+            # Check if normalized (all coords <= 1.0)
+            if max(x1, y1, x2, y2) <= 1.0 and max(x1, y1, x2, y2) > 0.0:
+                x1 *= image_width
+                y1 *= image_height
+                x2 *= image_width
+                y2 *= image_height
+                
+            left, right = min(x1, x2), max(x1, x2)
+            top, bottom = min(y1, y2), max(y1, y2)
+            
+            rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
+            
+            if class_id not in class_colors:
+                import random
+                class_colors[class_id] = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                
+            ann = bbox_class(rect=rect, class_name=class_id, color=class_colors[class_id], source="imported")
+            ann.frame = frame_num
+            frame_annotations[frame_num].append(ann)
+            
+    return frame_annotations
 
 
 def import_yolo_annotations(
@@ -1661,8 +1768,12 @@ def export_image_dataset_coco(
 
     # Add images and annotations
     annotation_id = 1
+    total = len(image_files)
 
     for image_id, image_path in enumerate(image_files, 1):
+        if image_id % 5 == 0 and total > 0:
+            yield int((image_id / total) * 90), f"Exporting image {image_id}/{total}..."
+            
         # Try to get actual image dimensions
         try:
             img = cv2.imread(image_path)
@@ -1722,6 +1833,7 @@ def export_image_dataset_coco(
                 annotation_id += 1
 
     # Write to file
+    yield 95, "Saving JSON file..."
     save_json_atomically(filename,coco_data)
 
 
@@ -1753,9 +1865,16 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
             f.write(f"{cls}\n")
 
     # Process each image
+    total = len(image_files)
     for frame_num, image_path in enumerate(image_files):
+        if frame_num % 5 == 0 and total > 0:
+            yield int((frame_num / total) * 100), f"Exporting image {frame_num}/{total}..."
+            
         # Skip if no annotations for this frame
         if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            txt_filename = os.path.join(labels_dir, f"{base_name}.txt")
+            open(txt_filename, "w").close()
             continue
 
         # Get output .txt filename (same basename as image)
@@ -1891,6 +2010,13 @@ def import_annotations(
         for frame_num, frame_anns in frame_annotations.items():
             for ann in frame_anns:
                 ann.class_name = "Quad"
+        if 0 in frame_annotations:
+            annotations = frame_annotations[0]
+
+    elif format_type == "Delimited":
+        frame_annotations = import_delimited_annotations(
+            filename, image_width, image_height, bbox_class, class_colors
+        )
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
 
@@ -2093,9 +2219,17 @@ def export_image_dataset_pascal_voc(
     os.makedirs(annotations_dir, exist_ok=True)
 
     # Process each image
+    total = len(image_files)
     for frame_num, image_path in enumerate(image_files):
+        if frame_num % 5 == 0 and total > 0:
+            yield int((frame_num / total) * 100), f"Exporting image {frame_num}/{total}..."
+            
         # Skip if no annotations for this frame
         if frame_num not in frame_annotations or not frame_annotations[frame_num]:
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            xml_filename = os.path.join(annotations_dir, f"{base_name}.xml")
+            if os.path.exists(xml_filename):
+                os.remove(xml_filename)
             continue
 
         # Get output XML filename (same basename as image)

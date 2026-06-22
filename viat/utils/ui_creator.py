@@ -350,6 +350,28 @@ class UICreator:
         self.main_window.toolbar.addAction(self.pan_tool_action)
         self.main_window.pan_tool_action = self.pan_tool_action
 
+        # Add auto bbox tool action
+        self.auto_bbox_action = QAction("Auto BBox", self.main_window)
+        self.auto_bbox_action.setIcon(self.main_window.icon_provider.get_icon("magic"))
+        self.auto_bbox_action.setCheckable(True)
+        self.auto_bbox_action.setChecked(False)
+        self.auto_bbox_action.setToolTip("Enable Auto BBox mode (left-click on object to auto-segment)")
+        self.auto_bbox_action.triggered.connect(self.main_window.toggle_auto_bbox_mode)
+        self.main_window.toolbar.addAction(self.auto_bbox_action)
+        self.main_window.auto_bbox_action = self.auto_bbox_action
+
+        # Add model selector for Auto BBox
+        self.main_window.sam_model_selector = QComboBox()
+        self.main_window.sam_model_selector.addItems([
+            "SAM2 Fast (sam2_s.pt)", 
+            "SAM2 Huge (sam2_l.pt)",
+            "SAM3 Fast (sam3_s.pt)", 
+            "SAM3 Huge (sam3_l.pt)"
+        ])
+        self.main_window.sam_model_selector.setToolTip("Select the model to use for Auto BBox")
+        self.main_window.sam_model_selector.currentTextChanged.connect(self.main_window.change_sam_model)
+        self.main_window.toolbar.addWidget(self.main_window.sam_model_selector)
+
         self.main_window.toolbar.addSeparator()
        
         # Add verification mode toggle

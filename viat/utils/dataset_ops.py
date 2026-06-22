@@ -362,25 +362,30 @@ def is_grayscale(path: str) -> bool:
         return False
 
 
-def remove_grayscale_images(app, *, dest_subfolder: str = "removed/grayscale") -> Dict:
+def remove_grayscale_images(app, *, dest_subfolder: str = "removed/grayscale"):
     """Detect and move all grayscale images to ``<root>/removed/grayscale/``.
 
     Scans every image in app.image_files, moves grayscale ones (image + label)
     using the generalized move_frames_to. Non-destructive.
 
-    Returns:
+    Yields progress tuples (percent, message) and returns a dict:
         dict: moved_images, grayscale_indices (list), dest_dir
     """
     image_files = list(getattr(app, "image_files", []) or [])
     gray_indices = []
+    total = len(image_files)
+    
     for i, img_path in enumerate(image_files):
         if is_grayscale(img_path):
             gray_indices.append(i)
+        if i % 5 == 0 and total > 0:
+            yield int((i / total) * 50), f"Scanning {i}/{total} images..."
 
     if not gray_indices:
         append_dataset_log(app, "Removed grayscale", affected=0, details="none found")
         return {"moved_images": 0, "grayscale_indices": [], "dest_dir": None}
 
+    yield 50, f"Moving {len(gray_indices)} grayscale images..."
     result = move_frames_to(
         app, gray_indices,
         dest_subfolder=dest_subfolder,
@@ -415,32 +420,34 @@ def remove_duplicate_groups(
     *,
     dest_subfolder: str = "removed/duplicates",
     keep: str = "random",
-) -> Dict:
+):
     """Remove Roboflow duplicate groups, keeping one per group.
 
     Groups images by their Roboflow base name (everything before ``.rf.``).
     For each group with >1 image, keeps one and moves the rest to
     ``<root>/removed/duplicates/``.
 
-    Args:
-        app: main window.
-        dest_subfolder: where to move duplicates.
-        keep: "random" (keep a random one) or "first" (keep the first by name).
-
-    Returns:
+    Yields progress and returns:
         dict: moved_images, groups_processed, kept_per_group, dest_dir
     """
     image_files = list(getattr(app, "image_files", []) or [])
+    total = len(image_files)
 
     groups = defaultdict(list)
     for i, img_path in enumerate(image_files):
         base = _roboflow_base_name(img_path)
         groups[base].append(i)
+        if i % 50 == 0 and total > 0:
+            yield int((i / total) * 30), f"Grouping {i}/{total} images..."
 
     to_move = []
     groups_processed = 0
     kept = {}
-    for base, indices in groups.items():
+    
+    group_items = list(groups.items())
+    total_groups = len(group_items)
+    
+    for i, (base, indices) in enumerate(group_items):
         if len(indices) <= 1:
             continue
         groups_processed += 1
@@ -452,6 +459,9 @@ def remove_duplicate_groups(
         for idx in indices:
             if idx != keep_idx:
                 to_move.append(idx)
+                
+        if i % 10 == 0 and total_groups > 0:
+            yield 30 + int((i / total_groups) * 20), f"Processing group {i}/{total_groups}..."
 
     if not to_move:
         append_dataset_log(app, "Removed duplicates", affected=0, details="no groups found")
@@ -629,7 +639,9 @@ def auto_import_detections(
     total_detections = 0
 
     # 1. Parse all JSONs
-    for jpath in json_paths:
+    total_jsons = len(json_paths)
+    for j_idx, jpath in enumerate(json_paths):
+        yield int((j_idx / total_jsons) * 10), f"Reading JSON {j_idx + 1}/{total_jsons}..."
         try:
             with open(jpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -640,7 +652,12 @@ def auto_import_detections(
         frames = data.get("frames", data)
         image_files_list = metadata.get("image_files", [])
 
-        for frame_key, frame_data in frames.items():
+        total_frames = len(frames)
+        for f_idx, (frame_key, frame_data) in enumerate(frames.items()):
+            if f_idx % 100 == 0 and total_frames > 0:
+                progress = 10 + int((j_idx / total_jsons) * 80) + int((f_idx / total_frames) * (80 / total_jsons))
+                yield min(90, progress), f"Processing frame {f_idx}/{total_frames}..."
+                
             try:
                 frame_idx = int(frame_key)
             except (ValueError, TypeError):
@@ -781,6 +798,7 @@ def auto_import_detections(
     # 3. Move images (which will now move the updated label file)
     moved_images = 0
     if move_to_review and flagged_indices:
+        yield 95, f"Moving {len(flagged_indices)} images to review folder..."
         result = move_to_review_label(app, flagged_indices)
         moved_images = result["moved_images"]
 

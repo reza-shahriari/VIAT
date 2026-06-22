@@ -1,0 +1,6 @@
+transformers
+torch
+torchvision
+Pillow
+timm
+einops

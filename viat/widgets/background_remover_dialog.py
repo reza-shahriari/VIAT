@@ -112,6 +112,11 @@ class BackgroundRemoverDialog(QDialog):
         self.btn_start.clicked.connect(self.start_workflow)
         layout.addWidget(self.btn_start)
         
+        # Pre-fill with current dataset if available
+        if self.parent() and hasattr(self.parent(), "_viat_dataset_info") and getattr(self.parent(), "_viat_dataset_info"):
+            self.input_folder_edit.setText(self.parent()._viat_dataset_info.root)
+            self.check_ready()
+        
     def browse_input_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Dataset Folder")
         if folder:

@@ -187,6 +187,96 @@ def scan_dataset(folder_path: str) -> DatasetInfo:
     return info
 
 
+from PyQt5.QtCore import QThread, pyqtSignal
+
+class DatasetLoaderThread(QThread):
+    batchLoaded = pyqtSignal(list, list, dict)  # image_files_batch, split_batch, boxes_batch
+    finishedLoading = pyqtSignal(dict)  # final_stats
+
+    def __init__(self, info: DatasetInfo, target_splits: set):
+        super().__init__()
+        self.info = info
+        self.target_splits = target_splits
+        self.is_cancelled = False
+
+    def run(self):
+        import os
+        from .label_formats import get_format, LabelParseError
+
+        warnings = []
+        per_split = {}
+        
+        # Batching setup
+        batch_size = 100
+        current_img_batch = []
+        current_split_batch = []
+        current_boxes_batch = {}
+        
+        total_index = 0
+
+        for split in self.info.splits:
+            if self.is_cancelled:
+                break
+            if split.name not in self.target_splits:
+                continue
+                
+            fmt = get_format(split.label_format or self.info.label_format or "yolo")
+            if fmt is None:
+                warnings.append(f"Split {split.name}: unknown format, skipped.")
+                continue
+
+            for img_path in split.images:
+                if self.is_cancelled:
+                    break
+                    
+                current_img_batch.append(img_path)
+                current_split_batch.append(split.name)
+                per_split[split.name] = per_split.get(split.name, 0) + 1
+
+                img_size = _image_size(img_path)
+                if img_size is None:
+                    warnings.append(f"Could not read size: {os.path.basename(img_path)}")
+                    current_boxes_batch[total_index] = []
+                    total_index += 1
+                    continue
+
+                try:
+                    label_path = fmt.find_label_file(img_path, split.label_dirs)
+                except Exception as e:
+                    warnings.append(f"{os.path.basename(img_path)}: {e}")
+                    label_path = None
+
+                boxes = []
+                if label_path:
+                    try:
+                        boxes = fmt.load(label_path, img_size, self.info.classes)
+                    except LabelParseError as e:
+                        warnings.append(str(e))
+                
+                current_boxes_batch[total_index] = boxes or []
+                total_index += 1
+
+                # Emit batch
+                if len(current_img_batch) >= batch_size:
+                    self.batchLoaded.emit(list(current_img_batch), list(current_split_batch), dict(current_boxes_batch))
+                    current_img_batch.clear()
+                    current_split_batch.clear()
+                    current_boxes_batch.clear()
+
+        # Emit remaining batch
+        if current_img_batch and not self.is_cancelled:
+            self.batchLoaded.emit(current_img_batch, current_split_batch, current_boxes_batch)
+
+        if not self.is_cancelled:
+            self.finishedLoading.emit({
+                "per_split_counts": per_split,
+                "classes": self.info.classes,
+                "warnings": warnings,
+            })
+
+    def cancel(self):
+        self.is_cancelled = True
+
 def load_dataset_into_app(
     app,
     info: DatasetInfo,
@@ -194,108 +284,52 @@ def load_dataset_into_app(
     *,
     splits_to_load: Optional[List[str]] = None,
 ):
-    """Load *info* into the VIAT main window.
-
-    Args:
-        app: the VideoAnnotationTool main window.
-        info: scanned dataset.
-        bbox_cls: the BoundingBox class (used to build annotation objects).
-        splits_to_load: which splits to load (names). None = all (show all by
-            default, per user requirement). "root" loads the no-split case.
-
-    Returns:
-        dict with keys: image_files (list[str]), frame_to_split (list[str]),
-        per_split_counts (dict), classes (list[str]), warnings (list[str]).
-    """
+    """Load *info* into the VIAT main window using a background thread."""
     from PyQt5.QtCore import QRect
     from PyQt5.QtGui import QColor
     import random
-    import cv2
-
-    warnings = []
-    image_files: List[str] = []
-    frame_to_split: List[str] = []
-    per_split: Dict[str, int] = {}
-
-    # Keep only class colors/attributes that are present in the new dataset
-    old_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
-    old_attributes = dict(getattr(app.canvas, "class_attributes", {}) or {})
-    
-    new_colors = {}
-    new_attributes = {}
-    
-    for cls in info.classes:
-        if cls in old_colors:
-            new_colors[cls] = old_colors[cls]
-        else:
-            new_colors[cls] = QColor(
-                random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-            )
-            
-        if cls in old_attributes:
-            new_attributes[cls] = old_attributes[cls]
-        else:
-            new_attributes[cls] = {
-                "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
-                "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
-            }
-            
-    app.canvas.class_colors = new_colors
-    app.canvas.class_attributes = new_attributes
-    app.class_attributes = app.canvas.class_attributes  # legacy alias
-
-    # Reset frame annotations (caller usually already did, but be safe)
-    app.frame_annotations = {}
 
     target_splits = {s.name for s in info.splits}
     if splits_to_load is not None:
         target_splits = set(splits_to_load)
 
-    for split in info.splits:
-        if split.name not in target_splits:
-            continue
-        fmt = get_format(split.label_format or info.label_format or "yolo")
-        if fmt is None:
-            warnings.append(f"Split {split.name}: unknown format, skipped.")
-            continue
+    # Initialize app states
+    app.frame_annotations = {}
+    app.image_files = getattr(app, "image_files", [])
+    app._viat_frame_to_split = getattr(app, "_viat_frame_to_split", [])
+    
+    app.image_files.clear()
+    app._viat_frame_to_split.clear()
+    app.total_frames = 0
+    app.current_frame = 0
 
-        for img_path in split.images:
-            frame_idx = len(image_files)
-            image_files.append(img_path)
-            frame_to_split.append(split.name)
-            per_split[split.name] = per_split.get(split.name, 0) + 1
+    old_colors = dict(getattr(app.canvas, "class_colors", {}) or {})
+    old_attributes = dict(getattr(app.canvas, "class_attributes", {}) or {})
+    new_colors, new_attributes = {}, {}
+    for cls in info.classes:
+        new_colors[cls] = old_colors.get(cls, QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
+        new_attributes[cls] = old_attributes.get(cls, {
+            "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
+            "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
+        })
+    app.canvas.class_colors = new_colors
+    app.canvas.class_attributes = new_attributes
+    app.class_attributes = app.canvas.class_attributes
 
-            # Get image size (needed by YOLO de-normalization)
-            img_size = _image_size(img_path)
-            if img_size is None:
-                warnings.append(f"Could not read size: {os.path.basename(img_path)}")
-                continue
+    loader = DatasetLoaderThread(info, target_splits)
 
-            try:
-                label_path = fmt.find_label_file(img_path, split.label_dirs)
-            except Exception as e:
-                warnings.append(f"{os.path.basename(img_path)}: {e}")
-                label_path = None
+    def on_batch_loaded(imgs, splits, boxes_batch):
+        start_idx = len(app.image_files)
+        app.image_files.extend(imgs)
+        app._viat_frame_to_split.extend(splits)
+        app.total_frames = len(app.image_files)
 
-            if not label_path:
-                continue
-
-            try:
-                boxes = fmt.load(label_path, img_size, info.classes)
-            except LabelParseError as e:
-                warnings.append(str(e))
-                continue
-
-            if not boxes:
-                continue
-
+        for abs_idx, boxes in boxes_batch.items():
             anns = []
             for b in boxes:
                 cls_name = b["class_name"]
                 if cls_name not in app.canvas.class_colors:
-                    app.canvas.class_colors[cls_name] = QColor(
-                        random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-                    )
+                    app.canvas.class_colors[cls_name] = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
                     app.canvas.class_attributes[cls_name] = {
                         "Size": {"type": "int", "default": -1, "min": 0, "max": 100},
                         "Quality": {"type": "int", "default": -1, "min": 0, "max": 100},
@@ -304,28 +338,48 @@ def load_dataset_into_app(
                         info.classes.append(cls_name)
 
                 rect = QRect(b["x"], b["y"], max(1, b["w"]), max(1, b["h"]))
-                color = app.canvas.class_colors[cls_name]
                 ann = bbox_cls(
                     rect=rect,
                     class_name=cls_name,
                     attributes=b.get("attributes", {}),
-                    color=color,
+                    color=app.canvas.class_colors[cls_name],
                     source=b.get("source", "manual"),
                     score=b.get("score", 1.0),
                     segmentation=b.get("segmentation"),
                 )
-                # Set verified flag (for viat_json, accepted=True -> verified)
                 if "verified" in b:
                     ann.verified = bool(b["verified"])
                 anns.append(ann)
-            app.frame_annotations[frame_idx] = anns
+            app.frame_annotations[abs_idx] = anns
+        
+        app.frame_slider.setMaximum(max(0, app.total_frames - 1))
+        app.update_frame_info()
+        app.update_annotation_list()
+        app.refresh_class_ui()
+        if start_idx == 0:
+            app.load_current_image()
+
+    def on_finished(stats):
+        if hasattr(app, "_dataset_loader"):
+            app._dataset_loader = None
+        
+        msg = f"Loaded {app.total_frames} images; {len(stats['classes'])} classes."
+        if stats['warnings']:
+            msg += f" ({len(stats['warnings'])} warnings)"
+        app.statusBar.showMessage(msg, 8000)
+
+    loader.batchLoaded.connect(on_batch_loaded)
+    loader.finishedLoading.connect(on_finished)
+    
+    app._dataset_loader = loader
+    loader.start()
 
     return {
-        "image_files": image_files,
-        "frame_to_split": frame_to_split,
-        "per_split_counts": per_split,
+        "image_files": [], # Return empty immediately as loading is background
+        "frame_to_split": [],
+        "per_split_counts": {},
         "classes": info.classes,
-        "warnings": warnings,
+        "warnings": [],
     }
 
 
@@ -871,7 +925,11 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
     from .label_formats.coco import CocoLabelFormat
 
     written = 0
+    total = len(image_files)
     for i, img_path in enumerate(image_files):
+        if i % 5 == 0 and total > 0:
+            yield int((i / total) * 90), f"Exporting image {i}/{total}..."
+            
         split = split_of[i]
         if make_splits:
             img_dest_dir = os.path.join(out_dir, split, "images")
@@ -926,6 +984,7 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
         except Exception:
             continue
 
+    yield 90, "Finalizing export files..."
     # COCO dataset-wide pass (one json per split)
     if isinstance(fmt, CocoLabelFormat):
         import json

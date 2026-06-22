@@ -23,6 +23,7 @@ class IconProvider:
             "zoom-out": "fa5s.search-minus",
             "zoom-original": "fa5s.expand",
             "pan-tool": "fa5s.hand-paper",
+            "magic": "fa5s.magic",
             # Add more mappings as needed
         }
 
