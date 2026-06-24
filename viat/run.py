@@ -1,8 +1,22 @@
 #!/usr/bin/env python
+# Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
+try:
+    import torch
+except ImportError:
+    pass
+
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if getattr(sys, 'frozen', False):
+    meipass = sys._MEIPASS
+    sys.path.insert(0, meipass)
+    sys.path.insert(0, os.path.join(meipass, 'viat'))
+else:
+    run_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.dirname(run_dir))
+    sys.path.insert(0, run_dir)
+
 from viat.main import VideoAnnotationTool  
 
 from PyQt5.QtWidgets import QApplication

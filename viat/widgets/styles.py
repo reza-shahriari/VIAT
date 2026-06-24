@@ -110,6 +110,11 @@ class StyleManager:
             background-color: #2a82da;
         }
         
+        QPushButton:checked {
+            background-color: #2a82da;
+            color: #ffffff;
+        }
+        
         QPushButton:disabled {
             background-color: #353535;
             color: #7f7f7f;
@@ -309,6 +314,11 @@ class StyleManager:
             color: #ffffff;
         }
         
+        QPushButton:checked {
+            background-color: #0078d7;
+            color: #ffffff;
+        }
+        
         QPushButton:disabled {
             background-color: #f0f0f0;
             color: #a0a0a0;
@@ -497,6 +507,11 @@ class StyleManager:
             color: #ffffff;
         }
         
+        QPushButton:checked {
+            background-color: #0078d7;
+            color: #ffffff;
+        }
+        
         QPushButton:disabled {
             background-color: #d5e4f2;
             color: #a0a0a0;
@@ -648,6 +663,11 @@ class StyleManager:
             color: #ffffff;
         }
         
+        QPushButton:checked {
+            background-color: #2ecc71;
+            color: #ffffff;
+        }
+        
         QPushButton:disabled {
             background-color: #e9f7ef;
             color: #a0a0a0;
@@ -781,6 +801,11 @@ class StyleManager:
         }
         
         QPushButton:pressed {
+            background-color: #ff8c00;
+            color: #ffffff;
+        }
+        
+        QPushButton:checked {
             background-color: #ff8c00;
             color: #ffffff;
         }
@@ -982,6 +1007,11 @@ class StyleManager:
         }
         
         QPushButton:pressed {
+            background-color: #3daeb7;
+            color: #ffffff;
+        }
+        
+        QPushButton:checked {
             background-color: #3daeb7;
             color: #ffffff;
         }

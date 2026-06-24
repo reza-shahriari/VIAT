@@ -5,6 +5,11 @@ This module contains the main application window and program entry point for the
 Video Annotation Tool. It provides the UI framework and coordinates between the
 different components of the application.
 """
+# Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
+try:
+    import torch
+except ImportError:
+    pass
 
 import os
 import random
@@ -38,9 +43,10 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QCheckBox,
     QTextEdit,
+    QProgressDialog,
     QPlainTextEdit,
 )
-from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime, QEvent
+from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime, QEvent, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
 import sys
 
@@ -50,12 +56,16 @@ from .canvas import VideoCanvas
 from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
-from .logger import VIATLogger, log_exceptions
+from .logger import VIATLogger, log_exceptions, logger
 from .widgets.auto_annotate_dialog import AutoAnnotateDialog
 from .utils.zero_shot_manager import ZeroShotManager
 from .tracking.nossort import NOCSORT
+from .tracking.manager import TrackerManager
+from .widgets.tracking_dialog import TrackingDialog
+from .utils.ui_creator import UICreator
+from .utils.sam_manager import SamManager
+from .utils.sam3_native_manager import Sam3NativeManager
 
-logger = VIATLogger()
 
 
 import numpy as np
@@ -135,6 +145,205 @@ from natsort import natsorted
 from copy import deepcopy
 from pathlib import Path
 
+class AutoLabelWorker(QThread):
+    frame_started = pyqtSignal(int)
+    frame_processed = pyqtSignal(int, list)
+    progress_updated = pyqtSignal(int)
+    finished_processing = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, config, is_image_dataset, image_files, video_filename, zero_shot_manager, sam_manager, main_window):
+        super().__init__()
+        self.config = config
+        self.is_image_dataset = is_image_dataset
+        self.image_files = image_files
+        self.video_filename = video_filename
+        self.zero_shot_manager = zero_shot_manager
+        self.sam_manager = sam_manager
+        self.main_window = main_window
+        self.sam3_native_manager = getattr(main_window, 'sam3_native_manager', None)
+        self.is_cancelled = False
+
+    def run(self):
+        try:
+            start_frame = self.config["start_frame"]
+            end_frame = self.config["end_frame"]
+            strategy = self.config["strategy"]
+            seg_model = self.config["seg_model"]
+
+            def get_frame_generator():
+                if self.is_image_dataset:
+                    for f_idx in range(start_frame, end_frame + 1):
+                        if self.is_cancelled:
+                            break
+                        if 0 <= f_idx < len(self.image_files):
+                            yield f_idx, cv2.imread(self.image_files[f_idx])
+                else:
+                    cap = cv2.VideoCapture(self.video_filename)
+                    if not cap.isOpened():
+                        self.error_occurred.emit("Could not open video file.")
+                        return
+                        
+                    for f_idx in range(start_frame, end_frame + 1):
+                        if self.is_cancelled:
+                            break
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                        ret, f = cap.read()
+                        if ret:
+                            yield f_idx, f
+                    cap.release()
+
+            if strategy == "tracking":
+                gen = get_frame_generator()
+                try:
+                    first_f_idx, first_frame = next(gen)
+                except StopIteration:
+                    return
+
+                self.frame_started.emit(first_f_idx)
+                self.frame_started.emit(first_f_idx)
+                
+                if self.config.get("det_model") == "existing_annotations":
+                    existing_anns = self.config.get("existing_annotations_data", {}).get(first_f_idx, [])
+                    target_classes = [c.lower() for c in self.config.get("classes", [])]
+                    initial_detections = []
+                    for i, ann in enumerate(existing_anns):
+                        if not target_classes or ann.class_name.lower() in target_classes:
+                            initial_detections.append({
+                                "box": [ann.rect.x(), ann.rect.y(), ann.rect.x() + ann.rect.width(), ann.rect.y() + ann.rect.height()],
+                                "class_name": ann.class_name,
+                                "score": 1.0,
+                                "original_ann_idx": i
+                            })
+                else:
+                    initial_detections = self.zero_shot_manager.predict(first_frame)
+
+                bboxes = []
+                frame_anns = []
+                for det in initial_detections:
+                    box = det["box"]
+                    c_name = det["class_name"]
+                    score = det["score"]
+                    bboxes.append(box)
+                    
+                    polygon = None
+                    if seg_model:
+                        polygon = self.sam_manager.predict_mask_from_box(first_frame, box)
+                    
+                    frame_anns.append({
+                        "box": box, "class_name": c_name, "score": score,
+                        "segmentation": polygon, "source": "detected",
+                        "original_ann_idx": det.get("original_ann_idx")
+                    })
+
+                self.frame_processed.emit(first_f_idx, frame_anns)
+                self.progress_updated.emit(1)
+
+                if bboxes and start_frame < end_frame and not self.is_cancelled:
+                    tracking_model = seg_model if seg_model else "sam2_s.pt"
+                    
+                    def frame_only_generator():
+                        for idx, f in gen:
+                            yield f
+                    
+                    if "sam3" in tracking_model.lower() and self.sam3_native_manager and self.sam3_native_manager.is_available():
+                        # Track with native sam3
+                        # We need resource path.
+                        res_path = getattr(self.main_window, "video_filename", None)
+                        if hasattr(self.main_window, "is_image_dataset") and self.main_window.is_image_dataset:
+                            # If it's image dataset, pass folder
+                            res_path = os.path.dirname(self.main_window.image_files[0]) if self.main_window.image_files else None
+                            
+                        # native track handles start_f to end_f. but wait, tracking_model is just model type.
+                        # We must start the tracking from `f_idx` to `self.main_window.total_frames - 1`
+                        # AutoLabelWorker already tracks multiple objects, wait! Native sam3 tracks 1 object per call here unless multiplexed.
+                        # But wait, AutoLabelWorker uses `track_video_from_boxes` which is not implemented in sam3 native yet.
+                        # Let's fallback to Ultralytics sam_manager for background auto label boxes for now if tracking_model is sam3.
+                        # Wait, SAM3 from ultralytics supports boxes perfectly well. We can just keep it.
+                        results_generator = self.sam_manager.track_video_from_boxes(frame_only_generator(), bboxes, tracking_model)
+                    else:
+                        results_generator = self.sam_manager.track_video_from_boxes(frame_only_generator(), bboxes, tracking_model)
+                    
+                    current_idx = start_frame + 1
+                    for success, track_res in results_generator:
+                        if self.is_cancelled:
+                            break
+                        if not success:
+                            self.error_occurred.emit(track_res)
+                            break
+                            
+                        self.frame_started.emit(current_idx)
+                        tracked_boxes = track_res["boxes"]
+                        tracked_polygons = track_res["polygons"]
+                        frame_anns = []
+                        
+                        for i, t_box in enumerate(tracked_boxes):
+                            if i < len(initial_detections):
+                                orig_det = initial_detections[i]
+                                c_name = orig_det["class_name"]
+                                score = orig_det["score"]
+                                polygon = tracked_polygons[i] if i < len(tracked_polygons) else None
+                                
+                                frame_anns.append({
+                                    "box": list(t_box), "class_name": c_name, "score": score,
+                                    "segmentation": polygon, "source": "tracked",
+                                    "original_ann_idx": orig_det.get("original_ann_idx")
+                                })
+                                
+                        self.frame_processed.emit(current_idx, frame_anns)
+                        self.progress_updated.emit(current_idx - start_frame + 1)
+                        current_idx += 1
+                        
+            else:
+                # independent
+                processed_count = 0
+                for f_idx, frame in get_frame_generator():
+                    if self.is_cancelled:
+                        break
+                    self.frame_started.emit(f_idx)
+                    self.frame_started.emit(f_idx)
+                    if self.config.get("det_model") == "existing_annotations":
+                        existing_anns = self.config.get("existing_annotations_data", {}).get(f_idx, [])
+                        target_classes = [c.lower() for c in self.config.get("classes", [])]
+                        detections = []
+                        for i, ann in enumerate(existing_anns):
+                            if not target_classes or ann.class_name.lower() in target_classes:
+                                detections.append({
+                                    "box": [ann.rect.x(), ann.rect.y(), ann.rect.x() + ann.rect.width(), ann.rect.y() + ann.rect.height()],
+                                    "class_name": ann.class_name,
+                                    "score": 1.0,
+                                    "original_ann_idx": i
+                                })
+                    else:
+                        detections = self.zero_shot_manager.predict(frame)
+
+                    frame_anns = []
+                    for det in detections:
+                        box = det["box"]
+                        c_name = det["class_name"]
+                        score = det["score"]
+                        polygon = None
+                        if seg_model:
+                            polygon = self.sam_manager.predict_mask_from_box(frame, box)
+                            
+                        frame_anns.append({
+                            "box": list(box), "class_name": c_name, "score": score,
+                            "segmentation": polygon, "source": "detected",
+                            "original_ann_idx": det.get("original_ann_idx")
+                        })
+                        
+                    self.frame_processed.emit(f_idx, frame_anns)
+                    processed_count += 1
+                    self.progress_updated.emit(processed_count)
+
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+        finally:
+            self.finished_processing.emit()
+            
+    def cancel(self):
+        self.is_cancelled = True
+        
 class VideoAnnotationTool(QMainWindow):
     """
     Main application window for the Video Annotation Tool.
@@ -158,7 +367,9 @@ class VideoAnnotationTool(QMainWindow):
         self.setup_ui()
         self.canvas.smart_edge_enabled = False
         self.setup_autosave()
-
+        self.locate_anything_manager = None
+        self.sam_manager = None
+        self.sam3_native_manager = None
         self.init_managers()
         self.ui_creator.create_interpolation_ui()
         # Install event filter to handle global shortcuts
@@ -194,6 +405,9 @@ class VideoAnnotationTool(QMainWindow):
         self.performance_manager = PerfomanceManger()
         # Frame cache + fast seek (patch6)
         self.viat_perf = _ViatPerformanceManager(self, cache_capacity=60)
+        self.tracker_manager = TrackerManager()
+        self.sam_manager = SamManager()
+        self.sam3_native_manager = Sam3NativeManager()
 
     @log_exceptions
     def load_last_project(self):
@@ -359,6 +573,9 @@ class VideoAnnotationTool(QMainWindow):
 
         # Set initial window size
         self.resize(1200, 800)
+        
+        # Setup SAM Interactive Integration
+        self.setup_sam_interactive()
 
         # Set window title
         self.setWindowTitle("VIAT - Video Image Annotation Tool")
@@ -567,6 +784,296 @@ class VideoAnnotationTool(QMainWindow):
             if hasattr(self, 'finish_integration_sep'):
                 self.finish_integration_sep.setVisible(True)
             self.statusBar.showMessage("Integration Mode active. Please review the dataset.", 10000)
+
+            self.update_canvas()
+
+    def setup_sam_interactive(self):
+        """Set up the SAM Interactive Dock signals and menu action."""
+        if hasattr(self, "sam_interactive_dock"):
+            self.sam_interactive_dock.preview_requested.connect(self.on_sam_preview_requested)
+            self.sam_interactive_dock.track_requested.connect(self.on_sam_track_requested)
+            self.sam_interactive_dock.clear_requested.connect(self.on_sam_clear_requested)
+            self.sam_interactive_dock.model_changed.connect(self.on_sam_model_changed)
+            
+            # Add action to the segmentation/tracking menu if it exists, or View menu
+            view_menu = self.menuBar().addMenu("&SAM Tracking")
+            self.action_sam_interactive = view_menu.addAction("Toggle SAM Interactive Mode")
+            self.action_sam_interactive.setCheckable(True)
+            self.action_sam_interactive.triggered.connect(self.toggle_sam_interactive_mode)
+
+    def on_sam_model_changed(self, model_type):
+        self.statusBar.showMessage(f"Loading {model_type}...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if "sam3" in model_type.lower():
+                success, msg = self.sam3_native_manager.load_model(model_type)
+            else:
+                success, msg = self.sam_manager.load_model(model_type)
+            
+            if success:
+                self.statusBar.showMessage(f"{model_type} loaded successfully.", 3000)
+            else:
+                QMessageBox.warning(self, "Model Load Error", msg)
+                self.statusBar.showMessage("Model loading failed.", 3000)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def toggle_sam_interactive_mode(self, checked):
+        if not hasattr(self, "sam_interactive_dock"):
+            return
+        
+        self.canvas.sam_interactive_mode = checked
+        if checked:
+            self.sam_interactive_dock.show()
+            self.sam_interactive_dock.raise_()
+            
+            model_type = self.sam_interactive_dock.get_model_type()
+            if "sam3" in model_type.lower():
+                # Use the native SAM3 manager
+                success, msg = self.sam3_native_manager.load_model(model_type)
+                if not success:
+                    from PyQt5.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "SAM3 Load Error", msg)
+            else:
+                # Use the Ultralytics SAM2 manager
+                success, msg = self.sam_manager.load_model(model_type)
+                if not success:
+                    from PyQt5.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "SAM2 Load Error", msg)
+            
+            self.canvas.sam_prompt_points = []
+            self.canvas.sam_prompt_labels = []
+            self.canvas.sam_prompt_box = None
+            self.sam_interactive_dock.update_status(0, 0, False)
+            self.sam_interactive_dock.update_frame_info(self.current_frame, self.total_frames)
+            self.statusBar.showMessage("SAM Interactive Mode Enabled: Left click for pos point, drag for box, right click for neg point.")
+        else:
+            self.sam_interactive_dock.hide()
+            self.statusBar.showMessage("SAM Interactive Mode Disabled")
+        self.canvas.update()
+
+    def on_sam_clear_requested(self):
+        self.canvas.sam_prompt_points = []
+        self.canvas.sam_prompt_labels = []
+        self.canvas.sam_prompt_box = None
+        self.sam_interactive_dock.update_status(0, 0, False)
+        self.canvas.update()
+
+    def on_sam_preview_requested(self):
+        if not self.canvas.current_frame_array is not None:
+            return
+            
+        points = [[p.x(), p.y()] for p in self.canvas.sam_prompt_points] if self.canvas.sam_prompt_points else None
+        labels = self.canvas.sam_prompt_labels if self.canvas.sam_prompt_labels else None
+        box = [self.canvas.sam_prompt_box.x(), self.canvas.sam_prompt_box.y(), 
+               self.canvas.sam_prompt_box.x() + self.canvas.sam_prompt_box.width(), 
+               self.canvas.sam_prompt_box.y() + self.canvas.sam_prompt_box.height()] if self.canvas.sam_prompt_box else None
+        text_prompt = self.sam_interactive_dock.get_text_prompt()
+        
+        if not points and not box and not text_prompt:
+            QMessageBox.warning(self, "No Prompts", "Please add at least one point, bounding box, or text prompt.")
+            return
+            
+        model_type = self.sam_interactive_dock.get_model_type()
+        manager = self.sam3_native_manager if "sam3" in model_type.lower() else self.sam_manager
+        
+        # We need the actual frame
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        
+        polygon = manager.predict_mask_from_prompt(
+            self.canvas.current_frame_array, points=points, labels=labels, box=box, text_prompt=text_prompt
+        )
+        
+        QApplication.restoreOverrideCursor()
+        
+        if polygon:
+            # We don't want to permanently add it to the frame annotations until Track is clicked,
+            # but we can show it temporarily. For now, let's just add it as an annotation.
+            # If the user clicks track, we might duplicate it, so better delete previous preview.
+            # Remove previous preview if it exists
+            self.canvas.annotations = [a for a in self.canvas.annotations if getattr(a, 'is_sam_preview', False) == False]
+            
+            ann = BoundingBox(
+                QRect(0, 0, 0, 0), # Box doesn't matter for polygon-only display unless we calculate it
+                self.canvas.current_class,
+                color=self.canvas.class_colors.get(self.canvas.current_class, QColor(0, 255, 0)),
+                attributes={"source": "sam_preview"}
+            )
+            # Calculate bounding box of polygon
+            x_coords = [p[0] for p in polygon]
+            y_coords = [p[1] for p in polygon]
+            if x_coords and y_coords:
+                ann.rect = QRect(int(min(x_coords)), int(min(y_coords)), 
+                               int(max(x_coords) - min(x_coords)), int(max(y_coords) - min(y_coords)))
+            
+            ann.segmentation = polygon
+            ann.is_sam_preview = True
+            self.canvas.annotations.append(ann)
+            self.canvas.update()
+            self.statusBar.showMessage("Preview generated successfully.", 3000)
+        else:
+            self.statusBar.showMessage("No mask generated.", 3000)
+
+    def on_sam_track_requested(self, strategy, start_f, end_f):
+        if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+            if not hasattr(self, "image_files") or not self.image_files:
+                return
+        else:
+            if not hasattr(self, "cap") or not self.cap or not self.cap.isOpened():
+                return
+
+            
+        points = [[p.x(), p.y()] for p in self.canvas.sam_prompt_points] if self.canvas.sam_prompt_points else None
+        labels = self.canvas.sam_prompt_labels if self.canvas.sam_prompt_labels else None
+        box = [self.canvas.sam_prompt_box.x(), self.canvas.sam_prompt_box.y(), 
+               self.canvas.sam_prompt_box.x() + self.canvas.sam_prompt_box.width(), 
+               self.canvas.sam_prompt_box.y() + self.canvas.sam_prompt_box.height()] if self.canvas.sam_prompt_box else None
+        text_prompt = self.sam_interactive_dock.get_text_prompt()
+        
+        if not points and not box and not text_prompt:
+            QMessageBox.warning(self, "No Prompts", "Please add at least one point, bounding box, or text prompt.")
+            return
+            
+        model_type = self.sam_interactive_dock.get_model_type()
+        manager = self.sam3_native_manager if "sam3" in model_type.lower() else self.sam_manager
+        
+        # Remove preview annotations
+        self.canvas.annotations = [a for a in self.canvas.annotations if getattr(a, 'is_sam_preview', False) == False]
+        
+        progress = QProgressDialog("Tracking object...", "Cancel", start_f, end_f, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def frame_generator():
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                for f_idx in range(start_f, end_f + 1):
+                    if 0 <= f_idx < len(self.image_files):
+                        frame = cv2.imread(self.image_files[f_idx])
+                        if frame is not None:
+                            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                cap = cv2.VideoCapture(self.video_filename)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                for f_idx in range(start_f, end_f + 1):
+                    ret, frame = cap.read()
+                    if not ret: break
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    yield frame_rgb
+                cap.release()
+
+        if start_f == end_f:
+            # Single frame prediction
+            self.statusBar.showMessage("Generating mask for single frame...")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            
+            frame = None
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                if 0 <= start_f < len(self.image_files):
+                    frame_bgr = cv2.imread(self.image_files[start_f])
+                    if frame_bgr is not None:
+                        frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                cap = cv2.VideoCapture(self.video_filename)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                ret, frame_bgr = cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                cap.release()
+                
+            QApplication.restoreOverrideCursor()
+            if frame is None:
+                QMessageBox.warning(self, "Error", "Could not read the frame.")
+                return
+                
+            polygon = manager.predict_mask_from_prompt(
+                frame, points=points, labels=labels, box=box, text_prompt=text_prompt
+            )
+            
+            if polygon:
+                if start_f not in self.frame_annotations:
+                    self.frame_annotations[start_f] = []
+                    
+                ann_rect = QRect(0, 0, 0, 0)
+                if box:
+                    ann_rect = QRect(box[0], box[1], box[2] - box[0], box[3] - box[1])
+                else:
+                    x_coords = [p[0] for p in polygon]
+                    y_coords = [p[1] for p in polygon]
+                    if x_coords and y_coords:
+                        ann_rect = QRect(int(min(x_coords)), int(min(y_coords)), 
+                                       int(max(x_coords) - min(x_coords)), int(max(y_coords) - min(y_coords)))
+                                       
+                ann = BoundingBox(
+                    ann_rect, 
+                    self.canvas.current_class, 
+                    color=self.canvas.class_colors.get(self.canvas.current_class, QColor(0, 255, 0)),
+                    source="sam_tracked",
+                    segmentation=polygon
+                )
+                self.frame_annotations[start_f].append(ann)
+            else:
+                QMessageBox.warning(self, "Tracking Error", "No object detected.")
+                
+            self.on_sam_clear_requested()
+            # Keep SAM interactive mode ON so the user can annotate more frames
+            self.seek_to_frame(self.current_frame)
+            self.statusBar.showMessage("SAM processing completed.", 5000)
+            return
+
+        self.statusBar.showMessage(f"Tracking using {model_type}...")
+        
+        if manager == self.sam3_native_manager:
+            res_path = getattr(self, "video_filename", None)
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                res_path = os.path.dirname(self.image_files[0]) if self.image_files else None
+            results_generator = manager.track_video_from_prompt(
+                resource_path=res_path, start_f=start_f, end_f=end_f, points=points, labels=labels, box=box, text_prompt=text_prompt
+            )
+        else:
+            results_generator = manager.track_video_from_prompt(
+                frame_generator(), points=points, labels=labels, box=box, text_prompt=text_prompt, model_type=model_type
+            )
+        
+        current_f = start_f
+        for success, track_res in results_generator:
+            if progress.wasCanceled():
+                break
+                
+            if not success:
+                QMessageBox.warning(self, "Tracking Error", track_res)
+                break
+                
+            # Process results
+            tracked_boxes = track_res["boxes"]
+            tracked_polygons = track_res["polygons"]
+            
+            if len(tracked_boxes) > 0:
+                t_box = tracked_boxes[0]
+                polygon = tracked_polygons[0] if len(tracked_polygons) > 0 else None
+                
+                rect = QRect(t_box[0], t_box[1], t_box[2] - t_box[0], t_box[3] - t_box[1])
+                
+                # Add to frame_annotations
+                if current_f not in self.frame_annotations:
+                    self.frame_annotations[current_f] = []
+                    
+                ann = BoundingBox(
+                    rect, 
+                    self.canvas.current_class, 
+                    color=self.canvas.class_colors.get(self.canvas.current_class, QColor(0, 255, 0)),
+                    source="sam_tracked",
+                    segmentation=polygon
+                )
+                self.frame_annotations[current_f].append(ann)
+                
+            progress.setValue(current_f)
+            current_f += 1
+            
+        progress.close()
+        self.on_sam_clear_requested() # clear prompts after tracking
+        # Keep SAM interactive mode ON so the user can continue annotating
+        self.seek_to_frame(self.current_frame) # Refresh view
+        self.statusBar.showMessage("SAM Tracking completed.", 5000)
 
     @log_exceptions
     def viat_finish_integration(self):
@@ -4182,18 +4689,22 @@ class VideoAnnotationTool(QMainWindow):
             
         self.auto_bbox_mode = self.auto_bbox_action.isChecked()
         if self.auto_bbox_mode:
-            # Check availability
-            if not self.sam_manager.is_available():
-                QMessageBox.warning(self, "AI Not Available", "Ultralytics is not installed. Please run: pip install ultralytics")
-                self.auto_bbox_mode = False
-                self.auto_bbox_action.setChecked(False)
+            model_type = self.sam_interactive_dock.get_model_type()
+            
+            # Load appropriate model
+            manager = self.sam3_native_manager if "sam3" in model_type.lower() else self.sam_manager
+                
+            if not manager.is_available():
+                QMessageBox.warning(self, "Error", f"{'SAM3 Native' if 'sam3' in model_type.lower() else 'Ultralytics'} package is not installed.")
+                self.action_sam_interactive.setChecked(False)
                 return
                 
-            self.statusBar.showMessage("Auto BBox enabled. Left-click on an object to segment it.", 5000)
-            self.canvas.setCursor(Qt.CrossCursor)
+            self.statusBar.showMessage("Loading SAM model... Please wait.")
+            QApplication.setOverrideCursor(Qt.WaitCursor)
             
-            # Load model lazily
-            success, msg = self.sam_manager.load_model(self.sam_model_type)
+            success, msg = manager.load_model(model_type)
+            
+            QApplication.restoreOverrideCursor()
             if not success:
                 QMessageBox.warning(self, "Model Error", msg)
                 self.auto_bbox_mode = False
@@ -4218,7 +4729,8 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage(f"Loading model {self.sam_model_type}...", 3000)
             # Force UI update so status bar shows
             QApplication.processEvents()
-            success, msg = self.sam_manager.load_model(self.sam_model_type)
+            manager = self.sam3_native_manager if "sam3" in self.sam_model_type.lower() else self.sam_manager
+            success, msg = manager.load_model(self.sam_model_type)
             if not success:
                 QMessageBox.warning(self, "Model Error", msg)
             else:
@@ -4377,36 +4889,64 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.warning(self, "Auto Annotate", "Please open a video or image first!")
             return
 
-        dialog = AutoAnnotateDialog(self)
+        dialog = AutoAnnotateDialog(self.current_frame, self.total_frames, self)
         if dialog.exec_():
             config = dialog.get_config()
+            print(config)
             self.run_auto_label_dataset(config)
 
     @log_exceptions
     def run_auto_label_dataset(self, config):
-        classes = config["classes"]
-        if not classes:
-            QMessageBox.warning(self, "Auto Annotate", "Please enter at least one class to detect.")
-            return
-
         det_model = config["det_model"]
         seg_model = config["seg_model"]
-        scope = config["scope"]
+        strategy = config["strategy"]
+        start_frame = config["start_frame"]
+        end_frame = config["end_frame"]
+
+        classes = config["classes"]
+        if not classes and det_model != "existing_annotations":
+            QMessageBox.warning(self, "Auto Annotate", "Please enter at least one class to detect.")
+            return
+            
+        if det_model == "existing_annotations":
+            config["existing_annotations_data"] = {}
+            for f in range(start_frame, end_frame + 1):
+                config["existing_annotations_data"][f] = self.annotations_manager.get_annotations(f)
+
+
+        # Persist selected models
+        self.last_auto_det_model = det_model
+        self.last_auto_seg_model = seg_model
 
         # Initialize manager if needed
         if self.zero_shot_manager is None:
             self.zero_shot_manager = ZeroShotManager()
+        self.sam_manager = SamManager()
+        self.sam3_native_manager = Sam3NativeManager()
 
         if not self.zero_shot_manager.is_available():
             QMessageBox.warning(self, "Auto Annotate Error", "Ultralytics package is missing. Please run: pip install ultralytics")
             return
 
         # Setup Progress Dialog
-        total_frames = self.total_frames if scope == "all" else 1
-        progress = QProgressBar(self)
-        progress.setRange(0, total_frames)
-        progress.setValue(0)
-        self.statusBar.addPermanentWidget(progress)
+        total_to_process = end_frame - start_frame + 1
+        
+        from PyQt5.QtWidgets import QWidget, QHBoxLayout, QPushButton, QProgressBar
+        
+        self.auto_label_widget = QWidget()
+        layout = QHBoxLayout(self.auto_label_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.auto_label_progress = QProgressBar(self)
+        self.auto_label_progress.setRange(0, total_to_process)
+        self.auto_label_progress.setValue(0)
+        layout.addWidget(self.auto_label_progress)
+        
+        self.auto_label_cancel_btn = QPushButton("Cancel AI")
+        self.auto_label_cancel_btn.clicked.connect(self.cancel_auto_label)
+        layout.addWidget(self.auto_label_cancel_btn)
+        
+        self.statusBar.addPermanentWidget(self.auto_label_widget)
 
         self.statusBar.showMessage(f"Loading Zero-Shot Model {det_model}...")
         QApplication.processEvents()
@@ -4414,15 +4954,29 @@ class VideoAnnotationTool(QMainWindow):
         success, msg = self.zero_shot_manager.load_model(det_model)
         if not success:
             QMessageBox.warning(self, "Auto Annotate Error", msg)
-            self.statusBar.removeWidget(progress)
+            self.statusBar.removeWidget(self.auto_label_widget)
             return
 
         self.zero_shot_manager.set_classes(classes)
 
-        # Ensure all classes exist in ClassManager
+        # Ensure all classes exist in canvas
+        classes_added = False
         for c in classes:
-            if c not in self.class_manager.classes:
-                self.class_manager.add_class(c)
+            if c not in self.canvas.class_colors:
+                import random
+                from PyQt5.QtGui import QColor
+                r = random.randint(0, 255)
+                g = random.randint(0, 255)
+                b = random.randint(0, 255)
+                self.canvas.class_colors[c] = QColor(r, g, b)
+                if not hasattr(self.canvas, "class_attributes") or self.canvas.class_attributes is None:
+                    self.canvas.class_attributes = {}
+                self.canvas.class_attributes[c] = {}
+                classes_added = True
+        
+        if classes_added:
+            self.class_attributes = self.canvas.class_attributes
+            self.refresh_class_ui()
 
         # Setup SAM if requested
         if seg_model:
@@ -4431,79 +4985,116 @@ class VideoAnnotationTool(QMainWindow):
             s_success, s_msg = self.sam_manager.load_model(seg_model)
             if not s_success:
                 QMessageBox.warning(self, "Auto Annotate Error", f"SAM Model failed: {s_msg}\nFalling back to bounding boxes.")
-                seg_model = None
+                config["seg_model"] = None
 
-        frames_to_process = range(self.total_frames) if scope == "all" else [self.current_frame]
-
-        self.statusBar.showMessage(f"Running Zero-Shot Annotation ({len(frames_to_process)} frames)...")
+        self.statusBar.showMessage(f"Running Background AI Annotator ({total_to_process} frames)...")
         
-        # Save current position if doing all frames
-        original_frame = self.current_frame
+        self.auto_label_worker = AutoLabelWorker(
+            config,
+            hasattr(self, "is_image_dataset") and self.is_image_dataset,
+            getattr(self, "image_files", []),
+            self.video_filename,
+            self.zero_shot_manager,
+            self.sam_manager,
+            self
+        )
+        
+        self.auto_label_worker.frame_started.connect(self.on_auto_label_frame_started)
+        self.auto_label_worker.frame_processed.connect(self.on_auto_label_frame_processed)
+        self.auto_label_worker.progress_updated.connect(self.auto_label_progress.setValue)
+        self.auto_label_worker.error_occurred.connect(lambda e: QMessageBox.warning(self, "AI Worker Error", e))
+        self.auto_label_worker.finished_processing.connect(self.on_auto_label_finished)
+        self.auto_label_worker.start()
+        
+    def cancel_auto_label(self):
+        if hasattr(self, "auto_label_worker"):
+            self.auto_label_worker.cancel()
+            self.statusBar.showMessage("Cancelling AI...", 3000)
 
-        for i, f_idx in enumerate(frames_to_process):
-            # Load frame
-            if scope == "all":
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                ret, frame = self.cap.read()
-                if not ret:
-                    continue
+    def on_auto_label_frame_started(self, f_idx):
+        self.ai_processing_frame = f_idx
+        if self.current_frame == f_idx:
+            self.canvas.update()
+
+    def on_auto_label_frame_processed(self, f_idx, annotations_list):
+        if f_idx not in self.frame_annotations:
+            self.frame_annotations[f_idx] = []
+            
+        threshold = 40
+        if hasattr(self, "auto_label_worker") and self.auto_label_worker and hasattr(self.auto_label_worker, "config"):
+            threshold = self.auto_label_worker.config.get("threshold", 40)
+            
+        for ann_dict in annotations_list:
+            box = ann_dict["box"]
+            rect = QRect(int(box[0]), int(box[1]), int(box[2] - box[0]), int(box[3] - box[1]))
+            color = self.canvas.class_colors.get(ann_dict["class_name"], QColor(0, 255, 0))
+            
+            original_ann_idx = ann_dict.get("original_ann_idx")
+            original_ann = None
+            if original_ann_idx is not None and original_ann_idx < len(self.frame_annotations[f_idx]):
+                original_ann = self.frame_annotations[f_idx][original_ann_idx]
+            
+            if original_ann:
+                # Calculate IoU
+                orig_box = [original_ann.rect.x(), original_ann.rect.y(), original_ann.rect.x() + original_ann.rect.width(), original_ann.rect.y() + original_ann.rect.height()]
+                
+                xA = max(box[0], orig_box[0])
+                yA = max(box[1], orig_box[1])
+                xB = min(box[2], orig_box[2])
+                yB = min(box[3], orig_box[3])
+                interArea = max(0, xB - xA) * max(0, yB - yA)
+                boxAArea = (box[2] - box[0]) * (box[3] - box[1])
+                origArea = (orig_box[2] - orig_box[0]) * (orig_box[3] - orig_box[1])
+                iou = interArea / float(boxAArea + origArea - interArea) if (boxAArea + origArea - interArea) > 0 else 0
+                
+                change_percent = (1.0 - iou) * 100
+                if change_percent > threshold:
+                    # Create new annotation, mark both unverified
+                    original_ann.verified = False
+                    annotation = BoundingBox(
+                        rect=rect, 
+                        class_name=ann_dict["class_name"], 
+                        color=color,
+                        source=ann_dict["source"], 
+                        score=ann_dict["score"], 
+                        segmentation=ann_dict["segmentation"]
+                    )
+                    annotation.verified = False
+                    self.frame_annotations[f_idx].append(annotation)
+                else:
+                    # Update in place
+                    original_ann.rect = rect
+                    if ann_dict.get("segmentation"):
+                        original_ann.segmentation = ann_dict["segmentation"]
+                    original_ann.source = ann_dict["source"]
             else:
-                # current frame
-                frame = self.canvas.current_frame_array
-                if frame is None:
-                    continue
-            
-            # Predict
-            detections = self.zero_shot_manager.predict(frame)
-            
-            # Initialize frame annotations if empty
-            if f_idx not in self.frame_annotations:
-                self.frame_annotations[f_idx] = []
-
-            for det in detections:
-                box = det["box"]
-                c_name = det["class_name"]
-                score = det["score"]
-                
-                # Get polygon if seg_model is used
-                polygon = None
-                if seg_model:
-                    polygon = self.sam_manager.predict_mask_from_box(frame, box)
-
-                # Create QRect
-                rect = QRect(box[0], box[1], box[2] - box[0], box[3] - box[1])
-                
-                # Default class color
-                color = self.canvas.class_colors.get(c_name, QColor(0, 255, 0))
-                
-                # Add BoundingBox
                 annotation = BoundingBox(
-                    rect=rect,
-                    class_name=c_name,
+                    rect=rect, 
+                    class_name=ann_dict["class_name"], 
                     color=color,
-                    source="detected",
-                    score=score,
-                    segmentation=polygon
+                    source=ann_dict["source"], 
+                    score=ann_dict["score"], 
+                    segmentation=ann_dict["segmentation"]
                 )
                 self.frame_annotations[f_idx].append(annotation)
-
-            progress.setValue(i + 1)
-            QApplication.processEvents()
-
-        # Restore original frame
-        if scope == "all":
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, original_frame)
-            ret, _ = self.cap.read()
-
-        self.statusBar.removeWidget(progress)
-        self.statusBar.showMessage(f"Auto-Annotation complete!", 5000)
+            
+        if self.current_frame == f_idx:
+            self.canvas.update()
+            
+    def on_auto_label_finished(self):
+        self.ai_processing_frame = -1
+        self.statusBar.removeWidget(self.auto_label_widget)
+        self.statusBar.showMessage("Auto-Labeling completed successfully.", 5000)
+        self.canvas.update()
+        if hasattr(self, "project_file") and self.project_file:
+            self.save_project()
         self.update_frame_display()
         self.update_frame_annotations()
 
     @log_exceptions
     def track_objects(self):
         """Track objects across frames."""
-        if not self.canvas.pixmap or not self.canvas.annotations:
+        if not hasattr(self.canvas, "pixmap") or not self.canvas.pixmap or not self.canvas.annotations:
             QMessageBox.warning(
                 self,
                 "Track Objects",
@@ -4511,14 +5102,128 @@ class VideoAnnotationTool(QMainWindow):
             )
             return
 
-            # This is a placeholder for actual object tracking functionality
-        QMessageBox.information(
-            self,
-            "Track Objects",
-            "Object tracking functionality is not implemented in this demo.\n\n"
-            "In a real implementation, this would use tracking algorithms (like KCF, CSRT, or DeepSORT) "
-            "to track the annotated objects across video frames.",
-        )
+        if not hasattr(self.canvas, "selected_annotation") or not self.canvas.selected_annotation:
+            QMessageBox.warning(
+                self,
+                "Track Objects",
+                "Please select an annotation to track.",
+            )
+            return
+            
+        target_ann = self.canvas.selected_annotation
+        target_class = target_ann.class_name
+        
+        dialog = TrackingDialog(self, self.tracker_manager, self.current_frame, self.total_frames - 1, target_class)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+            
+        tracker_name = dialog.selected_tracker_name
+        end_frame = dialog.end_frame
+        
+        self.perform_tracking(target_ann, tracker_name, self.current_frame, end_frame)
+
+    @log_exceptions
+    def perform_tracking(self, target_ann, tracker_name, start_frame, end_frame):
+        # Tracker initialization
+        try:
+            tracker = self.tracker_manager.create_tracker(tracker_name)
+        except ValueError as e:
+            QMessageBox.critical(self, "Tracker Error", str(e))
+            return
+            
+        # Get start frame image
+        if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+            image_path = self.image_files[start_frame]
+            frame = cv2.imread(image_path)
+            ret = frame is not None
+        else:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            ret, frame = self.cap.read()
+            
+        if not ret:
+            QMessageBox.critical(self, "Tracking Error", f"Failed to read start frame {start_frame}")
+            return
+            
+        # Initialize tracker
+        bbox = (target_ann.rect.x(), target_ann.rect.y(), target_ann.rect.width(), target_ann.rect.height())
+        if not tracker.init(frame, bbox):
+            QMessageBox.critical(self, "Tracking Error", "Failed to initialize tracker on the selected bounding box.")
+            return
+            
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog("Tracking object...", "Cancel", start_frame + 1, end_frame, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        last_successful_frame = start_frame
+        f_idx = start_frame
+        success = True
+        
+        for f_idx in range(start_frame + 1, end_frame + 1):
+            if progress.wasCanceled():
+                break
+                
+            progress.setValue(f_idx)
+            QApplication.processEvents()
+            
+            if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+                image_path = self.image_files[f_idx]
+                frame = cv2.imread(image_path)
+                ret = frame is not None
+            else:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                ret, frame = self.cap.read()
+            
+            if not ret:
+                break
+                
+            success, new_bbox = tracker.update(frame)
+            if not success:
+                QMessageBox.information(
+                    self,
+                    "Tracking Lost",
+                    f"Tracking lost at frame {f_idx}. Please adjust the bounding box and resume tracking."
+                )
+                break
+                
+            # Create new annotation
+            x, y, w, h = map(int, new_bbox)
+            
+            # Make sure we don't go completely out of bounds or negative
+            x = max(0, min(x, frame.shape[1] - 1))
+            y = max(0, min(y, frame.shape[0] - 1))
+            w = max(1, min(w, frame.shape[1] - x))
+            h = max(1, min(h, frame.shape[0] - y))
+            new_rect = QRect(x, y, w, h)
+            
+            new_ann = BoundingBox(
+                rect=new_rect,
+                class_name=target_ann.class_name,
+                color=target_ann.color,
+                source="tracked"
+            )
+            
+            if f_idx not in self.frame_annotations:
+                self.frame_annotations[f_idx] = []
+                
+            self.frame_annotations[f_idx].append(new_ann)
+            last_successful_frame = f_idx
+            
+        progress.setValue(end_frame)
+        
+        # Navigate to the frame where it was lost, or the end frame if successful
+        target_nav_frame = f_idx if not success else last_successful_frame
+        
+        if hasattr(self, "is_image_dataset") and self.is_image_dataset:
+            self.current_frame = target_nav_frame
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(self.current_frame)
+            self.frame_slider.blockSignals(False)
+            self.load_current_image()
+        else:
+            self.seek_to_frame(target_nav_frame)
+            
+        self.update_frame_annotations()
 
     @log_exceptions
     def change_annotation_method(self, method_name):
@@ -4871,6 +5576,14 @@ class VideoAnnotationTool(QMainWindow):
                     self.cycle_annotation_selection()
                     event.accept()
                     return True
+            if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and not typing:
+                if hasattr(self, "canvas"):
+                    if hasattr(self.canvas, "selected_annotations") and self.canvas.selected_annotations:
+                        self.delete_selected_annotations()
+                        return True
+                    elif hasattr(self.canvas, "selected_annotation") and self.canvas.selected_annotation:
+                        self.delete_selected_annotation()
+                        return True
         return super().eventFilter(obj, event)
 
     @log_exceptions
@@ -4878,18 +5591,6 @@ class VideoAnnotationTool(QMainWindow):
         """Handle keyboard shortcuts that are NOT frame navigation.
         Arrow keys are handled globally in eventFilter so there is a
         single owner of frame stepping (no double jumps)."""
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            if (
-                hasattr(self.canvas, "selected_annotations")
-                and self.canvas.selected_annotations
-            ):
-                self.delete_selected_annotations()
-            elif (
-                hasattr(self.canvas, "selected_annotation")
-                and self.canvas.selected_annotation
-            ):
-                self.delete_selected_annotation()
-            return
         if event.key() == Qt.Key_M:
             current_index = self.method_selector.currentIndex()
             new_index = (current_index + 1) % self.method_selector.count()
@@ -6282,6 +6983,13 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def toggle_tracking_mode(self, enabled):
         self.tracking_mode_enabled = enabled
+        
+        # Synchronize UI button checked state
+        if hasattr(self, "tracking_toggle_btn") and self.tracking_toggle_btn is not None:
+            self.tracking_toggle_btn.blockSignals(True)
+            self.tracking_toggle_btn.setChecked(enabled)
+            self.tracking_toggle_btn.blockSignals(False)
+
         if enabled:
             self.add_track_id_to_bboxes()
             self.statusBar.showMessage("Tracking mode enabled: track_id will be auto-assigned", 3000)

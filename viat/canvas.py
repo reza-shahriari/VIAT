@@ -112,6 +112,13 @@ class VideoCanvas(QWidget):
         self._last_display_rect = None  # Cache the last display rectangle
         self._last_zoom_level = 1.0    # Track zoom level for cache invalidation
         self._last_image_size = None   # Track image size for cache invalidation
+        
+        # SAM Interactive Tracking state
+        self.sam_interactive_mode = False
+        self.sam_prompt_points = []
+        self.sam_prompt_labels = []
+        self.sam_prompt_box = None
+
 
     def set_pan_mode(self, enabled):
         """Enable or disable pan mode"""
@@ -471,6 +478,39 @@ class VideoCanvas(QWidget):
             display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
             painter.drawRect(display_rect)
 
+        # Draw SAM Interactive Prompts
+        if getattr(self, "sam_interactive_mode", False):
+            # Draw Points
+            if hasattr(self, "sam_prompt_points") and hasattr(self, "sam_prompt_labels"):
+                for point, label in zip(self.sam_prompt_points, self.sam_prompt_labels):
+                    d_point = self.image_to_display_point(point.x(), point.y())
+                    if not d_point: continue
+                    color = QColor(0, 255, 0) if label == 1 else QColor(255, 0, 0) # Green for pos, Red for neg
+                    painter.setBrush(QBrush(color))
+                    painter.setPen(QPen(Qt.black, 1))
+                    painter.drawEllipse(d_point, 5, 5)
+
+            # Draw Box
+            if getattr(self, "sam_prompt_box", None):
+                d_rect = self.image_to_display_rect(self.sam_prompt_box)
+                pen = QPen(QColor(0, 191, 255), 2, Qt.SolidLine) # DeepSkyBlue
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(d_rect)
+
+        # Draw AI Processing overlay
+        if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
+            overlay_rect = self.rect()
+            painter.fillRect(overlay_rect, QColor(0, 0, 0, 120))
+            
+            painter.setPen(QPen(QColor(255, 255, 0)))
+            font = painter.font()
+            font.setPointSize(24)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(overlay_rect, Qt.AlignCenter, "AI is Processing this Frame...\nPlease Wait.")
+
+
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
         if not self.pixmap:
@@ -757,15 +797,33 @@ class VideoCanvas(QWidget):
         if not img_pos:
             return None
 
-        # Check each annotation in reverse order (top-most first)
+        # Find all annotations that contain the point
+        matching_annotations = []
         for annotation in reversed(self.annotations):
             display_rect = self.image_to_display_rect(annotation.rect)
             expanded_rect = display_rect.adjusted(-5, -5, 5, 5)
             if expanded_rect.contains(pos):
-                return annotation
-        return None
+                matching_annotations.append(annotation)
+                
+        if not matching_annotations:
+            return None
+            
+        # Sort by area descending (largest first)
+        matching_annotations.sort(key=lambda a: a.rect.width() * a.rect.height(), reverse=True)
+        
+        # If currently selected annotation is clicked again, cycle to the next one
+        current_selection = getattr(self, "selected_annotation", None)
+        if current_selection in matching_annotations:
+            idx = matching_annotations.index(current_selection)
+            return matching_annotations[(idx + 1) % len(matching_annotations)]
+        else:
+            return matching_annotations[0]
 
     def mousePressEvent(self, event):
+        # Prevent interaction if AI is currently processing this frame
+        if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
+            return
+
         # Color pick mode (patch10): if active, pick color and return
         if getattr(self, 'color_pick_mode', False) and event.button() == 0x00000001:  # LeftButton
             # Convert click position to image coordinates
@@ -795,10 +853,6 @@ class VideoCanvas(QWidget):
             # Convert to image coordinates
             img_pos = self.display_to_image_pos(event.pos())
             if not img_pos:
-                return
-
-            if getattr(self.main_window, "auto_bbox_mode", False):
-                self.handle_auto_bbox_click(img_pos)
                 return
 
             # First, check if we're clicking on an existing annotation
@@ -850,6 +904,16 @@ class VideoCanvas(QWidget):
                 
                 # Reset two-click state if we're selecting an annotation
                 self.two_click_first_point = None
+                self.update()
+                return
+
+            if getattr(self.main_window, "auto_bbox_mode", False):
+                self.is_drawing = True
+                self.start_point = img_pos
+                self.current_point = img_pos
+                self.selected_annotation = None
+                if hasattr(self.main_window, "annotation_dock"):
+                    self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
                 self.update()
                 return
 
@@ -943,8 +1007,8 @@ class VideoCanvas(QWidget):
                 self.update()
                 return
 
-    def handle_auto_bbox_click(self, img_pos):
-        """Handle clicking for Auto BBox feature using SAM."""
+    def handle_auto_bbox(self, prompt_point=None, prompt_box=None):
+        """Handle clicking or dragging for Auto BBox feature using SAM."""
         if not hasattr(self, 'current_frame_array') or self.current_frame_array is None:
             return
             
@@ -958,10 +1022,19 @@ class VideoCanvas(QWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         
+        annotation_to_edit = None
+        
         try:
-            bbox = self.main_window.sam_manager.predict_bbox_from_point(
-                self.current_frame_array, int(img_pos.x()), int(img_pos.y())
-            )
+            bbox = None
+            if prompt_point:
+                bbox = self.main_window.sam_manager.predict_bbox_from_point(
+                    self.current_frame_array, int(prompt_point.x()), int(prompt_point.y())
+                )
+            elif prompt_box:
+                box_list = [prompt_box.x(), prompt_box.y(), prompt_box.x() + prompt_box.width(), prompt_box.y() + prompt_box.height()]
+                bbox = self.main_window.sam_manager.predict_bbox_from_box(
+                    self.current_frame_array, box_list
+                )
             
             if bbox:
                 x_min, y_min, x_max, y_max = bbox
@@ -973,16 +1046,24 @@ class VideoCanvas(QWidget):
                 
                 if rect.width() > 0 and rect.height() > 0:
                     from .annotation import BoundingBox
+                    
+                    # Get default attributes
+                    default_attributes = {"Size": -1, "Quality": -1}
+                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
+                        prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
+                        if prev_attributes:
+                            default_attributes = prev_attributes
+                            
                     annotation = BoundingBox(
                         rect=rect,
                         class_name=self.current_class,
+                        attributes=default_attributes,
                         color=self.class_colors.get(self.current_class, QColor(255, 0, 0)),
-                        frame=self.main_window.current_frame,
                         score=1.0,
                     )
                     self.annotations.append(annotation)
                     if hasattr(self.main_window, "annotation_dock"):
-                        self.main_window.annotation_dock.add_annotation_to_list(annotation)
+                        self.main_window.annotation_dock.update_annotation_list()
                         
                     self.selected_annotation = annotation
                     self.selected_annotations = [annotation]
@@ -992,12 +1073,24 @@ class VideoCanvas(QWidget):
                         
                     self.update()
                     self.main_window.statusBar.showMessage("Bounding box created automatically.", 3000)
+                    
+                    annotation_to_edit = annotation
                 else:
                     self.main_window.statusBar.showMessage("Could not generate valid bounding box.", 3000)
             else:
                 self.main_window.statusBar.showMessage("Auto BBox failed to find object.", 3000)
         finally:
             QApplication.restoreOverrideCursor()
+            
+        # Show attribute dialog if enabled, after cursor is restored and canvas updates
+        if (
+            annotation_to_edit is not None
+            and self.main_window
+            and hasattr(self.main_window, "auto_show_attribute_dialog")
+            and self.main_window.auto_show_attribute_dialog
+        ):
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.main_window.edit_annotation(annotation_to_edit, focus_first_field=True))
 
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
@@ -1179,6 +1272,8 @@ class VideoCanvas(QWidget):
             annotation = self.find_annotation_at_pos(event.pos())
             if annotation:
                 self.setCursor(Qt.PointingHandCursor)
+            elif getattr(self.main_window, "auto_bbox_mode", False):
+                self.setCursor(self.get_wand_cursor())
             else:
                 # Show crosshair cursor when in two-click mode and first point is set
                 if (
@@ -1201,6 +1296,40 @@ class VideoCanvas(QWidget):
             self.setCursor(Qt.ArrowCursor)
             return
         if event.button() == Qt.LeftButton:
+            if getattr(self, "sam_interactive_mode", False) and self.is_drawing:
+                self.is_drawing = False
+                if self.start_point and self.current_point:
+                    rect = QRect(self.start_point, self.current_point).normalized()
+                    if rect.width() <= 5 and rect.height() <= 5:
+                        # Treat as a point
+                        self.sam_prompt_points.append(self.start_point)
+                        self.sam_prompt_labels.append(1)
+                    else:
+                        # Treat as bounding box
+                        self.sam_prompt_box = rect
+                    self.update()
+                    if hasattr(self.main_window, "sam_interactive_dock"):
+                        num_pos = sum(1 for l in self.sam_prompt_labels if l == 1)
+                        num_neg = sum(1 for l in self.sam_prompt_labels if l == 0)
+                        self.main_window.sam_interactive_dock.update_status(num_pos, num_neg, self.sam_prompt_box is not None)
+                self.start_point = None
+                self.current_point = None
+                return
+
+            if getattr(self.main_window, "auto_bbox_mode", False) and self.is_drawing:
+                self.is_drawing = False
+                if self.start_point and self.current_point:
+                    rect = QRect(self.start_point, self.current_point).normalized()
+                    if rect.width() <= 5 and rect.height() <= 5:
+                        self.handle_auto_bbox(prompt_point=self.start_point)
+                    else:
+                        self.handle_auto_bbox(prompt_box=rect)
+                
+                self.start_point = None
+                self.current_point = None
+                self.update()
+                return
+
             # Add this section to handle releasing the resize handle
             if hasattr(self, 'resizing_handle') and self.resizing_handle is not None:
                 self.resizing_handle = None
@@ -1834,3 +1963,39 @@ class VideoCanvas(QWidget):
         img_x = max(0, min(self.pixmap.width() - 1, int(img_x)))
         img_y = max(0, min(self.pixmap.height() - 1, int(img_y)))
         return QPoint(img_x, img_y)
+
+    def get_wand_cursor(self):
+        if hasattr(self, '_wand_cursor'):
+            return self._wand_cursor
+            
+        from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath, QCursor
+        from PyQt5.QtCore import QPointF, Qt
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Draw wand handle
+        pen = QPen(QColor("#555555"), 3, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(8, 24, 18, 14)
+        
+        # Draw wand tip
+        pen.setColor(QColor("#FFD700")) # Gold
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawLine(18, 14, 22, 10)
+        
+        # Sparkles
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#FFD700"))
+        painter.drawEllipse(QPointF(22, 10), 2.5, 2.5)
+        
+        painter.setBrush(QColor("#FFF8DC"))
+        painter.drawEllipse(QPointF(14, 6), 1.5, 1.5)
+        painter.drawEllipse(QPointF(26, 16), 1.5, 1.5)
+        painter.drawEllipse(QPointF(28, 4), 1, 1)
+        
+        painter.end()
+        self._wand_cursor = QCursor(pixmap, 22, 10) # Hotspot at the tip
+        return self._wand_cursor

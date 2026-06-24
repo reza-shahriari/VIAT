@@ -7,9 +7,10 @@ import subprocess
 import shutil
 from pathlib import Path
 
-def build_executable():
+def build_executable(with_ai=False):
     """Build the Windows executable using PyInstaller"""
-    print("Building Windows executable...")
+    print(f"Building Windows executable (with_ai={with_ai})...")
+    os.environ["VIAT_BUILD_WITH_AI"] = "1" if with_ai else "0"
     
     # Clean existing dist directory if it exists
     if os.path.exists("dist"):
@@ -147,5 +148,10 @@ if __name__ == "__main__":
     # Ensure we're in the right directory
     os.chdir(Path(__file__).parent)
     
-    if build_executable():
+    import argparse
+    parser = argparse.ArgumentParser(description="Build VIAT for Windows")
+    parser.add_argument("--with-ai", action="store_true", help="Build with AI features (PyTorch, Ultralytics, etc.)")
+    args = parser.parse_args()
+    
+    if build_executable(with_ai=args.with_ai):
         create_installer()

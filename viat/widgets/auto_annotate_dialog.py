@@ -1,15 +1,17 @@
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-    QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox
+    QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget
 )
 from PyQt5.QtCore import Qt
 import re
 
 class AutoAnnotateDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, current_frame=0, total_frames=1, parent=None):
         super().__init__(parent)
+        self.current_frame = current_frame
+        self.total_frames = total_frames
         self.setWindowTitle("Auto Annotate Dataset")
-        self.setMinimumWidth(450)
+        self.setMinimumWidth(500)
         self.setup_ui()
 
     def setup_ui(self):
@@ -25,15 +27,54 @@ class AutoAnnotateDialog(QDialog):
         layout.addWidget(QLabel("Zero-Shot Detection Model:"))
         self.det_model_combo = QComboBox()
         self.det_model_combo.addItems([
+            "Existing Annotations (Hand labeled)",
             "YOLO-World Small (yolov8s-world.pt)",
+            "YOLO-World Medium (yolov8m-world.pt)",
             "YOLO-World Large (yolov8l-world.pt)",
-            "YOLO-World XLarge (yolov8x-world.pt)",
+            "YOLO-World v2 Small (yolov8s-worldv2.pt)",
+            "YOLO-World v2 Medium (yolov8m-worldv2.pt)",
+            "YOLO-World v2 Large (yolov8l-worldv2.pt)",
+            "YOLO-World v2 XLarge (yolov8x-worldv2.pt)",
+            "YOLOv11 World Small (yolo11s-world.pt)",
+            "YOLOv11 World Medium (yolo11m-world.pt)",
+            "YOLOv11 World Large (yolo11l-world.pt)",
+            "YOLOv11 World XLarge (yolo11x-world.pt)",
+            "YOLOE 11l (yoloe-11l-seg.pt)",
+            "YOLOE 26s (yoloe-26s-seg.pt)",
+            "YOLOE 26x (yoloe-26x-seg.pt)",
             "Grounding DINO Tiny (IDEA-Research/grounding-dino-tiny)",
             "Grounding DINO Base (IDEA-Research/grounding-dino-base)",
             "Florence-2 Base (microsoft/Florence-2-base)",
-            "Florence-2 Large (microsoft/Florence-2-large)"
+            "Florence-2 Large (microsoft/Florence-2-large)",
+            "LocateAnything-3B (nvidia/LocateAnything-3B)",
+            "SAM3 Text Prompt (sam3.1_l.pt)"
         ])
         layout.addWidget(self.det_model_combo)
+
+        # Threshold for Existing Annotations
+        self.threshold_widget = QWidget()
+        threshold_layout = QHBoxLayout(self.threshold_widget)
+        threshold_layout.setContentsMargins(0, 0, 0, 0)
+        self.threshold_label = QLabel("Change Threshold (%):")
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(0, 100)
+        self.threshold_spin.setValue(40)
+        self.threshold_spin.setToolTip("If the bounding box changes by more than this percentage, a new unverified label is created.")
+        threshold_layout.addWidget(self.threshold_label)
+        threshold_layout.addWidget(self.threshold_spin)
+        threshold_layout.addStretch()
+        layout.addWidget(self.threshold_widget)
+        
+        # Hide threshold by default
+        self.threshold_widget.setVisible(False)
+        self.det_model_combo.currentTextChanged.connect(self.on_det_model_changed)
+
+        
+        # Restore last selected det model
+        if hasattr(self.parent(), "last_auto_det_model"):
+            idx = self.det_model_combo.findText(self.parent().last_auto_det_model, Qt.MatchContains)
+            if idx >= 0:
+                self.det_model_combo.setCurrentIndex(idx)
 
         # Segmentation Model
         layout.addWidget(QLabel("Segmentation Refiner (Optional - creates polygons):"))
@@ -46,21 +87,45 @@ class AutoAnnotateDialog(QDialog):
             "SAM3 Huge (sam3_l.pt)"
         ])
         layout.addWidget(self.seg_model_combo)
+        
+        # Restore last selected seg model
+        if hasattr(self.parent(), "last_auto_seg_model"):
+            idx = self.seg_model_combo.findText(self.parent().last_auto_seg_model, Qt.MatchContains)
+            if idx >= 0:
+                self.seg_model_combo.setCurrentIndex(idx)
 
-        # Scope
-        layout.addWidget(QLabel("Annotation Scope:"))
-        scope_layout = QHBoxLayout()
-        self.radio_current = QRadioButton("Current Frame")
-        self.radio_all = QRadioButton("All Frames (Entire Video/Dataset)")
-        self.radio_current.setChecked(True)
+        # Strategy
+        layout.addWidget(QLabel("Annotation Strategy:"))
+        strategy_layout = QVBoxLayout()
+        self.radio_independent = QRadioButton("Independent Frames (Zero-Shot Only)")
+        self.radio_tracking = QRadioButton("Zero-Shot + Video Tracking (SAM2/3)")
+        self.radio_independent.setChecked(True)
         
-        self.scope_group = QButtonGroup()
-        self.scope_group.addButton(self.radio_current)
-        self.scope_group.addButton(self.radio_all)
+        self.strategy_group = QButtonGroup()
+        self.strategy_group.addButton(self.radio_independent)
+        self.strategy_group.addButton(self.radio_tracking)
         
-        scope_layout.addWidget(self.radio_current)
-        scope_layout.addWidget(self.radio_all)
-        layout.addLayout(scope_layout)
+        strategy_layout.addWidget(self.radio_independent)
+        strategy_layout.addWidget(self.radio_tracking)
+        layout.addLayout(strategy_layout)
+
+        # Frame Range
+        layout.addWidget(QLabel("Frame Range:"))
+        range_layout = QHBoxLayout()
+        
+        self.start_frame_spin = QSpinBox()
+        self.start_frame_spin.setRange(0, max(0, self.total_frames - 1))
+        self.start_frame_spin.setValue(self.current_frame)
+        
+        self.end_frame_spin = QSpinBox()
+        self.end_frame_spin.setRange(0, max(0, self.total_frames - 1))
+        self.end_frame_spin.setValue(self.total_frames - 1)
+        
+        range_layout.addWidget(QLabel("Start:"))
+        range_layout.addWidget(self.start_frame_spin)
+        range_layout.addWidget(QLabel("End:"))
+        range_layout.addWidget(self.end_frame_spin)
+        layout.addLayout(range_layout)
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -77,13 +142,23 @@ class AutoAnnotateDialog(QDialog):
         
         layout.addLayout(btn_layout)
 
+    def on_det_model_changed(self, text):
+        is_existing = "Existing Annotations" in text
+        self.threshold_widget.setVisible(is_existing)
+        # If refining existing annotations, we must have a segmentation model
+        if is_existing and self.seg_model_combo.currentIndex() == 0:
+            self.seg_model_combo.setCurrentIndex(1) # Select SAM2 Fast by default
+
     def get_config(self):
         raw_classes = self.classes_input.text()
         classes = [c.strip() for c in raw_classes.split(",") if c.strip()]
         
         det_text = self.det_model_combo.currentText()
-        det_match = re.search(r'\((.*?)\)', det_text)
-        det_model = det_match.group(1) if det_match else "yolov8s-world.pt"
+        if "Existing Annotations" in det_text:
+            det_model = "existing_annotations"
+        else:
+            det_match = re.search(r'\((.*?)\)', det_text)
+            det_model = det_match.group(1) if det_match else "yolov8s-world.pt"
         
         seg_text = self.seg_model_combo.currentText()
         if "None" in seg_text:
@@ -92,11 +167,19 @@ class AutoAnnotateDialog(QDialog):
             seg_match = re.search(r'\((.*?)\)', seg_text)
             seg_model = seg_match.group(1) if seg_match else None
             
-        scope = "all" if self.radio_all.isChecked() else "current"
+        strategy = "tracking" if self.radio_tracking.isChecked() else "independent"
+        start_frame = self.start_frame_spin.value()
+        end_frame = self.end_frame_spin.value()
         
+        if end_frame < start_frame:
+            end_frame = start_frame
+            
         return {
             "classes": classes,
             "det_model": det_model,
             "seg_model": seg_model,
-            "scope": scope
+            "strategy": strategy,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "threshold": self.threshold_spin.value()
         }

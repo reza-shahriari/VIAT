@@ -15,6 +15,15 @@ try:
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
+def is_valid_model_dir(directory):
+    if not os.path.isdir(directory):
+        return False
+    return (
+        os.path.exists(os.path.join(directory, "config.json")) or 
+        os.path.exists(os.path.join(directory, "preprocessor_config.json"))
+    )
+
+
 
 class ZeroShotDetector:
     def load_model(self, model_type, checkpoints_dir):
@@ -39,15 +48,30 @@ class YoloWorldDetector(ZeroShotDetector):
             
         try:
             model_path = os.path.join(checkpoints_dir, model_type)
+            
+            # Helper to load model correctly
+            def init_model(path):
+                if "yoloe" in model_type.lower():
+                    try:
+                        from ultralytics import YOLOE
+                        return YOLOE(path)
+                    except ImportError:
+                        pass
+                if "world" in model_type.lower():
+                    from ultralytics import YOLOWorld
+                    return YOLOWorld(path)
+                from ultralytics import YOLO
+                return YOLO(path)
+                
             if not os.path.exists(model_path):
                 old_cwd = os.getcwd()
                 os.chdir(checkpoints_dir)
                 try:
-                    self.model = YOLOWorld(model_type)
+                    self.model = init_model(model_type)
                 finally:
                     os.chdir(old_cwd)
             else:
-                self.model = YOLOWorld(model_path)
+                self.model = init_model(model_path)
             return True, "Model loaded successfully"
         except Exception as e:
             return False, f"Failed to load YOLO-World: {str(e)}"
@@ -55,7 +79,17 @@ class YoloWorldDetector(ZeroShotDetector):
     def set_classes(self, classes_list):
         if self.model:
             self.classes = classes_list
-            self.model.set_classes(classes_list)
+            
+            # Fix Ultralytics bug: text embedding tensors crash if model is on GPU during set_classes
+            try:
+                device = getattr(self.model.model, 'device', 'cpu') if hasattr(self.model, 'model') else 'cpu'
+                self.model.to("cpu")
+                self.model.set_classes(classes_list)
+                if str(device) != 'cpu':
+                    self.model.to(device)
+            except Exception as e:
+                # Fallback if to() fails
+                self.model.set_classes(classes_list)
 
     def predict(self, image_array):
         if not self.model:
@@ -92,8 +126,17 @@ class GroundingDinoDetector(ZeroShotDetector):
             return False, "Transformers is not installed. Please run: pip install -r dino_req.txt"
         
         try:
-            self.processor = AutoProcessor.from_pretrained(model_type)
-            self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_type)
+            local_path = os.path.join(checkpoints_dir, model_type)
+            local_path_flat = os.path.join(checkpoints_dir, os.path.basename(model_type))
+            if is_valid_model_dir(local_path):
+                path = local_path
+            elif is_valid_model_dir(local_path_flat):
+                path = local_path_flat
+            else:
+                path = model_type
+
+            self.processor = AutoProcessor.from_pretrained(path)
+            self.model = AutoModelForZeroShotObjectDetection.from_pretrained(path)
             
             if torch.cuda.is_available():
                 self.model = self.model.to("cuda")
@@ -161,9 +204,83 @@ class Florence2Detector(ZeroShotDetector):
             return False, "Transformers is not installed. Please run: pip install -r florence_req.txt"
         
         try:
-            self.processor = AutoProcessor.from_pretrained(model_type, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(model_type, trust_remote_code=True)
+            paths_to_try = []
+            local_path = os.path.join(checkpoints_dir, model_type)
+            local_path_flat = os.path.join(checkpoints_dir, os.path.basename(model_type))
+            print(local_path)
+            print(local_path_flat)
+            if is_valid_model_dir(local_path):
+                paths_to_try.append(local_path)
+            if is_valid_model_dir(local_path_flat) and local_path_flat not in paths_to_try:
+                paths_to_try.append(local_path_flat)
+                
+            if model_type not in paths_to_try:
+                paths_to_try.append(model_type)
+
+            last_err = None
+            loaded = False
             
+            for path in paths_to_try:
+                try:
+                    self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+                    self.model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True)
+                    loaded = True
+                    break
+                except Exception as ex:
+                    print(f"Error loading from {path}: {ex}")
+                    last_err = ex
+            
+            if not loaded:
+                raise last_err if last_err is not None else Exception("Unknown error")
+
+            # Bind a custom prepare_inputs_for_generation method to the model to handle transformers >= 4.50 compatibility
+            import types
+            
+            def patched_prep(
+                self_model,
+                decoder_input_ids,
+                past_key_values=None,
+                attention_mask=None,
+                decoder_attention_mask=None,
+                head_mask=None,
+                decoder_head_mask=None,
+                cross_attn_head_mask=None,
+                use_cache=None,
+                encoder_outputs=None,
+                **kwargs,
+            ):
+                if past_key_values is not None:
+                    if hasattr(past_key_values, "get_seq_len"):
+                        past_length = past_key_values.get_seq_len()
+                    elif (isinstance(past_key_values, (list, tuple)) and len(past_key_values) > 0 
+                          and past_key_values[0] is not None and len(past_key_values[0]) > 0 
+                          and past_key_values[0][0] is not None):
+                        past_length = past_key_values[0][0].shape[2]
+                    else:
+                        past_length = 0
+
+                    if decoder_input_ids.shape[1] > past_length:
+                        remove_prefix_length = past_length
+                    else:
+                        remove_prefix_length = decoder_input_ids.shape[1] - 1
+
+                    decoder_input_ids = decoder_input_ids[:, remove_prefix_length:]
+
+                return {
+                    "input_ids": None,
+                    "encoder_outputs": encoder_outputs,
+                    "past_key_values": past_key_values,
+                    "decoder_input_ids": decoder_input_ids,
+                    "attention_mask": attention_mask,
+                    "decoder_attention_mask": decoder_attention_mask,
+                    "head_mask": head_mask,
+                    "decoder_head_mask": decoder_head_mask,
+                    "cross_attn_head_mask": cross_attn_head_mask,
+                    "use_cache": use_cache,
+                }
+            
+            self.model.prepare_inputs_for_generation = types.MethodType(patched_prep, self.model)
+
             if torch.cuda.is_available():
                 self.model = self.model.to("cuda")
                 
@@ -222,6 +339,251 @@ class Florence2Detector(ZeroShotDetector):
             print(f"Florence-2 inference error: {e}")
             return []
 
+class LocateAnythingDetector(ZeroShotDetector):
+    def __init__(self):
+        self.model = None
+        self.processor = None
+        self.classes = []
+        self.text_prompt = ""
+
+    def load_model(self, model_type, checkpoints_dir):
+        if not TRANSFORMERS_AVAILABLE:
+            return False, "Transformers is not installed. Please run: pip install -r locate_anything_req.txt"
+        
+        try:
+            from transformers import AutoProcessor, AutoModel
+            import torch
+            import sys
+            import os
+            import glob
+            
+            paths_to_try = []
+            local_path = os.path.join(checkpoints_dir, model_type)
+            local_path_flat = os.path.join(checkpoints_dir, os.path.basename(model_type))
+            
+            if is_valid_model_dir(local_path):
+                paths_to_try.append(local_path)
+            if is_valid_model_dir(local_path_flat) and local_path_flat not in paths_to_try:
+                paths_to_try.append(local_path_flat)
+                
+            if model_type not in paths_to_try:
+                paths_to_try.append(model_type)
+
+            last_err = None
+            loaded = False
+            
+            for path in paths_to_try:
+                try:
+                    print(f"Attempting to load LocateAnything from: {path}")
+                    try:
+                        self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+                    except Exception as e:
+                        if sys.version_info < (3, 10):
+                            print("Patching NVIDIA LocateAnything for Python < 3.10 compatibility...")
+                            try:
+                                from transformers.dynamic_module_utils import HF_MODULES_CACHE
+                                hf_dir = os.path.join(HF_MODULES_CACHE, 'nvidia')
+                            except ImportError:
+                                hf_dir = os.path.expanduser('~/.cache/huggingface/modules/transformers_modules/nvidia/')
+                                
+                            if os.path.exists(hf_dir):
+                                files = glob.glob(os.path.join(hf_dir, '**/*.py'), recursive=True)
+                                for f in files:
+                                    with open(f, 'r', encoding='utf-8') as file:
+                                        content = file.read()
+                                    if 'from __future__ import annotations' not in content:
+                                        with open(f, 'w', encoding='utf-8') as file:
+                                            file.write('from __future__ import annotations\n' + content)
+                            self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+                        else:
+                            raise e
+                            
+                    self.model = AutoModel.from_pretrained(
+                        path, 
+                        trust_remote_code=True, 
+                        torch_dtype=torch.float16, 
+                        device_map="auto"
+                    )
+                    loaded = True
+                    print(f"Successfully loaded LocateAnything from: {path}")
+                    break
+                except Exception as ex:
+                    print(f"Failed to load from {path}: {str(ex)}")
+                    last_err = ex
+            
+            if not loaded:
+                raise last_err if last_err is not None else Exception("Unknown error")
+                
+            return True, "Model loaded successfully"
+        except Exception as e:
+            return False, f"Failed to load LocateAnything: {str(e)}"
+
+    def set_classes(self, classes_list):
+        self.classes = classes_list
+        class_text = ", ".join(classes_list)
+        self.text_prompt = f"<image-1>\nLocate the {class_text}."
+
+    def predict(self, image_array):
+        if not self.model or not self.processor or not self.classes:
+            return []
+            
+        try:
+            import torch
+            import re
+            from PIL import Image
+            
+            image_rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            
+            messages = [
+                {"role": "user", "content": self.text_prompt}
+            ]
+            
+            if hasattr(self.processor, "apply_chat_template"):
+                text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            else:
+                text = self.text_prompt
+            
+            inputs = self.processor(text=text, images=[pil_image], return_tensors="pt")
+            
+            print('PROCESSOR INPUTS:', inputs.keys())
+            if torch.cuda.is_available():
+                inputs = {k: v.to(self.model.device) if hasattr(v, "to") else v for k, v in inputs.items() if v is not None}
+                
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=1024,
+                    do_sample=False,
+                    use_cache=True,
+                    tokenizer=self.processor.tokenizer
+                )
+                
+            if isinstance(generated_ids, str):
+                generated_text = generated_ids
+            else:
+                generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            print(f"LocateAnything Output: {generated_text}")
+            
+            with open("temp.txt", "a") as f:
+                f.write(f"LocateAnything Output for classes {self.classes}:\n{generated_text}\n\n")
+            
+            detections = []
+            
+            # Simple heuristic regex for finding boxes
+            # Matches optional class name, then box tags or brackets
+            box_pattern = r"(?:([a-zA-Z0-9_\- ]+)\s*(?:is at|:)\s*)?(?:<box>|\[box\])?\s*\[?(\d+\.?\d*),\s*(\d+\.?\d*),\s*(\d+\.?\d*),\s*(\d+\.?\d*)\]?(?:\s*</box>)?"
+            
+            for match in re.finditer(box_pattern, generated_text):
+                class_match = match.group(1)
+                x1, y1, x2, y2 = map(float, match.group(2, 3, 4, 5))
+                
+                # Check for zero area box
+                if x1 == x2 or y1 == y2:
+                    continue
+                
+                # Normalize coords
+                if max(x1, y1, x2, y2) <= 1.0:
+                    x1 *= pil_image.width
+                    x2 *= pil_image.width
+                    y1 *= pil_image.height
+                    y2 *= pil_image.height
+                elif max(x1, y1, x2, y2) > pil_image.width and max(x1, y1, x2, y2) <= 1000:
+                    x1 = (x1 / 1000.0) * pil_image.width
+                    x2 = (x2 / 1000.0) * pil_image.width
+                    y1 = (y1 / 1000.0) * pil_image.height
+                    y2 = (y2 / 1000.0) * pil_image.height
+                    
+                # Ensure correct bounds
+                x1 = max(0, min(pil_image.width, x1))
+                y1 = max(0, min(pil_image.height, y1))
+                x2 = max(0, min(pil_image.width, x2))
+                y2 = max(0, min(pil_image.height, y2))
+                
+                matched_class = self.classes[0]
+                if class_match:
+                    clean_match = class_match.strip().lower()
+                    for c in self.classes:
+                        if c.lower() in clean_match:
+                            matched_class = c
+                            break
+                            
+                detections.append({
+                    'box': [int(x1), int(y1), int(x2), int(y2)],
+                    'class_name': matched_class,
+                    'score': 1.0
+                })
+                
+            return detections
+        except Exception as e:
+            import traceback
+            print(f"LocateAnything inference error:")
+            traceback.print_exc()
+            return []
+
+class Sam3TextDetector(ZeroShotDetector):
+    def __init__(self):
+        self.predictor = None
+        self.classes = []
+
+    def load_model(self, model_type, checkpoints_dir):
+        if not ULTRALYTICS_AVAILABLE:
+            return False, "Ultralytics is not installed. Please run: pip install ultralytics"
+            
+        try:
+            from ultralytics.models.sam import SAM3SemanticPredictor
+            model_path = os.path.join(checkpoints_dir, model_type)
+            
+            overrides = dict(conf=0.25, task="segment", mode="predict", model=model_type, half=True, verbose=False)
+            
+            if not os.path.exists(model_path):
+                old_cwd = os.getcwd()
+                os.chdir(checkpoints_dir)
+                try:
+                    from ultralytics.utils.downloads import attempt_download_asset
+                    attempt_download_asset(model_type)
+                    self.predictor = SAM3SemanticPredictor(overrides=overrides)
+                finally:
+                    os.chdir(old_cwd)
+            else:
+                overrides["model"] = model_path
+                self.predictor = SAM3SemanticPredictor(overrides=overrides)
+                
+            return True, "Model loaded successfully"
+        except Exception as e:
+            return False, f"Failed to load SAM3 Text Predictor: {str(e)}"
+
+    def set_classes(self, classes_list):
+        self.classes = classes_list
+
+    def predict(self, image_array):
+        if not self.predictor or not self.classes:
+            return []
+            
+        try:
+            self.predictor.set_image(image_array)
+            results = self.predictor(text=self.classes)
+            
+            detections = []
+            if len(results) > 0 and results[0].boxes is not None:
+                boxes = results[0].boxes
+                for box in boxes:
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    cls_id = int(box.cls[0].cpu().numpy())
+                    score = float(box.conf[0].cpu().numpy())
+                    
+                    class_name = self.classes[cls_id] if cls_id < len(self.classes) else f"class_{cls_id}"
+                    
+                    detections.append({
+                        'box': [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
+                        'class_name': class_name,
+                        'score': score
+                    })
+            return detections
+        except Exception as e:
+            print(f"SAM3 inference error: {e}")
+            return []
+
 class ZeroShotManager:
     """
     Manager for zero-shot object detection, capable of supporting multiple models (YOLO-World, DINO, etc.)
@@ -255,6 +617,10 @@ class ZeroShotManager:
             self.detector = GroundingDinoDetector()
         elif "florence" in model_type.lower():
             self.detector = Florence2Detector()
+        elif "sam3" in model_type.lower():
+            self.detector = Sam3TextDetector()
+        elif "locateanything" in model_type.lower():
+            self.detector = LocateAnythingDetector()
         else:
             return False, f"Unknown zero-shot model type: {model_type}"
             

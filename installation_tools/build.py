@@ -47,8 +47,17 @@ def clean_recent_projects():
     print(f"Cleared last state in {last_state_file}")
 def main():
     """Main function to detect platform and build appropriate package"""
+    import argparse
+    parser = argparse.ArgumentParser(description="VIAT Build Script")
+    parser.add_argument("--with-ai", action="store_true", help="Build with AI features (PyTorch, Ultralytics, etc.)")
+    args = parser.parse_args()
+    
+    with_ai = args.with_ai
+    
     print("VIAT Build Script")
     print("=================")
+    print(f"Build configuration: {'With AI Support' if with_ai else 'Without AI Support'}")
+    print()
     
     # Ensure we're in the right directory
     os.chdir(Path(__file__).parent)
@@ -67,7 +76,7 @@ def main():
         print("Detected Windows platform")
         from build_windows import build_executable, create_installer
         
-        if build_executable():
+        if build_executable(with_ai=with_ai):
             create_installer()
     
     elif system == "Linux":
@@ -80,18 +89,18 @@ def main():
             if "Ubuntu" in os_info or "Debian" in os_info:
                 from build_ubuntu import build_executable, create_deb_package
                 
-                if build_executable():
+                if build_executable(with_ai=with_ai):
                     create_deb_package()
             else:
                 print("This Linux distribution is not supported for packaging.")
                 print("Building standalone executable only...")
                 from build_ubuntu import build_executable
-                build_executable()
+                build_executable(with_ai=with_ai)
         except FileNotFoundError:
             print("Could not determine Linux distribution.")
             print("Building standalone executable only...")
             from build_ubuntu import build_executable
-            build_executable()
+            build_executable(with_ai=with_ai)
     
     else:
         print(f"Platform {system} is not supported for packaging.")

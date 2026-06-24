@@ -1,15 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 block_cipher = None
 
+build_with_ai = os.environ.get('VIAT_BUILD_WITH_AI', '0') == '1'
+
 a = Analysis(
     ['../viat/run.py'],
-    pathex=[],
+    pathex=['../viat'],
     binaries=[],
     datas=[
         ('../viat/Icon', 'Icon'),
-        ('../viat/utils', 'utils'),
-        ('../viat/widgets', 'widgets')
     ],
     hiddenimports=[
         'PyQt5.QtCore', 
@@ -27,7 +28,25 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['numpy._core'] if build_with_ai else [
+        'numpy._core',
+        'torch',
+        'torchvision',
+        'transformers',
+        'ultralytics',
+        'timm',
+        'einops',
+        'decord',
+        'lmdb',
+        'peft',
+        'accelerate',
+        'bitsandbytes',
+        'safetensors',
+        'huggingface_hub',
+        'sentencepiece',
+        'regex',
+        'tokenizers',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

@@ -110,3 +110,8 @@ venv.bak/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+checkpoints*
+viat/mobileclip2_b.ts
+viat/weights/clip/ViT-B-32.pt
+sam3_src*

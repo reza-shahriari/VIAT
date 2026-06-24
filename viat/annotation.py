@@ -263,7 +263,7 @@ class AnnotationManager:
 
         # Class selector
         class_combo = QComboBox()
-        class_combo.addItems(self.canvas.class_colors.keys())
+        class_combo.addItems(list(self.canvas.class_colors.keys()))
         class_combo.setCurrentText(annotation.class_name)
         form_layout.addRow("Class:", class_combo)
 
@@ -403,7 +403,7 @@ class AnnotationManager:
             annotation.verify()
             # Update class and color
             annotation.class_name = new_class
-            annotation.color = self.canvas.class_colors[new_class]
+            annotation.color = self.canvas.class_colors.get(new_class, QColor(255, 0, 0))
 
             # If class changed, update attributes based on new class configuration
             if old_class != new_class and hasattr(self.canvas, "class_attributes"):

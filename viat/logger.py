@@ -83,3 +83,6 @@ def log_exceptions(func):
             # Re-raise the exception to maintain original behavior
             raise
     return wrapper
+
+# Global logger instance
+logger = VIATLogger()

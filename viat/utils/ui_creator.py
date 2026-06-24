@@ -24,6 +24,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
+from viat.widgets.sam_interactive_dock import SAMInteractiveDock
 
 
 class UICreator:
@@ -151,11 +152,7 @@ class UICreator:
 
         # Delete Selected action
         delete_selected_action = QAction("Delete Selected", self.main_window)
-        delete_selected_action.setShortcut("Del")
-        delete_selected_action.triggered.connect(
-            lambda: self.main_window.annotation_dock.delete_selected_annotation()
-            if hasattr(self.main_window, 'annotation_dock') and self.main_window.annotation_dock else None
-        )
+        delete_selected_action.triggered.connect(self.main_window.delete_selected_annotations)
         edit_menu.addAction(delete_selected_action)
 
         # Clear Annotations action
@@ -432,9 +429,20 @@ class UICreator:
             Qt.RightDockWidgetArea, self.main_window.class_dock
         )
 
+        # SAM Interactive dock
+        self.main_window.sam_interactive_dock = SAMInteractiveDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.sam_interactive_dock
+        )
+        self.main_window.sam_interactive_dock.hide() # Hidden by default
+
+
         # Tabify them to create a collapsible side panel
         self.main_window.tabifyDockWidget(
             self.main_window.annotation_dock, self.main_window.class_dock
+        )
+        self.main_window.tabifyDockWidget(
+            self.main_window.class_dock, self.main_window.sam_interactive_dock
         )
         self.main_window.annotation_dock.raise_()
 

@@ -1,0 +1,10 @@
+transformers==4.57.1
+torch
+torchvision
+Pillow
+opencv-python-headless
+decord
+lmdb
+peft
+accelerate
+bitsandbytes
