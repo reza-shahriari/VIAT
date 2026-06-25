@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QComboBox, QSpinBox, QGroupBox, QMessageBox
+    QLineEdit, QPushButton, QComboBox, QSpinBox, QGroupBox, QMessageBox, QCheckBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -44,10 +44,10 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(QLabel("SAM Model:"))
         self.cmb_model = QComboBox()
         self.cmb_model.addItems([
+            "SAM2 Fast (sam2.1_s.pt)",
+            "SAM2 Huge (sam2.1_l.pt)",
             "SAM3.1 Huge (sam3.1_l.pt)",
-            "SAM3.1 Fast (sam3.1_s.pt)",
-            "SAM2 Huge (sam2_l.pt)",
-            "SAM2 Fast (sam2_s.pt)"
+            "SAM3.1 Fast (sam3.1_s.pt)"
         ])
         self.cmb_model.currentIndexChanged.connect(self.on_model_changed)
         self.layout.addWidget(self.cmb_model)
@@ -58,6 +58,11 @@ class SAMInteractiveDock(QDockWidget):
         self.cmb_scope.addItems(["Current Frame Only", "Whole Video", "Custom Range"])
         self.cmb_scope.currentIndexChanged.connect(self.on_scope_changed)
         self.layout.addWidget(self.cmb_scope)
+        
+        # Save Segmentations
+        self.chk_save_seg = QCheckBox("Save Segmentations to JSON (Creates large files)")
+        self.chk_save_seg.setChecked(False)
+        self.layout.addWidget(self.chk_save_seg)
 
         # Custom Range
         self.range_widget = QWidget()
@@ -134,12 +139,18 @@ class SAMInteractiveDock(QDockWidget):
                 
         self.track_requested.emit(strategy, start_f, end_f)
 
+    def get_save_segmentation(self):
+        return self.chk_save_seg.isChecked()
+
     def get_text_prompt(self):
         t = self.txt_prompt.text().strip()
         return t if t else None
         
     def get_model_type(self):
         text = self.cmb_model.currentText()
+        print(f"[DEBUG LOG] sam_interactive_dock.get_model_type called. text='{text}'")
         import re
         match = re.search(r'\((.*?)\)', text)
-        return match.group(1) if match else "sam3_l.pt"
+        result = match.group(1) if match else "sam2.1_s.pt"
+        print(f"[DEBUG LOG] match={match}, result='{result}'")
+        return result

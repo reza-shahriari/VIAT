@@ -550,6 +550,8 @@ class AnnotationManager:
             self.main_window.frame_annotations[self.main_window.current_frame] = (
                 self.canvas.annotations
             )
+            return True
+        return False
 
     def update_annotation_list(self):
         """Update the annotation list in the UI."""

@@ -118,7 +118,7 @@ VIAT/
 - **Space**: Play/Pause video
 - **Left/Right Arrow**: Previous/Next frame
 - **Ctrl+S**: Save project
-- **Ctrl+Z**: Undo
+- **Ctrl+Z**: Undo (Disabled)
 - **Delete**: Remove selected annotation
 - **+/-**: Zoom in/out
 

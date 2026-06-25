@@ -22,7 +22,7 @@ class SamManager:
     def is_available(self):
         return ULTRALYTICS_AVAILABLE
 
-    def load_model(self, model_type="sam2_s.pt"):
+    def load_model(self, model_type="sam2.1_s.pt"):
         """
         Loads the SAM model.
         Returns (success_bool, message_string).
@@ -57,7 +57,6 @@ class SamManager:
                     self.model = SAM(model_type)
                 finally:
                     os.chdir(old_cwd)
-                self.model.predictor.is_cli = False  # restore
             else:
                 self.model = SAM(model_path)
                 
@@ -74,24 +73,46 @@ class SamManager:
         and extracts the bounding box.
         Returns (x_min, y_min, x_max, y_max) or None if prediction fails.
         """
+        print(f"[DEBUG LOG] predict_bbox_from_point called with x={x}, y={y}")
         if not self.model:
+            print("[DEBUG LOG] self.model is None. Returning None.")
             return None
 
         try:
             # Run inference. ultralytics accepts numpy arrays.
-            # Convert point to format expected by ultralytics [[x, y]]
-            # Label 1 means positive click.
-            results = self.model(image_array, points=[[x, y]], labels=[1], verbose=False)
+            # Format expected by ultralytics for a single point is [x, y]
+            print(f"[DEBUG LOG] Running ultralytics SAM inference with points=[{x}, {y}] and labels=[1]")
+            results = self.model(image_array, points=[x, y], labels=[1], verbose=False)
+            print(f"[DEBUG LOG] Inference completed. len(results)={len(results)}")
             
-            if len(results) > 0 and results[0].boxes is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                if len(boxes) > 0:
-                    box = boxes[0] # Take the first box
+            if len(results) > 0:
+                result = results[0]
+                print(f"[DEBUG LOG] result.boxes={result.boxes is not None}, len(boxes)={len(result.boxes) if result.boxes is not None else 0}")
+                print(f"[DEBUG LOG] result.masks={result.masks is not None}, len(masks)={len(result.masks.xy) if result.masks is not None and hasattr(result.masks, 'xy') else 0}")
+                
+                # Check for boxes first
+                if result.boxes is not None and len(result.boxes) > 0:
+                    box = result.boxes.xyxy[0].cpu().float().numpy()
+                    print(f"[DEBUG LOG] Returning box from result.boxes: {box}")
                     return (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+                
+                # If no boxes, derive from the mask
+                if result.masks is not None and len(result.masks.xy) > 0:
+                    mask = result.masks.xy[0]
+                    if len(mask) > 0:
+                        x_min = int(np.min(mask[:, 0]))
+                        y_min = int(np.min(mask[:, 1]))
+                        x_max = int(np.max(mask[:, 0]))
+                        y_max = int(np.max(mask[:, 1]))
+                        print(f"[DEBUG LOG] Derived box from mask: {(x_min, y_min, x_max, y_max)}")
+                        return (x_min, y_min, x_max, y_max)
             
+            print("[DEBUG LOG] returning None.")
             return None
         except Exception as e:
-            print(f"Error during SAM inference: {e}")
+            print(f"[DEBUG LOG] Error during SAM inference: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def predict_bbox_from_box(self, image_array, box):
@@ -100,21 +121,42 @@ class SamManager:
         uses SAM to generate a mask and extracts the bounding box.
         Returns (x_min, y_min, x_max, y_max) or None if prediction fails.
         """
+        print(f"[DEBUG LOG] predict_bbox_from_box called with box={box}")
         if not self.model:
+            print("[DEBUG LOG] self.model is None. Returning None.")
             return None
 
         try:
-            results = self.model(image_array, bboxes=[box], verbose=False)
+            print(f"[DEBUG LOG] Running ultralytics SAM inference with bboxes={box}")
+            results = self.model(image_array, bboxes=box, verbose=False)
+            print(f"[DEBUG LOG] Inference completed. len(results)={len(results)}")
             
-            if len(results) > 0 and results[0].boxes is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                if len(boxes) > 0:
-                    b = boxes[0] # Take the first box
+            if len(results) > 0:
+                result = results[0]
+                print(f"[DEBUG LOG] result.boxes={result.boxes is not None}, len(boxes)={len(result.boxes) if result.boxes is not None else 0}")
+                print(f"[DEBUG LOG] result.masks={result.masks is not None}, len(masks)={len(result.masks.xy) if result.masks is not None and hasattr(result.masks, 'xy') else 0}")
+                
+                if result.boxes is not None and len(result.boxes) > 0:
+                    b = result.boxes.xyxy[0].cpu().float().numpy()
+                    print(f"[DEBUG LOG] Returning box from result.boxes: {b}")
                     return (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
+                
+                if result.masks is not None and len(result.masks.xy) > 0:
+                    mask = result.masks.xy[0]
+                    if len(mask) > 0:
+                        x_min = int(np.min(mask[:, 0]))
+                        y_min = int(np.min(mask[:, 1]))
+                        x_max = int(np.max(mask[:, 0]))
+                        y_max = int(np.max(mask[:, 1]))
+                        print(f"[DEBUG LOG] Derived box from mask: {(x_min, y_min, x_max, y_max)}")
+                        return (x_min, y_min, x_max, y_max)
             
+            print("[DEBUG LOG] returning None.")
             return None
         except Exception as e:
-            print(f"Error during SAM inference with box: {e}")
+            print(f"[DEBUG LOG] Error during SAM inference with box: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def predict_mask_from_box(self, image_array, box):
@@ -127,7 +169,7 @@ class SamManager:
             return None
 
         try:
-            results = self.model(image_array, bboxes=[box], verbose=False)
+            results = self.model(image_array, bboxes=box, verbose=False)
             
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
                 polygon = results[0].masks.xy[0] # Take the first mask
@@ -149,15 +191,10 @@ class SamManager:
         try:
             kwargs = {'verbose': False, 'imgsz': 1024}
             if points and labels:
-                # Ultralytics expects [[[x1,y1], [x2,y2]]] for a single image with multiple points.
-                if len(points) > 0 and not isinstance(points[0][0], list):
-                    kwargs['points'] = [points]
-                    kwargs['labels'] = [labels]
-                else:
-                    kwargs['points'] = points
-                    kwargs['labels'] = labels
+                kwargs['points'] = points
+                kwargs['labels'] = labels
             if box:
-                kwargs['bboxes'] = [box]
+                kwargs['bboxes'] = box
             if text_prompt and self.current_model_type and "fastsam" in self.current_model_type.lower():
                 kwargs['texts'] = text_prompt
 
@@ -174,7 +211,7 @@ class SamManager:
             return None
 
 
-    def track_video_from_boxes(self, frame_generator, bboxes, model_type="sam3_s.pt"):
+    def track_video_from_boxes(self, frame_generator, bboxes, model_type="sam3.1_s.pt"):
         """
         frame_generator: a Python generator that yields numpy arrays (frames).
         bboxes: list of bounding boxes [[x1, y1, x2, y2], ...] corresponding to objects in the FIRST frame yielded.
@@ -243,7 +280,7 @@ class SamManager:
                     frame_boxes = []
                     if result.boxes is not None:
                         for box in result.boxes.xyxy:
-                            b = box.cpu().numpy()
+                            b = box.cpu().float().numpy()
                             frame_boxes.append([int(b[0]), int(b[1]), int(b[2]), int(b[3])])
                             
                     yield True, {"polygons": frame_polygons, "boxes": frame_boxes}
@@ -258,7 +295,7 @@ class SamManager:
         except Exception as e:
             yield False, f"Tracking failed: {str(e)}"
 
-    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type="sam3_l.pt"):
+    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type="sam3.1_l.pt"):
         """
         frame_generator: a Python generator that yields numpy arrays (frames).
         Returns a generator yielding lists of polygons corresponding to the prompts for each frame.
@@ -293,14 +330,10 @@ class SamManager:
                 
             kwargs = {'stream': True}
             if points and labels:
-                if len(points) > 0 and not isinstance(points[0][0], list):
-                    kwargs['points'] = [points]
-                    kwargs['labels'] = [labels]
-                else:
-                    kwargs['points'] = points
-                    kwargs['labels'] = labels
+                kwargs['points'] = points
+                kwargs['labels'] = labels
             if box:
-                kwargs['bboxes'] = [box]
+                kwargs['bboxes'] = box
             if text_prompt and "fastsam" in model_type.lower():
                 kwargs['texts'] = text_prompt
 
@@ -341,7 +374,7 @@ class SamManager:
                     frame_boxes = []
                     if result.boxes is not None:
                         for b_ in result.boxes.xyxy:
-                            b = b_.cpu().numpy()
+                            b = b_.cpu().float().numpy()
                             frame_boxes.append([int(b[0]), int(b[1]), int(b[2]), int(b[3])])
                             
                     yield True, {"polygons": frame_polygons, "boxes": frame_boxes}

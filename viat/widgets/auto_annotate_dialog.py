@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-    QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget
+    QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget,
+    QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt
 import re
@@ -23,10 +24,11 @@ class AutoAnnotateDialog(QDialog):
         self.classes_input.setPlaceholderText("e.g. person, car, dog")
         layout.addWidget(self.classes_input)
 
-        # Detection Model
-        layout.addWidget(QLabel("Zero-Shot Detection Model:"))
-        self.det_model_combo = QComboBox()
-        self.det_model_combo.addItems([
+        # Detection Models
+        layout.addWidget(QLabel("Zero-Shot Detection Models (Select one or more):"))
+        self.det_model_list = QListWidget()
+        self.det_model_list.setMaximumHeight(150)
+        models = [
             "Existing Annotations (Hand labeled)",
             "YOLO-World Small (yolov8s-world.pt)",
             "YOLO-World Medium (yolov8m-world.pt)",
@@ -48,8 +50,13 @@ class AutoAnnotateDialog(QDialog):
             "Florence-2 Large (microsoft/Florence-2-large)",
             "LocateAnything-3B (nvidia/LocateAnything-3B)",
             "SAM3 Text Prompt (sam3.1_l.pt)"
-        ])
-        layout.addWidget(self.det_model_combo)
+        ]
+        for m in models:
+            item = QListWidgetItem(m)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self.det_model_list.addItem(item)
+        layout.addWidget(self.det_model_list)
 
         # Threshold for Existing Annotations
         self.threshold_widget = QWidget()
@@ -67,24 +74,36 @@ class AutoAnnotateDialog(QDialog):
         
         # Hide threshold by default
         self.threshold_widget.setVisible(False)
-        self.det_model_combo.currentTextChanged.connect(self.on_det_model_changed)
+        self.det_model_list.itemChanged.connect(self.on_det_model_changed)
 
         
-        # Restore last selected det model
-        if hasattr(self.parent(), "last_auto_det_model"):
-            idx = self.det_model_combo.findText(self.parent().last_auto_det_model, Qt.MatchContains)
-            if idx >= 0:
-                self.det_model_combo.setCurrentIndex(idx)
+        # Restore last selected det models
+        if hasattr(self.parent(), "last_auto_det_models"):
+            last_models = self.parent().last_auto_det_models
+            if isinstance(last_models, list):
+                for i in range(self.det_model_list.count()):
+                    item = self.det_model_list.item(i)
+                    for lm in last_models:
+                        if lm == "existing_annotations" and "Existing Annotations" in item.text():
+                            item.setCheckState(Qt.Checked)
+                        elif lm in item.text():
+                            item.setCheckState(Qt.Checked)
+        elif hasattr(self.parent(), "last_auto_det_model"): # Fallback for old saved state
+            for i in range(self.det_model_list.count()):
+                item = self.det_model_list.item(i)
+                if self.parent().last_auto_det_model and self.parent().last_auto_det_model in item.text():
+                    item.setCheckState(Qt.Checked)
+                    break
 
         # Segmentation Model
         layout.addWidget(QLabel("Segmentation Refiner (Optional - creates polygons):"))
         self.seg_model_combo = QComboBox()
         self.seg_model_combo.addItems([
             "None (Bounding Boxes Only)",
-            "SAM2 Fast (sam2_s.pt)",
-            "SAM2 Huge (sam2_l.pt)",
-            "SAM3 Fast (sam3_s.pt)",
-            "SAM3 Huge (sam3_l.pt)"
+            "SAM2 Fast (sam2.1_s.pt)",
+            "SAM2 Huge (sam2.1_l.pt)",
+            "SAM3 Fast (sam3.1_s.pt)",
+            "SAM3 Huge (sam3.1_l.pt)"
         ])
         layout.addWidget(self.seg_model_combo)
         
@@ -93,6 +112,12 @@ class AutoAnnotateDialog(QDialog):
             idx = self.seg_model_combo.findText(self.parent().last_auto_seg_model, Qt.MatchContains)
             if idx >= 0:
                 self.seg_model_combo.setCurrentIndex(idx)
+
+        # Save Segmentations Checkbox
+        self.chk_save_seg = QCheckBox("Save Segmentations to JSON (Creates large files)")
+        self.chk_save_seg.setChecked(False) # Default OFF
+        layout.addWidget(self.chk_save_seg)
+
 
         # Strategy
         layout.addWidget(QLabel("Annotation Strategy:"))
@@ -142,8 +167,13 @@ class AutoAnnotateDialog(QDialog):
         
         layout.addLayout(btn_layout)
 
-    def on_det_model_changed(self, text):
-        is_existing = "Existing Annotations" in text
+    def on_det_model_changed(self, item):
+        is_existing = False
+        for i in range(self.det_model_list.count()):
+            it = self.det_model_list.item(i)
+            if it.checkState() == Qt.Checked and "Existing Annotations" in it.text():
+                is_existing = True
+                break
         self.threshold_widget.setVisible(is_existing)
         # If refining existing annotations, we must have a segmentation model
         if is_existing and self.seg_model_combo.currentIndex() == 0:
@@ -153,12 +183,20 @@ class AutoAnnotateDialog(QDialog):
         raw_classes = self.classes_input.text()
         classes = [c.strip() for c in raw_classes.split(",") if c.strip()]
         
-        det_text = self.det_model_combo.currentText()
-        if "Existing Annotations" in det_text:
-            det_model = "existing_annotations"
-        else:
-            det_match = re.search(r'\((.*?)\)', det_text)
-            det_model = det_match.group(1) if det_match else "yolov8s-world.pt"
+        det_models = []
+        for i in range(self.det_model_list.count()):
+            item = self.det_model_list.item(i)
+            if item.checkState() == Qt.Checked:
+                det_text = item.text()
+                if "Existing Annotations" in det_text:
+                    det_models.append("existing_annotations")
+                else:
+                    det_match = re.search(r'\((.*?)\)', det_text)
+                    if det_match:
+                        det_models.append(det_match.group(1))
+                        
+        if not det_models:
+            det_models = ["yolov8s-world.pt"]
         
         seg_text = self.seg_model_combo.currentText()
         if "None" in seg_text:
@@ -176,8 +214,9 @@ class AutoAnnotateDialog(QDialog):
             
         return {
             "classes": classes,
-            "det_model": det_model,
+            "det_models": det_models,
             "seg_model": seg_model,
+            "save_segmentation": self.chk_save_seg.isChecked(),
             "strategy": strategy,
             "start_frame": start_frame,
             "end_frame": end_frame,

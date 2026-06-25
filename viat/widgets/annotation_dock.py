@@ -787,9 +787,6 @@ class AnnotationDock(QDockWidget):
 
         # Show dialog
         if dialog.exec_() == QDialog.Accepted:
-            # Save undo state before batch edit
-            self.main_window.save_undo_state()
-
             # Get frame range
             start_frame = start_spin.value()
             end_frame = end_spin.value()
@@ -797,6 +794,9 @@ class AnnotationDock(QDockWidget):
             # Validate range
             if start_frame > end_frame:
                 start_frame, end_frame = end_frame, start_frame
+
+            # Save undo state before batch edit
+            self.main_window.save_undo_state(range(start_frame, end_frame + 1))
 
             # Process based on selected action
             if change_class_radio.isChecked():
@@ -1486,7 +1486,9 @@ class AnnotationDock(QDockWidget):
         if dialog.exec_() == QDialog.Accepted:
             start_frame = start_spin.value()
             end_frame = end_spin.value()
-            self.main_window.save_undo_state()
+            low_f = min(start_frame, end_frame)
+            high_f = max(start_frame, end_frame)
+            self.main_window.save_undo_state(range(low_f, high_f + 1))
             self.apply_batch_delete_object(start_frame, end_frame, reference_annotation)
 
     def apply_batch_delete_object(self, start_frame, end_frame, reference_annotation):

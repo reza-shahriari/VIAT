@@ -633,7 +633,8 @@ class ZeroShotManager:
         if self.detector:
             self.detector.set_classes(classes_list)
 
-    def predict(self, image_array):
+    def predict(self, image_array, score_threshold=0.70):
         if not self.detector:
             return []
-        return self.detector.predict(image_array)
+        detections = self.detector.predict(image_array)
+        return [d for d in detections if d.get('score', 0) >= score_threshold]

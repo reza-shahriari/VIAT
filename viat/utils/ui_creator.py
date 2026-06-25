@@ -129,18 +129,16 @@ class UICreator:
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
 
-        # Undo action
-        undo_action = QAction("&Undo", self.main_window)
-        undo_action.setShortcut("Ctrl+Z")
-        undo_action.setStatusTip("Undo the last action")
-        undo_action.triggered.connect(self.main_window.undo)
+        # Undo action (Disabled for now to prevent accidental data loss)
+        undo_action = QAction("&Undo (Disabled)", self.main_window)
+        undo_action.setStatusTip("Undo is currently disabled")
+        undo_action.setEnabled(False)
         edit_menu.addAction(undo_action)
 
-        # Redo action
-        redo_action = QAction("&Redo", self.main_window)
-        redo_action.setShortcuts(["Ctrl+Y", "Ctrl+Shift+Z"])
-        redo_action.setStatusTip("Redo the last undone action")
-        redo_action.triggered.connect(self.main_window.redo)
+        # Redo action (Disabled for now to prevent accidental data loss)
+        redo_action = QAction("&Redo (Disabled)", self.main_window)
+        redo_action.setStatusTip("Redo is currently disabled")
+        redo_action.setEnabled(False)
         edit_menu.addAction(redo_action)
 
         edit_menu.addSeparator()
@@ -360,14 +358,22 @@ class UICreator:
         # Add model selector for Auto BBox
         self.main_window.sam_model_selector = QComboBox()
         self.main_window.sam_model_selector.addItems([
-            "SAM2 Fast (sam2_s.pt)", 
-            "SAM2 Huge (sam2_l.pt)",
-            "SAM3 Fast (sam3_s.pt)", 
-            "SAM3 Huge (sam3_l.pt)"
+            "SAM2 Fast (sam2.1_s.pt)", 
+            "SAM2 Huge (sam2.1_l.pt)",
+            "SAM3 Fast (sam3.1_s.pt)", 
+            "SAM3 Huge (sam3.1_l.pt)"
         ])
         self.main_window.sam_model_selector.setToolTip("Select the model to use for Auto BBox")
         self.main_window.sam_model_selector.currentTextChanged.connect(self.main_window.change_sam_model)
         self.main_window.toolbar.addWidget(self.main_window.sam_model_selector)
+
+        # Add save segmentation toggle for Magic Wand
+        from PyQt5.QtWidgets import QCheckBox
+        self.save_seg_checkbox = QCheckBox("Save Segmentations")
+        self.save_seg_checkbox.setChecked(False)
+        self.save_seg_checkbox.setToolTip("Save polygon segmentations when using Auto BBox (Magic Wand)")
+        self.main_window.save_seg_checkbox = self.save_seg_checkbox
+        self.main_window.toolbar.addWidget(self.save_seg_checkbox)
 
         self.main_window.toolbar.addSeparator()
        

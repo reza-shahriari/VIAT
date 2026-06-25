@@ -1009,10 +1009,13 @@ class VideoCanvas(QWidget):
 
     def handle_auto_bbox(self, prompt_point=None, prompt_box=None):
         """Handle clicking or dragging for Auto BBox feature using SAM."""
+        print(f"[DEBUG LOG] handle_auto_bbox called. prompt_point={prompt_point}, prompt_box={prompt_box}")
         if not hasattr(self, 'current_frame_array') or self.current_frame_array is None:
+            print("[DEBUG LOG] No current_frame_array found. Returning.")
             return
             
         if not hasattr(self.main_window, 'sam_manager') or not self.main_window.sam_manager.is_available():
+            print("[DEBUG LOG] sam_manager is not available. Returning.")
             return
             
         self.main_window.statusBar.showMessage("Generating bounding box...", 3000)
@@ -1026,16 +1029,37 @@ class VideoCanvas(QWidget):
         
         try:
             bbox = None
-            if prompt_point:
-                bbox = self.main_window.sam_manager.predict_bbox_from_point(
-                    self.current_frame_array, int(prompt_point.x()), int(prompt_point.y())
+            polygon = None
+            save_seg = False
+            if hasattr(self.main_window, "save_seg_checkbox"):
+                save_seg = self.main_window.save_seg_checkbox.isChecked()
+
+            if save_seg:
+                pts = [[int(prompt_point.x()), int(prompt_point.y())]] if prompt_point else None
+                lbls = [1] if prompt_point else None
+                bx = [prompt_box.x(), prompt_box.y(), prompt_box.x() + prompt_box.width(), prompt_box.y() + prompt_box.height()] if prompt_box else None
+                
+                polygon = self.main_window.sam_manager.predict_mask_from_prompt(
+                    self.current_frame_array, points=pts, labels=lbls, box=bx
                 )
-            elif prompt_box:
-                box_list = [prompt_box.x(), prompt_box.y(), prompt_box.x() + prompt_box.width(), prompt_box.y() + prompt_box.height()]
-                bbox = self.main_window.sam_manager.predict_bbox_from_box(
-                    self.current_frame_array, box_list
-                )
+                if polygon:
+                    x_c = [p[0] for p in polygon]
+                    y_c = [p[1] for p in polygon]
+                    bbox = (int(min(x_c)), int(min(y_c)), int(max(x_c)), int(max(y_c)))
+            else:
+                if prompt_point:
+                    print(f"[DEBUG LOG] Calling predict_bbox_from_point with x={int(prompt_point.x())}, y={int(prompt_point.y())}")
+                    bbox = self.main_window.sam_manager.predict_bbox_from_point(
+                        self.current_frame_array, int(prompt_point.x()), int(prompt_point.y())
+                    )
+                elif prompt_box:
+                    box_list = [prompt_box.x(), prompt_box.y(), prompt_box.x() + prompt_box.width(), prompt_box.y() + prompt_box.height()]
+                    print(f"[DEBUG LOG] Calling predict_bbox_from_box with box_list={box_list}")
+                    bbox = self.main_window.sam_manager.predict_bbox_from_box(
+                        self.current_frame_array, box_list
+                    )
             
+            print(f"[DEBUG LOG] Returned bbox from sam_manager: {bbox}")
             if bbox:
                 x_min, y_min, x_max, y_max = bbox
                 rect = QRect(x_min, y_min, x_max - x_min, y_max - y_min)
@@ -1060,6 +1084,7 @@ class VideoCanvas(QWidget):
                         attributes=default_attributes,
                         color=self.class_colors.get(self.current_class, QColor(255, 0, 0)),
                         score=1.0,
+                        segmentation=polygon if save_seg else None
                     )
                     self.annotations.append(annotation)
                     if hasattr(self.main_window, "annotation_dock"):
