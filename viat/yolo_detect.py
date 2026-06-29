@@ -107,6 +107,9 @@ def run_yolo_detection(
         cls_lower = cls.lower()
         if cls_lower in name_to_idx:
             target_indices.add(name_to_idx[cls_lower])
+        elif cls_lower == 'human' and 'person' in name_to_idx:
+            print(f"Mapping requested class 'human' to model class 'person'")
+            target_indices.add(name_to_idx['person'])
         else:
             print(f"WARNING: class '{cls}' not found in model. Available: {list(model_names.values())}")
 

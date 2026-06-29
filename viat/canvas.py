@@ -28,6 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .annotation import BoundingBox
 import random
 import numpy as np
+from typing import Union
+
+def copy_qrect(rect: Union[QRect, 'QRectF']) -> Union[QRect, 'QRectF']:
+    """Creates a safe copy of a QRect or QRectF"""
+    return type(rect)(rect.x(), rect.y(), rect.width(), rect.height())
 
 # Edge detection constants
 EDGE_NONE = 0
@@ -58,6 +63,7 @@ class VideoCanvas(QWidget):
         self.selected_annotation = None
         self.selected_annotations = []
         self.current_class = "Quad"
+        self.class_thresholds = {}
         self.class_colors = {
             "Quad": QColor(0, 255, 255),
         }
@@ -216,6 +222,13 @@ class VideoCanvas(QWidget):
                 _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
                 if _aid != self.object_filter:
                     continue
+            
+            # Skip annotations that fall below the class threshold
+            if hasattr(annotation, 'score') and annotation.score is not None:
+                threshold = (self.class_thresholds or {}).get(annotation.class_name, 0.0)
+                if annotation.score < threshold:
+                    continue
+                    
             display_rect = self.image_to_display_rect(annotation.rect)
             
             # Skip annotations outside the update area
@@ -407,7 +420,7 @@ class VideoCanvas(QWidget):
                 painter.drawText(score_rect, Qt.AlignCenter, score_text)
 
             # Draw attributes to the right of the box if there's space, otherwise to the left
-            if annotation.attributes:
+            if getattr(self, 'show_attributes', True) and annotation.attributes:
                 # Calculate the total height needed for all attributes
                 attr_count = len(annotation.attributes)
                 attr_total_height = text_height * attr_count
@@ -565,7 +578,7 @@ class VideoCanvas(QWidget):
 
     def image_to_display_pos(self, pos):
         """Convert image coordinates to display coordinates, accounting for zoom"""
-        if not self.pixmap or not pos:
+        if not self.pixmap or pos is None:
             return pos
 
         display_rect = self.get_display_rect()
@@ -607,10 +620,11 @@ class VideoCanvas(QWidget):
         top_left = self.image_to_display_pos(rect.topLeft())
         bottom_right = self.image_to_display_pos(rect.bottomRight())
 
-        if top_left and bottom_right:
+        if top_left is not None and bottom_right is not None:
             result = QRect(top_left, bottom_right)
             # Store in cache (store both input and output to verify later)
-            self._display_rect_cache[cache_key] = (QRect(rect), result)
+            rect_copy = type(rect)(rect.x(), rect.y(), rect.width(), rect.height())
+            self._display_rect_cache[cache_key] = (rect_copy, result)
             return result
         return QRect()
 
@@ -641,10 +655,11 @@ class VideoCanvas(QWidget):
         top_left = self.display_to_image_pos(rect.topLeft())
         bottom_right = self.display_to_image_pos(rect.bottomRight())
 
-        if top_left and bottom_right:
+        if top_left is not None and bottom_right is not None:
             result = QRect(top_left, bottom_right)
             # Store in cache (store both input and output to verify later)
-            self._display_rect_cache[cache_key] = (QRect(rect), result)
+            rect_copy = type(rect)(rect.x(), rect.y(), rect.width(), rect.height())
+            self._display_rect_cache[cache_key] = (rect_copy, result)
             return result
         return QRect()
 
@@ -755,7 +770,7 @@ class VideoCanvas(QWidget):
         delta_x = pos.x() - start_pos.x()
         delta_y = pos.y() - start_pos.y()
 
-        new_rect = QRect(rect)
+        new_rect = copy_qrect(rect)
 
         if edge == EDGE_TOP:
             new_top = rect.top() + delta_y
@@ -800,6 +815,12 @@ class VideoCanvas(QWidget):
         # Find all annotations that contain the point
         matching_annotations = []
         for annotation in reversed(self.annotations):
+            # Skip annotations that fall below the class threshold
+            if hasattr(annotation, 'score') and annotation.score is not None:
+                threshold = (self.class_thresholds or {}).get(annotation.class_name, 0.0)
+                if annotation.score < threshold:
+                    continue
+                    
             display_rect = self.image_to_display_rect(annotation.rect)
             expanded_rect = display_rect.adjusted(-5, -5, 5, 5)
             if expanded_rect.contains(pos):
@@ -808,16 +829,19 @@ class VideoCanvas(QWidget):
         if not matching_annotations:
             return None
             
-        # Sort by area descending (largest first)
-        matching_annotations.sort(key=lambda a: a.rect.width() * a.rect.height(), reverse=True)
+        # Sort by area ascending (smallest first)
+        matching_annotations.sort(key=lambda a: a.rect.width() * a.rect.height())
         
-        # If currently selected annotation is clicked again, cycle to the next one
         current_selection = getattr(self, "selected_annotation", None)
+        
+        # Prioritize the currently selected annotation if we are interacting with its edge or handle
         if current_selection in matching_annotations:
-            idx = matching_annotations.index(current_selection)
-            return matching_annotations[(idx + 1) % len(matching_annotations)]
-        else:
-            return matching_annotations[0]
+            display_rect = self.image_to_display_rect(current_selection.rect)
+            if self.handle_at_pos(display_rect, pos) is not None or self.detect_edge(display_rect, pos, threshold=12) != EDGE_NONE:
+                return current_selection
+                
+        # Otherwise, always return the smallest bounding box under the cursor
+        return matching_annotations[0]
 
     def mousePressEvent(self, event):
         # Prevent interaction if AI is currently processing this frame
@@ -856,7 +880,19 @@ class VideoCanvas(QWidget):
                 return
 
             # First, check if we're clicking on an existing annotation
-            annotation = self.find_annotation_at_pos(event.pos())
+            # Skip selection if Shift is pressed or if Auto BBox / SAM mode is active
+            skip_selection = False
+            if event.modifiers() & Qt.ShiftModifier:
+                skip_selection = True
+            elif getattr(self.main_window, "auto_bbox_mode", False):
+                skip_selection = True
+            elif getattr(self, "sam_interactive_mode", False):
+                skip_selection = True
+
+            if skip_selection:
+                annotation = None
+            else:
+                annotation = self.find_annotation_at_pos(event.pos())
             
             # If we found an annotation, handle selection and dragging
             if annotation:
@@ -879,28 +915,34 @@ class VideoCanvas(QWidget):
                 display_rect = self.image_to_display_rect(annotation.rect)
                 handle_idx = self.handle_at_pos(display_rect, event.pos())
                 if handle_idx is not None:
+                    if self.main_window:
+                        self.main_window.save_undo_state()
                     self.resizing_handle = handle_idx
                     self.resize_start_pos = event.pos()
-                    self.original_rect = QRect(annotation.rect)
+                    self.original_rect = copy_qrect(annotation.rect)
                     return
                 else:
                     # Check for edge movement
                     edge = self.detect_edge(display_rect, event.pos(), threshold=12)
                     if edge != EDGE_NONE:
+                        if self.main_window:
+                            self.main_window.save_undo_state()
                         self.edge_moving = True
                         self.active_edge = edge
                         self.edge_start_pos = event.pos()
-                        self.original_rect = QRect(annotation.rect)
+                        self.original_rect = copy_qrect(annotation.rect)
                         self.setCursor(self.get_edge_cursor(edge)) 
                         return
                     elif display_rect.contains(event.pos()):
                         # Start dragging the annotation
+                        if self.main_window:
+                            self.main_window.save_undo_state()
                         self.drag_start_pos = img_pos
-                        self.original_rect = QRect(annotation.rect)
+                        self.original_rect = copy_qrect(annotation.rect)
                         
                         # Store original rectangles for all selected annotations
                         for ann in self.selected_annotations:
-                            ann.original_rect = QRect(ann.rect)
+                            ann.original_rect = copy_qrect(ann.rect)
                 
                 # Reset two-click state if we're selecting an annotation
                 self.two_click_first_point = None
@@ -924,6 +966,8 @@ class VideoCanvas(QWidget):
                 and self.two_click_first_point is not None
             ):
                 # Second click - create the bounding box
+                if self.main_window:
+                    self.main_window.save_undo_state()
                 self.current_point = img_pos
 
                 # Create a rectangle from the two points
@@ -939,6 +983,14 @@ class VideoCanvas(QWidget):
 
                     # Check if we should use attributes from previous annotations
                     if self.main_window and hasattr(
+                        self.main_window, "get_default_attributes_for_class"
+                    ):
+                        default_attributes = (
+                            self.main_window.get_default_attributes_for_class(
+                                self.current_class
+                            )
+                        )
+                    elif self.main_window and hasattr(
                         self.main_window, "get_previous_annotation_attributes"
                     ):
                         prev_attributes = (
@@ -997,6 +1049,8 @@ class VideoCanvas(QWidget):
 
             # If we're not interacting with an existing annotation and in Drag mode, start drawing a new one
             if self.annotation_method == "Drag":
+                if self.main_window:
+                    self.main_window.save_undo_state()
                 self.is_drawing = True
                 self.start_point = img_pos
                 self.current_point = img_pos
@@ -1073,7 +1127,9 @@ class VideoCanvas(QWidget):
                     
                     # Get default attributes
                     default_attributes = {"Size": -1, "Quality": -1}
-                    if self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
+                    if self.main_window and hasattr(self.main_window, "get_default_attributes_for_class"):
+                        default_attributes = self.main_window.get_default_attributes_for_class(self.current_class)
+                    elif self.main_window and hasattr(self.main_window, "get_previous_annotation_attributes"):
                         prev_attributes = self.main_window.get_previous_annotation_attributes(self.current_class)
                         if prev_attributes:
                             default_attributes = prev_attributes
@@ -1086,6 +1142,8 @@ class VideoCanvas(QWidget):
                         score=1.0,
                         segmentation=polygon if save_seg else None
                     )
+                    if self.main_window:
+                        self.main_window.save_undo_state()
                     self.annotations.append(annotation)
                     if hasattr(self.main_window, "annotation_dock"):
                         self.main_window.annotation_dock.update_annotation_list()
@@ -1181,7 +1239,7 @@ class VideoCanvas(QWidget):
 
                                 if refined_pos is not None:
                                     # Update the rectangle with the refined edge position
-                                    updated_rect = QRect(self.selected_annotation.rect)
+                                    updated_rect = copy_qrect(self.selected_annotation.rect)
 
                                     if self.active_edge == EDGE_TOP:
                                         updated_rect.setTop(refined_pos)
@@ -1245,7 +1303,7 @@ class VideoCanvas(QWidget):
             delta_y = event.pos().y() - self.resize_start_pos.y()
             
             # Create a new rectangle based on which handle is being dragged
-            new_rect = QRect(display_rect)
+            new_rect = copy_qrect(display_rect)
             handle_idx = self.resizing_handle
             
             if handle_idx == 0:  # Top-left
@@ -1451,6 +1509,14 @@ class VideoCanvas(QWidget):
 
                     # Check if we should use attributes from previous annotations
                     if self.main_window and hasattr(
+                        self.main_window, "get_default_attributes_for_class"
+                    ):
+                        default_attributes = (
+                            self.main_window.get_default_attributes_for_class(
+                                self.current_class
+                            )
+                        )
+                    elif self.main_window and hasattr(
                         self.main_window, "get_previous_annotation_attributes"
                     ):
                         prev_attributes = (
@@ -1592,7 +1658,17 @@ class VideoCanvas(QWidget):
             self.update()
         #  Ctrl+Arrow keys to move the selected annotation
         elif self.selected_annotation:
-        
+            # Check if key is a modification key
+            is_mod_key = False
+            if (event.key() in (Qt.Key_Up, Qt.Key_Left, Qt.Key_Down, Qt.Key_Right) and 
+                    event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):
+                is_mod_key = True
+            elif event.key() in (Qt.Key_8, Qt.Key_4, Qt.Key_5, Qt.Key_6):
+                is_mod_key = True
+                
+            if is_mod_key and self.main_window:
+                self.main_window.save_undo_state()
+         
             # Move annotation with keys
             if (event.key() == Qt.Key_Up and event.modifiers() & Qt.ControlModifier and not event.modifiers() & Qt.ShiftModifier):  # Move up
                 # Move primary selected annotation

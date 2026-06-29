@@ -349,6 +349,29 @@ class AnnotationManager:
             form_layout.addRow(f"{attr_name}:", input_widget)
             attribute_widgets[attr_name] = input_widget
 
+        def update_attribute_fields_for_class(new_class_name):
+            # Fetch default/last used attributes for this class
+            default_attrs = {}
+            if hasattr(self.main_window, "get_default_attributes_for_class"):
+                default_attrs = self.main_window.get_default_attributes_for_class(new_class_name)
+            else:
+                default_attrs = self.get_previous_annotation_attributes(new_class_name) or {"Size": -1, "Quality": -1}
+            
+            # Update the widget values
+            for attr_name, widget in attribute_widgets.items():
+                if attr_name in default_attrs:
+                    val = default_attrs[attr_name]
+                    if isinstance(widget, QComboBox):  # Boolean
+                        widget.setCurrentText(str(bool(val)))
+                    elif isinstance(widget, QSpinBox):  # Int
+                        widget.setValue(int(val) if val is not None else -1)
+                    elif isinstance(widget, QDoubleSpinBox):  # Float
+                        widget.setValue(float(val) if val is not None else -1.0)
+                    elif isinstance(widget, QLineEdit):  # String
+                        widget.setText(str(val) if val is not None else "")
+
+        class_combo.currentTextChanged.connect(update_attribute_fields_for_class)
+
         layout.addLayout(form_layout)
 
         # Add verification checkbox for machine-generated annotations
@@ -423,6 +446,17 @@ class AnnotationManager:
                         annotation.attributes[attr_name] = widget.value()
                     else:  # String or other
                         annotation.attributes[attr_name] = widget.text()
+
+            # Save the class as last used globally
+            if hasattr(self.main_window, "set_active_class"):
+                self.main_window.set_active_class(new_class)
+            elif hasattr(self.canvas, "set_current_class"):
+                self.canvas.set_current_class(new_class)
+
+            # Save attributes as last used for this class
+            if not hasattr(self.main_window, "last_used_attributes"):
+                self.main_window.last_used_attributes = {}
+            self.main_window.last_used_attributes[new_class] = annotation.attributes.copy()
 
             # Handle verification if applicable
             if verification_checkbox and verification_checkbox.isChecked():
@@ -633,6 +667,17 @@ class AnnotationManager:
             # Create bounding box
             bbox = BoundingBox(rect, class_name, attributes, color,source='manual')
 
+            # Save the class as last used globally
+            if hasattr(self.main_window, "set_active_class"):
+                self.main_window.set_active_class(class_name)
+            elif hasattr(self.canvas, "set_current_class"):
+                self.canvas.set_current_class(class_name)
+
+            # Save attributes as last used for this class
+            if not hasattr(self.main_window, "last_used_attributes"):
+                self.main_window.last_used_attributes = {}
+            self.main_window.last_used_attributes[class_name] = attributes.copy()
+
             # Add to annotations
             self.canvas.annotations.append(bbox)
 
@@ -657,6 +702,8 @@ class AnnotationManager:
         class_label = QLabel("Class:")
         class_combo = QComboBox()
         class_combo.addItems(list(self.canvas.class_colors.keys()))
+        if hasattr(self.canvas, "current_class") and self.canvas.current_class in self.canvas.class_colors:
+            class_combo.setCurrentText(self.canvas.current_class)
 
         # Coordinates
         coords_layout = QFormLayout()
@@ -757,6 +804,9 @@ class AnnotationManager:
         Returns:
             Dictionary of attributes or None if no previous annotations found
         """
+        if hasattr(self.main_window, "get_default_attributes_for_class"):
+            return self.main_window.get_default_attributes_for_class(class_name)
+
         # Look through all frames for annotations of this class
         for frame_num, annotations in self.main_window.frame_annotations.items():
             for annotation in annotations:
