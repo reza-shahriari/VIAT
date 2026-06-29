@@ -238,12 +238,15 @@ class SamManager:
                 finally:
                     os.chdir(old_cwd)
             
-            overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024)
-            
-            if "sam3" in model_type:
-                predictor = SAM3VideoPredictor(overrides=overrides)
-            else:
-                predictor = SAM2VideoPredictor(overrides=overrides)
+            if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024, save=False)
+                if "sam3" in model_type:
+                    self.video_predictor = SAM3VideoPredictor(overrides=overrides)
+                else:
+                    self.video_predictor = SAM2VideoPredictor(overrides=overrides)
+                self.video_predictor_type = model_type
+                
+            predictor = self.video_predictor
                 
             # Predictor requires list or path, not generator
             source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
@@ -321,12 +324,15 @@ class SamManager:
                 finally:
                     os.chdir(old_cwd)
             
-            overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024)
-            
-            if "sam3" in model_type:
-                predictor = SAM3VideoPredictor(overrides=overrides)
-            else:
-                predictor = SAM2VideoPredictor(overrides=overrides)
+            if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024, save=False)
+                if "sam3" in model_type:
+                    self.video_predictor = SAM3VideoPredictor(overrides=overrides)
+                else:
+                    self.video_predictor = SAM2VideoPredictor(overrides=overrides)
+                self.video_predictor_type = model_type
+                
+            predictor = self.video_predictor
                 
             kwargs = {'stream': True}
             if points and labels:

@@ -214,9 +214,11 @@ class DatasetLoaderThread(QThread):
         
         total_index = 0
 
+        # Collect all images across target splits and sort by filename
+        all_images_with_info = []
+        split_formats = {}
+        
         for split in self.info.splits:
-            if self.is_cancelled:
-                break
             if split.name not in self.target_splits:
                 continue
                 
@@ -224,44 +226,52 @@ class DatasetLoaderThread(QThread):
             if fmt is None:
                 warnings.append(f"Split {split.name}: unknown format, skipped.")
                 continue
-
+            split_formats[split.name] = fmt
+            
             for img_path in split.images:
-                if self.is_cancelled:
-                    break
-                    
-                current_img_batch.append(img_path)
-                current_split_batch.append(split.name)
-                per_split[split.name] = per_split.get(split.name, 0) + 1
+                all_images_with_info.append((img_path, split))
 
-                img_size = _image_size(img_path)
-                if img_size is None:
-                    warnings.append(f"Could not read size: {os.path.basename(img_path)}")
-                    current_boxes_batch[total_index] = []
-                    total_index += 1
-                    continue
+        # Sort by basename
+        all_images_with_info.sort(key=lambda x: os.path.basename(x[0]))
 
-                try:
-                    label_path = fmt.find_label_file(img_path, split.label_dirs)
-                except Exception as e:
-                    warnings.append(f"{os.path.basename(img_path)}: {e}")
-                    label_path = None
-
-                boxes = []
-                if label_path:
-                    try:
-                        boxes = fmt.load(label_path, img_size, self.info.classes)
-                    except LabelParseError as e:
-                        warnings.append(str(e))
+        for img_path, split in all_images_with_info:
+            if self.is_cancelled:
+                break
                 
-                current_boxes_batch[total_index] = boxes or []
-                total_index += 1
+            fmt = split_formats[split.name]
+            current_img_batch.append(img_path)
+            current_split_batch.append(split.name)
+            per_split[split.name] = per_split.get(split.name, 0) + 1
 
-                # Emit batch
-                if len(current_img_batch) >= batch_size:
-                    self.batchLoaded.emit(list(current_img_batch), list(current_split_batch), dict(current_boxes_batch))
-                    current_img_batch.clear()
-                    current_split_batch.clear()
-                    current_boxes_batch.clear()
+            img_size = _image_size(img_path)
+            if img_size is None:
+                warnings.append(f"Could not read size: {os.path.basename(img_path)}")
+                current_boxes_batch[total_index] = []
+                total_index += 1
+                continue
+
+            try:
+                label_path = fmt.find_label_file(img_path, split.label_dirs)
+            except Exception as e:
+                warnings.append(f"{os.path.basename(img_path)}: {e}")
+                label_path = None
+
+            boxes = []
+            if label_path:
+                try:
+                    boxes = fmt.load(label_path, img_size, self.info.classes)
+                except LabelParseError as e:
+                    warnings.append(str(e))
+            
+            current_boxes_batch[total_index] = boxes or []
+            total_index += 1
+
+            # Emit batch
+            if len(current_img_batch) >= batch_size:
+                self.batchLoaded.emit(list(current_img_batch), list(current_split_batch), dict(current_boxes_batch))
+                current_img_batch.clear()
+                current_split_batch.clear()
+                current_boxes_batch.clear()
 
         # Emit remaining batch
         if current_img_batch and not self.is_cancelled:
@@ -835,7 +845,7 @@ def export_dataset_dialog(parent, image_files, frame_annotations):
     form = QFormLayout()
 
     format_combo = QComboBox()
-    format_combo.addItems(["YOLO", "COCO JSON", "Pascal VOC XML"])
+    format_combo.addItems(["YOLO", "COCO JSON", "Pascal VOC XML", "Raya Video"])
     form.addRow("Format:", format_combo)
 
     output_edit = QLineEdit()
@@ -862,6 +872,56 @@ def export_dataset_dialog(parent, image_files, frame_annotations):
     split_spin.setEnabled(False)
     split_check.toggled.connect(split_spin.setEnabled)
     form.addRow("Validation %:", split_spin)
+    
+    # Raya Video specific options
+    from PyQt5.QtWidgets import QWidget, QRadioButton, QButtonGroup
+    raya_widget = QWidget()
+    raya_layout = QFormLayout(raya_widget)
+    raya_layout.setContentsMargins(0, 0, 0, 0)
+    
+    width_edit = QLineEdit()
+    width_edit.setPlaceholderText("Auto (Max)")
+    height_edit = QLineEdit()
+    height_edit.setPlaceholderText("Auto (Max)")
+    
+    size_layout = QHBoxLayout()
+    size_layout.addWidget(QLabel("W:"))
+    size_layout.addWidget(width_edit)
+    size_layout.addWidget(QLabel("H:"))
+    size_layout.addWidget(height_edit)
+    raya_layout.addRow("Video Size:", size_layout)
+    
+    resize_group = QButtonGroup(raya_widget)
+    radio_pad = QRadioButton("Pad to Top-Left")
+    radio_pad.setChecked(True)
+    radio_yolo = QRadioButton("YOLO-style Resize")
+    resize_group.addButton(radio_pad)
+    resize_group.addButton(radio_yolo)
+    
+    resize_layout = QVBoxLayout()
+    resize_layout.addWidget(radio_pad)
+    resize_layout.addWidget(radio_yolo)
+    raya_layout.addRow("Resize Mode:", resize_layout)
+    
+    class_check = QCheckBox("Include frame category (Raya with classes)")
+    class_check.setChecked(True)
+    raya_layout.addRow("", class_check)
+    
+    raya_widget.setVisible(False)
+    form.addRow(raya_widget)
+    
+    def on_format_changed(text):
+        is_raya = (text == "Raya Video")
+        raya_widget.setVisible(is_raya)
+        split_check.setVisible(not is_raya)
+        if split_check.isVisible():
+            split_spin.setVisible(split_check.isChecked())
+            form.labelForField(split_spin).setVisible(True)
+        else:
+            split_spin.setVisible(False)
+            form.labelForField(split_spin).setVisible(False)
+            
+    format_combo.currentTextChanged.connect(on_format_changed)
 
     layout.addLayout(form)
 
@@ -877,12 +937,23 @@ def export_dataset_dialog(parent, image_files, frame_annotations):
     if not out_dir:
         return None
 
-    fmt_map = {"YOLO": "yolo", "COCO JSON": "coco", "Pascal VOC XML": "pascal_voc"}
+    fmt_map = {"YOLO": "yolo", "COCO JSON": "coco", "Pascal VOC XML": "pascal_voc", "Raya Video": "raya_video"}
+    
+    video_width = None
+    video_height = None
+    if width_edit.text().strip().isdigit() and height_edit.text().strip().isdigit():
+        video_width = int(width_edit.text().strip())
+        video_height = int(height_edit.text().strip())
+        
     return {
         "output_dir": out_dir,
         "format": fmt_map[format_combo.currentText()],
         "make_splits": split_check.isChecked(),
         "valid_pct": split_spin.value(),
+        "video_width": video_width,
+        "video_height": video_height,
+        "resize_mode": "pad" if radio_pad.isChecked() else "yolo",
+        "include_classes": class_check.isChecked()
     }
 
 
@@ -897,7 +968,11 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
     valid_pct = config.get("valid_pct", 10)
 
     fmt = get_format(fmt_name)
-    if fmt is None:
+    if fmt_name == "raya_video":
+        # Handle Raya Video export separately
+        yield from export_raya_video_dataset(config, image_files, frame_annotations, class_colors)
+        return
+    elif fmt is None:
         return f"Unknown format: {fmt_name}"
 
     os.makedirs(out_dir, exist_ok=True)
@@ -956,7 +1031,13 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
             boxes = []
         else:
             boxes = []
+            thresholds = getattr(parent, "class_thresholds", {}) or {}
             for ann in anns:
+                if hasattr(ann, 'score') and ann.score is not None:
+                    thresh = thresholds.get(ann.class_name, 0.0)
+                    if ann.score < thresh:
+                        continue
+                        
                 boxes.append({
                     "class_name": getattr(ann, "class_name", "unknown"),
                     "class_index": classes.index(ann.class_name) if ann.class_name in classes else 0,
@@ -1002,7 +1083,13 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
                     "id": i, "file_name": img_name,
                     "width": img_size[0], "height": img_size[1],
                 })
+                thresholds = getattr(parent, "class_thresholds", {}) or {}
                 for b in (frame_annotations.get(i, [])):
+                    if hasattr(b, 'score') and b.score is not None:
+                        thresh = thresholds.get(b.class_name, 0.0)
+                        if b.score < thresh:
+                            continue
+                            
                     cat = cat_id.get(b.class_name, 0)
                     anns_json.append({
                         "id": ann_id, "image_id": i, "category_id": cat,
@@ -1053,7 +1140,207 @@ def create_dataset_dialog(parent, image_files, frame_annotations, class_colors):
     return export_dataset_dialog(parent, image_files, frame_annotations)
 
 
+def export_raya_video_dataset(config, image_files, frame_annotations, class_colors):
+    import cv2
+    import json
+    import os
+    import numpy as np
+    from utils.file_operations import export_raya_annotations, export_raya_with_classes_annotations
+    from annotation import BoundingBox
+    from PyQt5.QtCore import QRectF
+
+    out_dir = config["output_dir"]
+    video_width = config.get("video_width")
+    video_height = config.get("video_height")
+    resize_mode = config.get("resize_mode", "pad")
+    include_classes = config.get("include_classes", True)
+
+    os.makedirs(out_dir, exist_ok=True)
+    video_path = os.path.join(out_dir, "dataset_video.mp4")
+    
+    # 1. Determine video resolution if not provided
+    if video_width is None or video_height is None:
+        max_w = 0
+        max_h = 0
+        for img_path in image_files:
+            size = _image_size(img_path)
+            if size:
+                max_w = max(max_w, size[0])
+                max_h = max(max_h, size[1])
+        video_width = max_w if video_width is None else video_width
+        video_height = max_h if video_height is None else video_height
+
+    if video_width == 0 or video_height == 0:
+        return "Error: Could not determine video resolution."
+
+    # 2. Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out_video = cv2.VideoWriter(video_path, fourcc, 30.0, (video_width, video_height))
+    
+    original_sizes = {}
+    total = len(image_files)
+    all_annotations = []
+    
+    for i, img_path in enumerate(image_files):
+        if i % 5 == 0 and total > 0:
+            yield int((i / total) * 80), f"Writing video frame {i}/{total}..."
+            
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+            
+        orig_h, orig_w = img.shape[:2]
+        original_sizes[str(i)] = [orig_w, orig_h]
+        
+        dx, dy = 0, 0
+        scale = 1.0
+        
+        if resize_mode == "pad":
+            frame = np.zeros((video_height, video_width, 3), dtype=np.uint8)
+            copy_w = min(orig_w, video_width)
+            copy_h = min(orig_h, video_height)
+            frame[0:copy_h, 0:copy_w] = img[0:copy_h, 0:copy_w]
+        else:
+            scale = min(video_width / orig_w, video_height / orig_h)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            frame = np.zeros((video_height, video_width, 3), dtype=np.uint8)
+            dx = (video_width - new_w) // 2
+            dy = (video_height - new_h) // 2
+            frame[dy:dy+new_h, dx:dx+new_w] = resized_img
+            
+        out_video.write(frame)
+        
+        anns = frame_annotations.get(i, [])
+        for ann in anns:
+            new_rect = QRectF(
+                ann.rect.x() * scale + dx,
+                ann.rect.y() * scale + dy,
+                ann.rect.width() * scale,
+                ann.rect.height() * scale
+            )
+            
+            ann_copy = BoundingBox(new_rect, getattr(ann, 'class_name', ''), getattr(ann, 'attributes', {}), source=getattr(ann, 'source', 'manual'))
+            ann_copy.frame = i
+            all_annotations.append(ann_copy)
+
+    out_video.release()
+    
+    yield 85, "Exporting metadata and annotations..."
+    
+    metadata_path = os.path.join(out_dir, "dataset_video_metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "original_sizes": original_sizes,
+            "resize_mode": resize_mode,
+            "video_width": video_width,
+            "video_height": video_height
+        }, f, indent=2)
+        
+    txt_path = os.path.join(out_dir, "dataset_video.txt")
+    if include_classes:
+        classes = list(class_colors.keys())
+        export_raya_with_classes_annotations(txt_path, all_annotations, classes)
+    else:
+        export_raya_annotations(txt_path, all_annotations)
+        
+    yield 100, "Done"
+    return f"Exported video and Raya annotations to {out_dir}"
+
+
 def create_dataset(parent, config, image_files, frame_annotations, class_colors):
     """Create a dataset on disk. Delegates to export_dataset()."""
     msg = export_dataset(parent, config, image_files, frame_annotations, class_colors)
     return bool(msg and not msg.startswith("Unknown"))
+
+def update_dataset_labels(info, frame_annotations, image_files, current_classes=None):
+    """
+    Update original dataset label files with current annotations.
+    """
+    import os
+    from .label_formats import get_format
+    
+    if current_classes is not None:
+        info.classes = list(current_classes)
+        # Rewrite class definition files
+        for name in ("classes.txt", "obj.names", "labels.txt"):
+            p = os.path.join(info.root, name)
+            if os.path.isfile(p) or name == "classes.txt":
+                try:
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write("\n".join(info.classes) + "\n")
+                except OSError:
+                    pass
+        try:
+            from .dataset_merger import _update_target_yaml
+            _update_target_yaml(info.root, info.classes, replace=True)
+        except Exception:
+            pass
+    
+    # Pre-compute image path to split mapping for speed
+    image_to_split = {}
+    for split in info.splits:
+        for img_path in split.images:
+            image_to_split[img_path] = split
+            
+    updated_count = 0
+    errors = []
+
+    for frame_idx_str, anns in frame_annotations.items():
+        frame_idx = int(frame_idx_str)
+        if frame_idx >= len(image_files):
+            continue
+            
+        img_path = image_files[frame_idx]
+        split_info = image_to_split.get(img_path)
+        if not split_info:
+            continue
+            
+        fmt = get_format(split_info.label_format or info.label_format or "yolo")
+        if not fmt:
+            errors.append(f"Unknown format for {img_path}")
+            continue
+            
+        img_size = _image_size(img_path)
+        if not img_size:
+            errors.append(f"Could not read size for {img_path}")
+            continue
+            
+        try:
+            # Prepare annotations to match expected format (dict)
+            boxes = []
+            for ann in anns:
+                if hasattr(ann, 'to_dict'):
+                    d = ann.to_dict()
+                    boxes.append({
+                        "x": d["rect"]["x"],
+                        "y": d["rect"]["y"],
+                        "w": d["rect"]["width"],
+                        "h": d["rect"]["height"],
+                        "class_name": d["class_name"],
+                        "score": d.get("score", 1.0),
+                        "segmentation": d.get("segmentation")
+                    })
+                else:
+                    boxes.append(ann)
+            text_content = fmt.dump(boxes, img_size, info.classes)
+            
+            label_path = fmt.find_label_file(img_path, split_info.label_dirs)
+            if not label_path:
+                # Create a new label file path
+                stem = os.path.splitext(os.path.basename(img_path))[0]
+                if split_info.label_dirs:
+                    label_path = os.path.join(split_info.label_dirs[0], stem + fmt.extensions[0])
+                else:
+                    label_path = os.path.join(os.path.dirname(img_path), stem + fmt.extensions[0])
+                    
+            with open(label_path, "w", encoding="utf-8") as f:
+                f.write(text_content)
+            updated_count += 1
+        except Exception as e:
+            errors.append(f"Error saving {img_path}: {e}")
+            
+    return updated_count, errors
+

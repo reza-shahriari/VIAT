@@ -170,23 +170,36 @@ class Sam3NativeManager:
                 x1, y1, x2, y2 = box
                 prompt_req["bounding_boxes"] = [[x1/IMG_WIDTH, y1/IMG_HEIGHT, (x2-x1)/IMG_WIDTH, (y2-y1)/IMG_HEIGHT]]
                 prompt_req["bounding_box_labels"] = [1]
-            self.video_predictor.handle_request(prompt_req)
+            res = self.video_predictor.handle_request(prompt_req)
+            print(f"[SAM3 Native] add_prompt returned dict keys: {res.keys()}")
+            if "outputs" in res:
+                print(f"[SAM3 Native] add_prompt outputs keys: {res['outputs'].keys() if res['outputs'] else 'None'}")
+                if res['outputs'] and "out_binary_masks" in res['outputs']:
+                    print(f"[SAM3 Native] add_prompt out_binary_masks shape: {res['outputs']['out_binary_masks'].shape}")
         
         # Propagate to get mask
-        outputs = None
-        for out in self.video_predictor.handle_stream_request({"type": "propagate_in_video", "session_id": self.current_session_id, "start_frame_index": 0}):
-            if out["frame_index"] == 0:
-                outputs = out["outputs"]
-                break
+        outputs = res.get("outputs") if 'res' in locals() and res.get("outputs") is not None else None
+        
+        # fallback to stream if add_prompt didn't yield outputs
+        if outputs is None:
+            print("[SAM3 Native] outputs is None, trying propagate_in_video")
+            for out in self.video_predictor.handle_stream_request({"type": "propagate_in_video", "session_id": self.current_session_id, "start_frame_index": 0}):
+                print(f"[SAM3 Native] stream out frame_index: {out.get('frame_index')}")
+                if out.get("frame_index") == 0:
+                    outputs = out.get("outputs")
+                    break
 
         if outputs is None:
+            print("[SAM3 Native] No outputs from SAM3 predictor")
             return None
 
-        # outputs is a dict: {"out_obj_ids": np.array, "out_binary_masks": np.array [N, H, W]}
         out_obj_ids = outputs.get("out_obj_ids", None)
         out_binary_masks = outputs.get("out_binary_masks", None)
 
+        print(f"[SAM3 Native] out_obj_ids: {out_obj_ids}, out_binary_masks shape: {out_binary_masks.shape if out_binary_masks is not None else 'None'}")
+
         if out_binary_masks is None or len(out_binary_masks) == 0:
+            print("[SAM3 Native] out_binary_masks is empty or None")
             return None
 
         # Take mask for obj_id=1 if present, otherwise take the first one
@@ -202,11 +215,13 @@ class Sam3NativeManager:
         if mask is None:
             return None
 
-        # mask is a numpy bool array [H, W]
         mask = mask.astype(bool)
         mask_uint8 = mask.astype(np.uint8) * 255
 
+        print(f"[SAM3 Native] mask max value: {mask_uint8.max()}")
+
         if mask_uint8.max() == 0:
+            print("[SAM3 Native] mask is completely empty (all 0s)")
             return None
 
         # Find contours

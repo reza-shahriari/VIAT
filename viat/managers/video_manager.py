@@ -51,6 +51,9 @@ class VideoManager(QObject):
         # Image dataset support
         self.is_image_dataset = False
         self.image_files = []
+        
+        # Metadata for Raya Video export
+        self.video_metadata = None
     
     def open_video(self, parent_window):
         """Open a video file dialog and load the selected video."""
@@ -103,10 +106,21 @@ class VideoManager(QObject):
         # Get video properties
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame = 0
+        
+        # Check for metadata file
+        self.video_metadata = None
+        metadata_path = os.path.join(os.path.dirname(filename), "dataset_video_metadata.json")
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r') as f:
+                    self.video_metadata = json.load(f)
+            except Exception:
+                pass
 
         # Read the first frame
         ret, frame = self.cap.read()
         if ret:
+            frame = self._process_frame_metadata(frame, 0)
             # Emit signals to notify about the loaded video
             self.video_loaded.emit(filename, self.total_frames)
             self.frame_changed.emit(0, frame)
@@ -145,8 +159,18 @@ class VideoManager(QObject):
         # Read the frame
         ret, frame = self.cap.read()
         if ret:
-            return frame
+            return self._process_frame_metadata(frame, self.current_frame)
         return None
+        
+    def _process_frame_metadata(self, frame, frame_num):
+        """Process the frame according to loaded metadata (e.g., cropping padded regions)."""
+        if self.video_metadata and self.video_metadata.get("resize_mode") == "pad":
+            sizes = self.video_metadata.get("original_sizes", {})
+            orig_size = sizes.get(str(frame_num))
+            if orig_size and len(orig_size) == 2:
+                orig_w, orig_h = orig_size
+                frame = frame[:orig_h, :orig_w]
+        return frame
     
     def goto_frame(self, frame_number):
         """

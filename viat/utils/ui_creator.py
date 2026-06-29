@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QStatusBar,
     QSpinBox,
+    QCheckBox
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
@@ -25,6 +26,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
 from viat.widgets.sam_interactive_dock import SAMInteractiveDock
+from viat.widgets.empty_frames_dock import EmptyFramesManagerDock
+from viat.widgets.class_frames_dock import ClassFramesManagerDock
+from viat.widgets.video_manager_dock import VideoManagerDock
 
 
 class UICreator:
@@ -112,6 +116,13 @@ class UICreator:
         export_action.triggered.connect(self.main_window.export_annotations)
         file_menu.addAction(export_action)
 
+        # Update Original Dataset Labels action
+        update_dataset_labels_action = QAction("Update Original Dataset Labels", self.main_window)
+        update_dataset_labels_action.triggered.connect(self.main_window.update_original_dataset_labels)
+        self.main_window.update_dataset_labels_action = update_dataset_labels_action
+        self.main_window.update_dataset_labels_action.setEnabled(False)
+        file_menu.addAction(update_dataset_labels_action)
+
         file_menu.addSeparator()
 
         # Delete History action
@@ -129,16 +140,18 @@ class UICreator:
         """Create the Edit menu and its actions."""
         edit_menu = menubar.addMenu("Edit")
 
-        # Undo action (Disabled for now to prevent accidental data loss)
-        undo_action = QAction("&Undo (Disabled)", self.main_window)
-        undo_action.setStatusTip("Undo is currently disabled")
-        undo_action.setEnabled(False)
+        # Undo action
+        undo_action = QAction("&Undo", self.main_window)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.setStatusTip("Undo the last action")
+        undo_action.triggered.connect(self.main_window.undo)
         edit_menu.addAction(undo_action)
 
-        # Redo action (Disabled for now to prevent accidental data loss)
-        redo_action = QAction("&Redo (Disabled)", self.main_window)
-        redo_action.setStatusTip("Redo is currently disabled")
-        redo_action.setEnabled(False)
+        # Redo action
+        redo_action = QAction("&Redo", self.main_window)
+        redo_action.setShortcuts(["Ctrl+Y", "Ctrl+Shift+Z"])
+        redo_action.setStatusTip("Redo the last undone action")
+        redo_action.triggered.connect(self.main_window.redo)
         edit_menu.addAction(redo_action)
 
         edit_menu.addSeparator()
@@ -199,6 +212,37 @@ class UICreator:
                 self.main_window.class_dock.setVisible(checked)
         toggle_docks_action.triggered.connect(toggle_side_panel)
         view_menu.addAction(toggle_docks_action)
+
+        # Toggle Empty Frames Manager
+        toggle_empty_frames_action = QAction("Empty Frames Manager", self.main_window, checkable=True)
+        toggle_empty_frames_action.setChecked(False)
+        def toggle_empty_frames(checked):
+            if hasattr(self.main_window, 'empty_frames_dock'):
+                self.main_window.empty_frames_dock.setVisible(checked)
+                if checked:
+                    self.main_window.refresh_empty_frames_dock()
+        toggle_empty_frames_action.triggered.connect(toggle_empty_frames)
+        view_menu.addAction(toggle_empty_frames_action)
+        
+        # Toggle Class Frames Manager
+        toggle_class_frames_action = QAction("Class Frames Manager", self.main_window, checkable=True)
+        toggle_class_frames_action.setChecked(False)
+        def toggle_class_frames(checked):
+            if hasattr(self.main_window, 'class_frames_dock'):
+                self.main_window.class_frames_dock.setVisible(checked)
+                if checked:
+                    self.main_window.refresh_class_frames_dock()
+        toggle_class_frames_action.triggered.connect(toggle_class_frames)
+        view_menu.addAction(toggle_class_frames_action)
+        
+        # Toggle Video Manager
+        toggle_video_manager_action = QAction("Video Manager", self.main_window, checkable=True)
+        toggle_video_manager_action.setChecked(True)
+        def toggle_video_manager(checked):
+            if hasattr(self.main_window, 'video_manager_dock'):
+                self.main_window.video_manager_dock.setVisible(checked)
+        toggle_video_manager_action.triggered.connect(toggle_video_manager)
+        view_menu.addAction(toggle_video_manager_action)
 
         view_menu.addSeparator()
 
@@ -442,6 +486,27 @@ class UICreator:
         )
         self.main_window.sam_interactive_dock.hide() # Hidden by default
 
+        # Empty Frames Manager dock
+        self.main_window.empty_frames_dock = EmptyFramesManagerDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.empty_frames_dock
+        )
+        self.main_window.empty_frames_dock.hide() # Hidden by default
+        
+        # Class Frames Manager dock
+        self.main_window.class_frames_dock = ClassFramesManagerDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.class_frames_dock
+        )
+        self.main_window.class_frames_dock.hide() # Hidden by default
+
+        # Video Manager dock
+        self.main_window.video_manager_dock = VideoManagerDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.LeftDockWidgetArea, self.main_window.video_manager_dock
+        )
+        self.main_window.video_manager_dock.hide() # Hidden by default
+
 
         # Tabify them to create a collapsible side panel
         self.main_window.tabifyDockWidget(
@@ -505,6 +570,8 @@ class UICreator:
             self.main_window.slider_changed
         )
         self.main_window.frame_slider.setMaximumHeight(20)  # Make slider smaller
+
+
 
         # Frame counter label
         self.main_window.frame_label = QLabel("0/0")

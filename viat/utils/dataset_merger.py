@@ -73,6 +73,8 @@ def merge_dataset_into_target(
 
     # Scan source
     source_info = scan_dataset(source_folder)
+    used_classes = _get_used_classes(source_info)
+    source_info.classes = [c for c in source_info.classes if c in used_classes]
     if source_info.image_count == 0:
         return {"images_copied": 0, "labels_copied": 0, "error": "No images in source"}
 
@@ -90,13 +92,22 @@ def merge_dataset_into_target(
     if class_mapping is None:
         class_mapping = {}
         unmatched = []
+        target_classes_lower = {tgt_cls.lower(): tgt_cls for tgt_cls in target_classes}
         for src_cls in source_classes:
-            if src_cls in target_classes:
-                class_mapping[src_cls] = src_cls
+            if src_cls.lower() in target_classes_lower:
+                class_mapping[src_cls] = target_classes_lower[src_cls.lower()]
             else:
                 unmatched.append(src_cls)
     else:
         unmatched = [c for c in source_classes if c not in class_mapping]
+        # Also add any new target classes from mapping to target_classes
+        for tgt_cls in class_mapping.values():
+            if tgt_cls != "DONT MERGE" and tgt_cls not in target_classes:
+                if type(target_classes) is list:
+                    target_classes.append(tgt_cls)
+                else:
+                    target_classes = list(target_classes)
+                    target_classes.append(tgt_cls)
 
     # If there are unmatched classes, we can't proceed -- the caller must
     # resolve them first (show a dialog asking the user).
@@ -189,14 +200,18 @@ def merge_dataset_into_target(
                     boxes = fmt.load(label_path, img_size, source_classes)
 
                     # Apply class mapping + reindex
+                    filtered_boxes = []
                     for b in boxes:
                         src_cls = b["class_name"]
                         tgt_cls = class_mapping.get(src_cls, src_cls)
+                        if tgt_cls == "DONT MERGE":
+                            continue
                         b["class_name"] = tgt_cls
                         b["class_index"] = target_class_index.get(tgt_cls, 0)
+                        filtered_boxes.append(b)
 
                     # Write with TARGET classes
-                    content = fmt.dump(boxes, img_size, target_classes)
+                    content = fmt.dump(filtered_boxes, img_size, target_classes)
                     new_lbl_path = os.path.join(tgt_lbl_dir, new_lbl_stem + fmt.extensions[0])
                     with open(new_lbl_path, "w", encoding="utf-8") as f:
                         f.write(content)
@@ -231,7 +246,7 @@ def _image_size(path):
         return None
 
 
-def _update_target_yaml(target_folder, classes):
+def _update_target_yaml(target_folder, classes, replace=False):
     """Update or create data.yaml in the target folder with the full class list."""
     yaml_path = os.path.join(target_folder, "data.yaml")
     # Read existing
@@ -247,14 +262,17 @@ def _update_target_yaml(target_folder, classes):
             pass
 
     # Merge classes (add any new ones)
-    existing_classes = existing.get("names", [])
-    if isinstance(existing_classes, list):
-        all_classes = list(existing_classes)
-        for c in classes:
-            if c not in all_classes:
-                all_classes.append(c)
-    else:
+    if replace:
         all_classes = list(classes)
+    else:
+        existing_classes = existing.get("names", [])
+        if isinstance(existing_classes, list):
+            all_classes = list(existing_classes)
+            for c in classes:
+                if c not in all_classes:
+                    all_classes.append(c)
+        else:
+            all_classes = list(classes)
 
     # Write
     try:
@@ -270,20 +288,56 @@ def _update_target_yaml(target_folder, classes):
             f.write("names: [" + ", ".join(all_classes) + "]\n")
 
 
+def _get_used_classes(info) -> set:
+    from .label_formats import get_format
+    import os
+    used = set()
+    for split in info.splits:
+        fmt = None
+        if split.label_format:
+            fmt = get_format(split.label_format)
+        elif info.label_format:
+            fmt = get_format(info.label_format)
+        
+        if not fmt or fmt.name != "yolo":
+            return set(info.classes)
+            
+        for img_path in split.images:
+            try:
+                label_path = fmt.find_label_file(img_path, split.label_dirs)
+                if label_path and os.path.isfile(label_path):
+                    with open(label_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if parts:
+                                try:
+                                    idx = int(parts[0])
+                                    if 0 <= idx < len(info.classes):
+                                        used.add(info.classes[idx])
+                                except ValueError:
+                                    pass
+            except Exception:
+                pass
+    return used
+
 def find_unmatched_classes(source_folder: str, target_folder: str) -> Dict:
     """Pre-check: find which source classes don't match target classes.
 
     Returns {matched: {src: tgt}, unmatched: [src_classes], target_classes: [...]}
     """
     source_info = scan_dataset(source_folder)
+    used_classes = _get_used_classes(source_info)
+    source_info.classes = [c for c in source_info.classes if c in used_classes]
+    
     target_info = scan_dataset(target_folder)
     target_classes = target_info.classes or source_info.classes
 
     matched = {}
     unmatched = []
+    target_classes_lower = {tgt_cls.lower(): tgt_cls for tgt_cls in target_classes}
     for src_cls in source_info.classes:
-        if src_cls in target_classes:
-            matched[src_cls] = src_cls
+        if src_cls.lower() in target_classes_lower:
+            matched[src_cls] = target_classes_lower[src_cls.lower()]
         else:
             unmatched.append(src_cls)
 

@@ -69,7 +69,8 @@ def execute_background_removal(
     d_path: str,
     percentage: float,
     action_type: str = "remove",  # "remove" or "move"
-    progress_callback=None
+    progress_callback=None,
+    in_memory_data: Dict[str, Any] = None
 ) -> Dict[str, Any]:
     """
     Identifies background images (no labels or empty labels) in a dataset,
@@ -81,51 +82,69 @@ def execute_background_removal(
     """
     
     if progress_callback:
-        progress_callback(0, 0, f"Scanning dataset {os.path.basename(d_path)} for background images...")
+        progress_callback(0, 0, "Scanning for background images...")
         
-    info = _lazy_get_splits(d_path)
-    
     backgrounds = []
     total_images = 0
     
-    source_classes = info.classes
-    
-    # Identify background images
-    for split in info.splits:
-        fmt_name = split.label_format or info.label_format or "yolo"
-        fmt = get_format(fmt_name)
-        if not fmt:
-            continue
-            
-        for img_path in _get_lazy_images(split.image_dir):
-            total_images += 1
-            if progress_callback and total_images % 50 == 0:
-                progress_callback(total_images, 0, f"Scanning: {total_images} images checked...")
+    if in_memory_data:
+        image_files = in_memory_data.get('image_files', [])
+        frame_annotations = in_memory_data.get('frame_annotations', {})
+        total_images = len(image_files)
+        
+        for idx, img_path in enumerate(image_files):
+            if progress_callback and idx % 50 == 0:
+                progress_callback(idx, 0, f"Scanning: {idx} images checked...")
                 
-            label_path = fmt.find_label_file(img_path, split.label_dirs)
-            is_background = False
-            
-            if not label_path or not os.path.isfile(label_path):
-                is_background = True
-            else:
-                img_size = _image_size(img_path)
-                if img_size:
-                    try:
-                        boxes = fmt.load(label_path, img_size, source_classes)
-                        if not boxes:
-                            is_background = True
-                    except Exception:
-                        pass
-                else:
-                    # If we can't read the image, we just skip it
-                    pass
-                    
-            if is_background:
+            annots = frame_annotations.get(idx, [])
+            if not annots:
                 backgrounds.append({
                     'img': img_path,
-                    'lbl': label_path if label_path and os.path.isfile(label_path) else None,
-                    'split': split
+                    'lbl': None,
+                    'idx': idx,
+                    'split': None
                 })
+                
+        if not d_path and image_files:
+            d_path = os.path.dirname(image_files[0])
+            
+    else:
+        info = _lazy_get_splits(d_path)
+        source_classes = info.classes
+        
+        # Identify background images
+        for split in info.splits:
+            fmt_name = split.label_format or info.label_format or "yolo"
+            fmt = get_format(fmt_name)
+            if not fmt:
+                continue
+                
+            for img_path in _get_lazy_images(split.image_dir):
+                total_images += 1
+                if progress_callback and total_images % 50 == 0:
+                    progress_callback(total_images, 0, f"Scanning: {total_images} images checked...")
+                    
+                label_path = fmt.find_label_file(img_path, split.label_dirs)
+                is_background = False
+                
+                if not label_path or not os.path.isfile(label_path):
+                    is_background = True
+                else:
+                    img_size = _image_size(img_path)
+                    if img_size:
+                        try:
+                            boxes = fmt.load(label_path, img_size, source_classes)
+                            if not boxes:
+                                is_background = True
+                        except Exception:
+                            pass
+                        
+                if is_background:
+                    backgrounds.append({
+                        'img': img_path,
+                        'lbl': label_path if label_path and os.path.isfile(label_path) else None,
+                        'split': split
+                    })
 
     num_backgrounds = len(backgrounds)
     num_to_process = int(num_backgrounds * (percentage / 100.0))
@@ -137,7 +156,8 @@ def execute_background_removal(
             'total_images': total_images,
             'total_backgrounds': num_backgrounds,
             'processed': 0,
-            'action': action_type
+            'action': action_type,
+            'removed_indices': []
         }
         
     # Randomly select subset
@@ -145,6 +165,7 @@ def execute_background_removal(
     selected_backgrounds = backgrounds[:num_to_process]
     
     processed_count = 0
+    removed_indices = []
     
     # Create removed_backgrounds folder if moving
     moved_folder = os.path.join(d_path, "removed_backgrounds")
@@ -154,12 +175,12 @@ def execute_background_removal(
         os.makedirs(os.path.join(moved_folder, "labels"), exist_ok=True)
     
     # Process them
-    for idx, bg in enumerate(selected_backgrounds):
+    for idx_proc, bg in enumerate(selected_backgrounds):
         img_p = bg['img']
         lbl_p = bg['lbl']
         
-        if progress_callback and idx % 10 == 0:
-            progress_callback(idx, num_to_process, f"Processing {idx}/{num_to_process} backgrounds...")
+        if progress_callback and idx_proc % 10 == 0:
+            progress_callback(idx_proc, num_to_process, f"Processing {idx_proc}/{num_to_process} backgrounds...")
             
         try:
             if action_type == "move":
@@ -173,6 +194,8 @@ def execute_background_removal(
                 if lbl_p:
                     os.remove(lbl_p)
             processed_count += 1
+            if 'idx' in bg:
+                removed_indices.append(bg['idx'])
         except Exception:
             pass
             
@@ -183,5 +206,7 @@ def execute_background_removal(
         'total_images': total_images,
         'total_backgrounds': num_backgrounds,
         'processed': processed_count,
-        'action': action_type
+        'action': action_type,
+        'removed_indices': removed_indices
     }
+

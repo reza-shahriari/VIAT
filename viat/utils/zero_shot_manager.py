@@ -32,7 +32,7 @@ class ZeroShotDetector:
     def set_classes(self, classes_list):
         raise NotImplementedError
         
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         """Returns [{'box': [x1,y1,x2,y2], 'class_name': str, 'score': float}, ...]"""
         raise NotImplementedError
 
@@ -41,6 +41,9 @@ class YoloWorldDetector(ZeroShotDetector):
     def __init__(self):
         self.model = None
         self.classes = []
+        self.is_standard_yolo = False
+        self.model_names = {}
+        self.target_indices = {}
 
     def load_model(self, model_type, checkpoints_dir):
         if not ULTRALYTICS_AVAILABLE:
@@ -61,6 +64,7 @@ class YoloWorldDetector(ZeroShotDetector):
                     from ultralytics import YOLOWorld
                     return YOLOWorld(path)
                 from ultralytics import YOLO
+                self.is_standard_yolo = True
                 return YOLO(path)
                 
             if not os.path.exists(model_path):
@@ -72,13 +76,29 @@ class YoloWorldDetector(ZeroShotDetector):
                     os.chdir(old_cwd)
             else:
                 self.model = init_model(model_path)
+            
+            if self.model and hasattr(self.model, 'names'):
+                self.model_names = self.model.names
+                
             return True, "Model loaded successfully"
         except Exception as e:
-            return False, f"Failed to load YOLO-World: {str(e)}"
+            return False, f"Failed to load YOLO model: {str(e)}"
 
     def set_classes(self, classes_list):
         if self.model:
             self.classes = classes_list
+            
+            if self.is_standard_yolo:
+                name_to_idx = {v.lower(): k for k, v in self.model_names.items()}
+                self.target_indices = {}
+                for cls in classes_list:
+                    cls_lower = cls.lower()
+                    if cls_lower in name_to_idx:
+                        self.target_indices[name_to_idx[cls_lower]] = cls
+                    # Add special case for human/person
+                    elif cls_lower == 'human' and 'person' in name_to_idx:
+                        self.target_indices[name_to_idx['person']] = cls
+                return
             
             # Fix Ultralytics bug: text embedding tensors crash if model is on GPU during set_classes
             try:
@@ -91,27 +111,44 @@ class YoloWorldDetector(ZeroShotDetector):
                 # Fallback if to() fails
                 self.model.set_classes(classes_list)
 
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         if not self.model:
             return []
             
-        results = self.model(image_array, verbose=False)
+        if visual_prompts is not None:
+            results = self.model(image_array, visual_prompts=visual_prompts, verbose=False, conf=0.05)
+        else:
+            results = self.model(image_array, verbose=False, conf=0.05)
+            
         detections = []
         
         if len(results) > 0 and results[0].boxes is not None:
             boxes = results[0].boxes
-            for box in boxes:
+            masks = results[0].masks if hasattr(results[0], 'masks') else None
+            for i, box in enumerate(boxes):
                 xyxy = box.xyxy[0].cpu().numpy()
                 cls_id = int(box.cls[0].cpu().numpy())
                 score = float(box.conf[0].cpu().numpy())
                 
-                class_name = self.classes[cls_id] if cls_id < len(self.classes) else f"class_{cls_id}"
+                if self.is_standard_yolo:
+                    if cls_id not in self.target_indices:
+                        continue
+                    class_name = self.target_indices[cls_id]
+                else:
+                    class_name = self.classes[cls_id] if self.classes and cls_id < len(self.classes) else f"class_{cls_id}"
                 
-                detections.append({
+                det = {
                     'box': [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
                     'class_name': class_name,
                     'score': score
-                })
+                }
+                
+                if masks is not None and masks.xy is not None and len(masks.xy) > i:
+                    polygon = masks.xy[i].tolist()
+                    if len(polygon) > 0:
+                        det['segmentation'] = polygon
+                        
+                detections.append(det)
         return detections
 
 class GroundingDinoDetector(ZeroShotDetector):
@@ -149,7 +186,7 @@ class GroundingDinoDetector(ZeroShotDetector):
         self.classes = classes_list
         self.text_prompt = " . ".join(classes_list) + " ."
 
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         if not self.model or not self.processor or not self.classes:
             return []
             
@@ -169,8 +206,8 @@ class GroundingDinoDetector(ZeroShotDetector):
             results = self.processor.post_process_grounded_object_detection(
                 outputs,
                 inputs.input_ids,
-                box_threshold=0.3,
-                text_threshold=0.25,
+                box_threshold=0.05,
+                text_threshold=0.05,
                 target_sizes=[pil_image.size[::-1]]
             )
             
@@ -293,7 +330,7 @@ class Florence2Detector(ZeroShotDetector):
         class_text = ", ".join(classes_list)
         self.text_prompt = f"<CAPTION_TO_PHRASE_GROUNDING> {class_text}"
 
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         if not self.model or not self.processor or not self.classes:
             return []
             
@@ -423,7 +460,7 @@ class LocateAnythingDetector(ZeroShotDetector):
         class_text = ", ".join(classes_list)
         self.text_prompt = f"<image-1>\nLocate the {class_text}."
 
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         if not self.model or not self.processor or not self.classes:
             return []
             
@@ -534,7 +571,7 @@ class Sam3TextDetector(ZeroShotDetector):
             from ultralytics.models.sam import SAM3SemanticPredictor
             model_path = os.path.join(checkpoints_dir, model_type)
             
-            overrides = dict(conf=0.25, task="segment", mode="predict", model=model_type, half=True, verbose=False)
+            overrides = dict(conf=0.05, task="segment", mode="predict", model=model_type, half=True, verbose=False)
             
             if not os.path.exists(model_path):
                 old_cwd = os.getcwd()
@@ -556,7 +593,7 @@ class Sam3TextDetector(ZeroShotDetector):
     def set_classes(self, classes_list):
         self.classes = classes_list
 
-    def predict(self, image_array):
+    def predict(self, image_array, visual_prompts=None):
         if not self.predictor or not self.classes:
             return []
             
@@ -567,18 +604,26 @@ class Sam3TextDetector(ZeroShotDetector):
             detections = []
             if len(results) > 0 and results[0].boxes is not None:
                 boxes = results[0].boxes
-                for box in boxes:
+                masks = results[0].masks if hasattr(results[0], 'masks') else None
+                for i, box in enumerate(boxes):
                     xyxy = box.xyxy[0].cpu().numpy()
                     cls_id = int(box.cls[0].cpu().numpy())
                     score = float(box.conf[0].cpu().numpy())
                     
                     class_name = self.classes[cls_id] if cls_id < len(self.classes) else f"class_{cls_id}"
                     
-                    detections.append({
+                    det = {
                         'box': [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
                         'class_name': class_name,
                         'score': score
-                    })
+                    }
+                    
+                    if masks is not None and masks.xy is not None and len(masks.xy) > i:
+                        polygon = masks.xy[i].tolist()
+                        if len(polygon) > 0:
+                            det['segmentation'] = polygon
+                            
+                    detections.append(det)
             return detections
         except Exception as e:
             print(f"SAM3 inference error: {e}")

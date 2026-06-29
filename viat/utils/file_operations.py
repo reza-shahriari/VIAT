@@ -120,6 +120,7 @@ def save_project_generator(
     interpolation_mode_active=False,
     verification_mode_enabled=False,
     annotations_imported_list=None,
+    class_thresholds=None,
 
 ):
     yield 10, "Serializing annotations..."
@@ -159,6 +160,7 @@ def save_project_generator(
         "current_style": current_style,
         "auto_show_attribute_dialog": auto_show_attribute_dialog,
         "use_previous_attributes": use_previous_attributes,
+        "class_thresholds": class_thresholds,
         "duplicate_frames_enabled": duplicate_frames_enabled,
         "timestamp": datetime.datetime.now().isoformat(),
         "tracking_mode_enabled": tracking_mode_enabled,
@@ -205,7 +207,8 @@ def load_project(filename, bbox_class):
         tuple: (annotations, class_colors, video_path, current_frame, frame_annotations,
                 class_attributes, current_style, auto_show_attribute_dialog, use_previous_attributes,
                 duplicate_frames_enabled, frame_hashes, duplicate_frames_cache, image_dataset_info,
-                tracking_mode_enabled, interpolation_mode_active, verification_mode_enabled)
+                tracking_mode_enabled, interpolation_mode_active, verification_mode_enabled,
+                annotations_imported_list, class_thresholds)
     """
     with open(filename, "r") as f:
         project_data = json.load(f)
@@ -267,6 +270,9 @@ def load_project(filename, bbox_class):
     interpolation_mode_active = project_data.get("interpolation_mode_active", False)
     verification_mode_enabled = project_data.get("verification_mode_enabled", False)
     annotations_imported_list = project_data.get("annotations_imported_list", [])
+    
+    # Load class thresholds
+    class_thresholds = project_data.get("class_thresholds") or {}
 
     # Update recent projects list
     update_recent_projects(filename)
@@ -288,7 +294,8 @@ def load_project(filename, bbox_class):
         tracking_mode_enabled,
         interpolation_mode_active,
         verification_mode_enabled,
-        annotations_imported_list
+        annotations_imported_list,
+        class_thresholds
     )
 
 def get_recent_projects():
@@ -705,6 +712,90 @@ def export_raya_annotations(filename, annotations):
     except Exception as e:
         raise Exception(f"Error exporting to Raya format: {str(e)}")
 
+def export_raya_with_classes_annotations(filename, annotations, classes):
+    """
+    Export annotations to Raya text format with a class header.
+
+    Format: 
+    ###
+    clasess:
+    names:
+    - Vehicle
+    ...
+    -nc:X
+    ###
+    [class,x,y,width,height,size,quality,Difficult(optional)];
+    """
+    try:
+        # Write header
+        with open(filename, "w") as f:
+            f.write("###\n")
+            f.write("clasess:\n")
+            f.write("names:\n")
+            for cls in classes:
+                f.write(f"- {cls}\n")
+            f.write(f"-nc:{len(classes)}\n")
+            f.write("###\n")
+
+        # Group annotations by frame
+        annotations_by_frame = {}
+        for annotation in annotations:
+            frame_num = getattr(annotation, "frame", 0)
+            if frame_num not in annotations_by_frame:
+                annotations_by_frame[frame_num] = []
+            annotations_by_frame[frame_num].append(annotation)
+
+        # Get the maximum frame number
+        max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
+
+        # Create lines for each frame
+        lines = ["[]"] * (max_frame + 1)
+
+        # Fill in annotations for frames that have them
+        for frame_num, frame_annotations in annotations_by_frame.items():
+            if not frame_annotations:
+                lines[frame_num] = "[]"
+                continue
+
+            # Format annotations for this frame
+            frame_str = ""
+            for annotation in frame_annotations:
+
+                # Get annotation properties
+                rect = annotation.rect
+                
+                # Get mapped class ID
+                class_id = 0
+                if hasattr(annotation, 'class_name') and annotation.class_name in classes:
+                    class_id = classes.index(annotation.class_name)
+                    
+                x = rect.x()
+                y = rect.y()
+                width = rect.width()
+                height = rect.height()
+                size = annotation.attributes.get("Size", -1)
+                quality = annotation.attributes.get("Quality", -1)
+                Difficult = annotation.attributes.get("Difficult", -1)
+
+                # Format the annotation with a semicolon after each one
+                if Difficult == -1:
+                    frame_str += (
+                        f"[{class_id},{x},{y},{width},{height},{size},{quality}];"
+                    )
+                else:
+                    frame_str += f"[{class_id},{x},{y},{width},{height},{size},{quality},{Difficult}];"
+
+            lines[frame_num] = frame_str
+
+        # Append to file
+        with open(filename, "a") as f:
+            for line in lines:
+                f.write(line + "\n")
+
+    except Exception as e:
+        raise Exception(f"Error exporting to Raya with classes format: {str(e)}")
+
+
 
 def export_image_dataset_pascal_voc(
     output_dir, image_files, frame_annotations, canvas_pixmap
@@ -1120,9 +1211,15 @@ def detect_annotation_format(filename):
     elif ext == ".txt":
         lines = content.strip().split("\n")
 
+        # Check for Raya with classes format
+        if len(lines) > 0 and lines[0].strip() == "###" and any("clasess:" in line or "classes:" in line for line in lines[:10]):
+            return "Raya with classes"
+
         # More flexible Raya format detection
-        if all("[]" in line or ('[' and '];' in line) for line in lines):
-            return "Raya"
+        if all("[]" in line or ('[' and '];' in line) for line in lines[1:] if "###" not in line and "names:" not in line and "-nc:" not in line) or all("[]" in line or ('[' and '];' in line) for line in lines):
+            # Check if we didn't already match Raya with classes
+            if not (len(lines) > 0 and lines[0].strip() == "###" and any("clasess:" in line or "classes:" in line for line in lines[:10])):
+                return "Raya"
 
         # Check for RayaYOLO format
         if lines and all(
@@ -1435,6 +1532,138 @@ def import_pascal_voc_annotations(
 
     return annotations
 
+
+    return annotations
+
+
+def extract_raya_classes(filename):
+    """
+    Extract classes from the header of a Raya with classes file.
+    """
+    classes = []
+    try:
+        with open(filename, "r") as f:
+            lines = f.readlines()
+        
+        in_header = False
+        in_names = False
+        for line in lines:
+            line = line.strip()
+            if line == "###":
+                if not in_header:
+                    in_header = True
+                    continue
+                else:
+                    break
+            
+            if in_header:
+                if line.startswith("names:"):
+                    in_names = True
+                    continue
+                elif line.startswith("-nc:"):
+                    in_names = False
+                    continue
+                elif line.startswith("- ") and in_names:
+                    classes.append(line[2:].strip())
+    except Exception as e:
+        print(f"Error extracting classes from Raya file: {e}")
+    return classes
+
+
+def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
+    """
+    Import annotations from Raya text format with a class header.
+
+    Args:
+        filename (str): Path to the Raya text file
+        bbox_class (class): Class to use for bounding box objects
+        class_mapping (dict): Dictionary mapping file class index or names to project class names
+        
+    Returns:
+        dict: Dictionary mapping frame numbers to lists of annotation objects
+    """
+    from PyQt5.QtCore import QRect
+    from PyQt5.QtGui import QColor
+
+    frame_annotations = {}
+
+    try:
+        with open(filename, "r") as f:
+            lines = f.readlines()
+
+        in_header = False
+        data_lines = []
+        for line in lines:
+            line = line.strip()
+            if line == "###":
+                in_header = not in_header
+                continue
+            if in_header:
+                continue
+            data_lines.append(line)
+
+        # Parse data lines
+        for frame_num, line in enumerate(data_lines):
+            # Skip empty frames or frames with no detections
+            if not line or line == "[]":
+                continue
+            if not ("[" in line and "]" in line):
+                continue
+
+            frame_num = int(frame_num)  # Just to be sure
+            if frame_num not in frame_annotations:
+                frame_annotations[frame_num] = []
+
+            # A frame can have multiple annotations separated by semicolon
+            # Format: [class,x,y,width,height,size,quality,Difficult];[class,x,y,width,height,size,quality,Difficult];...
+            annotation_strs = line.split(";")
+
+            for annotation_str in annotation_strs:
+                annotation_str = annotation_str.strip()
+                if not annotation_str or annotation_str == "[]":
+                    continue
+
+                # Remove brackets
+                annotation_str = annotation_str.replace("[", "").replace("]", "")
+                parts = annotation_str.split(",")
+
+                if len(parts) >= 5:
+                    try:
+                        # Extract basic info
+                        class_id = int(float(parts[0]))
+                        x = int(float(parts[1]))
+                        y = int(float(parts[2]))
+                        width = int(float(parts[3]))
+                        height = int(float(parts[4]))
+
+                        # Create the bounding box using the provided class
+                        bbox = bbox_class(x, y, width, height)
+                        bbox.frame = frame_num
+
+                        # Get mapped class name
+                        class_name = class_mapping.get(class_id, f"Class {class_id}")
+                        bbox.class_name = class_name
+                        
+                        # Use a default color, actual color assignment should happen in the main canvas
+                        bbox.color = QColor(255, 0, 0)
+
+                        # Extract optional attributes
+                        if len(parts) > 5:
+                            bbox.attributes["Size"] = float(parts[5])
+                        if len(parts) > 6:
+                            bbox.attributes["Quality"] = float(parts[6])
+                        if len(parts) > 7:
+                            bbox.attributes["Difficult"] = float(parts[7])
+
+                        frame_annotations[frame_num].append(bbox)
+                    except ValueError as e:
+                        print(f"Error parsing Raya annotation: {annotation_str}. Error: {e}")
+                        continue
+    except Exception as e:
+        print(f"Error parsing Raya with classes text file: {str(e)}")
+        raise Exception(f"Error parsing Raya with classes text file: {str(e)}")
+
+    return frame_annotations
 
 def import_raya_annotations(filename, bbox_class, class_colors=None):
     """
@@ -1929,7 +2158,7 @@ def export_image_dataset_yolo(output_dir, image_files, frame_annotations, class_
 
 def import_annotations(
     filename, bbox_class, image_width=640, image_height=480, class_colors=None,
-    existing_annotations=None
+    existing_annotations=None, class_mapping=None
 ):
     """
     Import annotations from various formats (YOLO, Pascal VOC, COCO, Raya, Raya YOLO).
@@ -1999,6 +2228,13 @@ def import_annotations(
     elif format_type == "Raya":
         frame_annotations = import_raya_annotations(filename, bbox_class, class_colors)
         # Raya format already uses "Quad" class by default
+        if 0 in frame_annotations:
+            annotations = frame_annotations[0]
+
+    elif format_type == "Raya with classes":
+        if class_mapping is None:
+            class_mapping = {}
+        frame_annotations = import_raya_with_classes_annotations(filename, bbox_class, class_mapping)
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
 
