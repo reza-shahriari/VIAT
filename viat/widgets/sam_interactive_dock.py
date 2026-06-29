@@ -52,13 +52,44 @@ class SAMInteractiveDock(QDockWidget):
         self.cmb_model.currentIndexChanged.connect(self.on_model_changed)
         self.layout.addWidget(self.cmb_model)
 
+        # Zero-Shot Detection Model
+        self.layout.addWidget(QLabel("Zero-Shot Detection (Optional):"))
+        self.cmb_det_model = QComboBox()
+        self.cmb_det_model.addItems([
+            "None (SAM Pure Tracking/Detection)",
+            "YOLOE 11n (yoloe-11n-seg.pt)",
+            "YOLOE 11s (yoloe-11s-seg.pt)",
+            "YOLOE 11m (yoloe-11m-seg.pt)",
+            "YOLOE 11l (yoloe-11l-seg.pt)",
+            "YOLOE 11X (yoloe-11x-seg.pt)",
+            "YOLOE 26s (yoloe-26s-seg.pt)",
+            "YOLOE 26x (yoloe-26x-seg.pt)"
+        ])
+        self.cmb_det_model.setToolTip(
+            "Use YOLOE for frame-by-frame visual prompting. "
+            "Draw a box in the first frame, and YOLOE will detect that object in all subsequent frames."
+        )
+        self.layout.addWidget(self.cmb_det_model)
+
         # Scope Selection
         self.layout.addWidget(QLabel("Tracking Scope:"))
         self.cmb_scope = QComboBox()
         self.cmb_scope.addItems(["Current Frame Only", "Whole Video", "Custom Range"])
         self.cmb_scope.currentIndexChanged.connect(self.on_scope_changed)
         self.layout.addWidget(self.cmb_scope)
-        
+
+        # Frame-by-Frame Detection checkbox (only visible for multi-frame scopes)
+        self.chk_frame_by_frame = QCheckBox("Frame-by-Frame Detection (no tracking)")
+        self.chk_frame_by_frame.setChecked(False)
+        self.chk_frame_by_frame.setToolTip(
+            "When enabled, SAM runs independently on each frame using the same prompt.\n"
+            "The object is detected fresh per frame — no temporal tracking state is used.\n"
+            "Useful when objects are unrelated across frames or appear/disappear."
+        )
+        self.chk_frame_by_frame.toggled.connect(self._update_execute_button_label)
+        self.chk_frame_by_frame.setVisible(False)  # hidden for "Current Frame Only"
+        self.layout.addWidget(self.chk_frame_by_frame)
+
         # Save Segmentations
         self.chk_save_seg = QCheckBox("Save Segmentations to JSON (Creates large files)")
         self.chk_save_seg.setChecked(False)
@@ -98,7 +129,20 @@ class SAMInteractiveDock(QDockWidget):
         self.setWidget(self.widget)
 
     def on_scope_changed(self, index):
+        is_multi_frame = index > 0  # Whole Video or Custom Range
         self.range_widget.setVisible(index == 2)
+        self.chk_frame_by_frame.setVisible(is_multi_frame)
+        self._update_execute_button_label()
+
+    def _update_execute_button_label(self):
+        """Update the execute button label based on current mode."""
+        scope = self.cmb_scope.currentIndex()
+        if scope == 0:
+            self.btn_track.setText("Execute (Current Frame)")
+        elif self.chk_frame_by_frame.isChecked():
+            self.btn_track.setText("Run Frame-by-Frame Detection")
+        else:
+            self.btn_track.setText("Execute Tracking")
 
     def on_model_changed(self, index):
         self.model_changed.emit(self.get_model_type())
@@ -121,16 +165,18 @@ class SAMInteractiveDock(QDockWidget):
 
     def on_track_clicked(self):
         scope = self.cmb_scope.currentIndex()
+        use_frame_by_frame = self.chk_frame_by_frame.isChecked() and scope > 0
+
         if scope == 0:
             strategy = "frame"
             start_f = self.current_frame
             end_f = self.current_frame
         elif scope == 1:
-            strategy = "video"
+            strategy = "detect" if use_frame_by_frame else "video"
             start_f = 0
             end_f = self.total_frames - 1
         else:
-            strategy = "range"
+            strategy = "detect" if use_frame_by_frame else "range"
             start_f = self.spin_start.value()
             end_f = self.spin_end.value()
             if start_f > end_f:
@@ -143,14 +189,23 @@ class SAMInteractiveDock(QDockWidget):
         return self.chk_save_seg.isChecked()
 
     def get_text_prompt(self):
-        t = self.txt_prompt.text().strip()
-        return t if t else None
-        
+        return self.txt_prompt.text().strip()
+
     def get_model_type(self):
         text = self.cmb_model.currentText()
-        print(f"[DEBUG LOG] sam_interactive_dock.get_model_type called. text='{text}'")
+        if "sam2.1_s.pt" in text: return "sam2.1_s.pt"
+        if "sam2.1_l.pt" in text: return "sam2.1_l.pt"
+        if "sam3.1_l.pt" in text: return "sam3.1_l.pt"
+        if "sam3.1_s.pt" in text: return "sam3.1_s.pt"
+        return "sam2.1_s.pt"
+
+    def get_det_model_type(self):
+        text = self.cmb_det_model.currentText()
+        if "None" in text:
+            return None
+        # Extract the model file name inside parentheses
         import re
         match = re.search(r'\((.*?)\)', text)
-        result = match.group(1) if match else "sam2.1_s.pt"
-        print(f"[DEBUG LOG] match={match}, result='{result}'")
-        return result
+        if match:
+            return match.group(1)
+        return text

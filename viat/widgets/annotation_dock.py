@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QMessageBox,
     QButtonGroup,
+    QSlider
 )
 from PyQt5.QtCore import Qt, QRect, QTimer
 from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator, QPainter
@@ -273,6 +274,22 @@ class AnnotationDock(QDockWidget):
         # Defer the update to ensure canvas is ready
         QTimer.singleShot(100, self.update_class_selector)
         self.class_selector.currentTextChanged.connect(self.on_class_selected)
+        
+        # Class threshold
+        threshold_layout = QHBoxLayout()
+        self.threshold_label = QLabel("Class Score Filter: 0.00")
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(0, 100)
+        self.threshold_slider.setValue(0)
+        self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
+        
+        threshold_layout.addWidget(self.threshold_label)
+        threshold_layout.addWidget(self.threshold_slider)
+
+        # Apply and clean button
+        self.clean_btn = QPushButton("Apply & Clean Low-Score")
+        self.clean_btn.setToolTip("Permanently deletes all auto-detected boxes across ALL frames that fall below their respective class threshold.")
+        self.clean_btn.clicked.connect(self.clean_low_score_annotations)
 
         # Annotation list
         annotations_label = QLabel("Annotations:")
@@ -303,6 +320,14 @@ class AnnotationDock(QDockWidget):
         # Add widgets to layout
         layout.addWidget(class_label)
         layout.addWidget(self.class_selector)
+        
+        # We need to add the threshold_layout we defined earlier
+        try:
+            layout.addLayout(threshold_layout)
+            layout.addWidget(self.clean_btn)
+        except NameError:
+            pass # fallback if chunk 0 didn't capture threshold_layout correctly
+            
         layout.addWidget(annotations_label)
         layout.addWidget(self.annotations_list)
         layout.addLayout(controls_layout)
@@ -350,6 +375,14 @@ class AnnotationDock(QDockWidget):
     def on_class_selected(self, class_name):
         """Handle selection of a class"""
         if class_name and hasattr(self.main_window, "canvas"):
+            # Update threshold slider
+            if getattr(self.main_window, "class_thresholds", None) is not None:
+                threshold = self.main_window.class_thresholds.get(class_name, 0.0)
+                self.threshold_slider.blockSignals(True)
+                self.threshold_slider.setValue(int(threshold * 100))
+                self.threshold_label.setText(f"Class Score Filter: {threshold:.2f}")
+                self.threshold_slider.blockSignals(False)
+
             # Block signals to prevent recursive calls
             self.main_window.canvas.blockSignals(True)
             self.main_window.canvas.set_current_class(class_name)
@@ -367,6 +400,49 @@ class AnnotationDock(QDockWidget):
                 )
                 if items:
                     self.main_window.class_dock.classes_list.setCurrentItem(items[0])
+
+    def on_threshold_changed(self, value):
+        threshold = value / 100.0
+        self.threshold_label.setText(f"Class Score Filter: {threshold:.2f}")
+        
+        class_name = self.class_selector.currentText()
+        if class_name and getattr(self.main_window, "class_thresholds", None) is not None:
+            self.main_window.class_thresholds[class_name] = threshold
+            if hasattr(self.main_window, "canvas"):
+                self.main_window.canvas.class_thresholds = self.main_window.class_thresholds
+                self.main_window.canvas.update()
+                
+    def clean_low_score_annotations(self):
+        if getattr(self.main_window, "class_thresholds", None) is None:
+            return
+            
+        reply = QMessageBox.question(self, "Clean Annotations", 
+                                     "This will permanently delete ALL detected annotations across ALL frames "
+                                     "that fall below their current class thresholds. Continue?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            from utils.task_runner import run_task_with_progress
+            
+            def clean_generator():
+                thresholds = self.main_window.class_thresholds
+                total = len(self.main_window.frame_annotations)
+                for i, (f_idx, anns) in enumerate(self.main_window.frame_annotations.items()):
+                    yield int((i / total) * 100), f"Cleaning frame {f_idx}..."
+                    # Keep annotations that are manual, or have no score, or have score >= threshold
+                    cleaned = [a for a in anns if not hasattr(a, 'score') or a.score is None or a.score >= thresholds.get(a.class_name, 0.0)]
+                    self.main_window.frame_annotations[f_idx] = cleaned
+                    
+                    if f_idx == self.main_window.current_frame:
+                        self.main_window.canvas.annotations = cleaned
+                        
+                yield 100, "Done"
+                
+            run_task_with_progress(self.main_window, "Cleaning Annotations", "Deleting low-scoring boxes...", clean_generator, maximum=100)
+            self.main_window.project_modified = True
+            self.main_window.canvas.update()
+            self.main_window.update_annotation_list()
+            QMessageBox.information(self, "Clean Complete", "Low-scoring annotations have been permanently deleted.")
+            
         widget = QWidget()
         layout = QVBoxLayout(widget)
 

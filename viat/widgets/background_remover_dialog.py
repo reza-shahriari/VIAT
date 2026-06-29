@@ -12,11 +12,12 @@ class BackgroundRemoverThread(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(dict)
     
-    def __init__(self, dataset_path, percentage, action_type):
+    def __init__(self, dataset_path, percentage, action_type, in_memory_data=None):
         super().__init__()
         self.dataset_path = dataset_path
         self.percentage = percentage
         self.action_type = action_type
+        self.in_memory_data = in_memory_data
         
     def run(self):
         try:
@@ -24,7 +25,8 @@ class BackgroundRemoverThread(QThread):
                 self.dataset_path, 
                 self.percentage, 
                 self.action_type, 
-                progress_callback=self._progress_cb
+                progress_callback=self._progress_cb,
+                in_memory_data=self.in_memory_data
             )
             self.finished.emit(result)
         except Exception as e:
@@ -56,6 +58,24 @@ class BackgroundRemoverDialog(QDialog):
         layout_input.addWidget(btn_browse_input)
         group_input.setLayout(layout_input)
         layout.addWidget(group_input)
+        
+        # 1.5 Annotation Source
+        group_source = QGroupBox("1.5. Annotation Source")
+        layout_source = QVBoxLayout()
+        self.radio_source_disk = QRadioButton("Search Label Files on Disk")
+        self.radio_source_memory = QRadioButton("Use Current Project Annotations (In-Memory)")
+        
+        has_project = bool(self.parent() and hasattr(self.parent(), "image_files") and self.parent().image_files)
+        
+        self.radio_source_disk.setChecked(True)
+        if not has_project:
+            self.radio_source_memory.setEnabled(False)
+            self.radio_source_memory.setToolTip("No images loaded in the current project.")
+            
+        layout_source.addWidget(self.radio_source_disk)
+        layout_source.addWidget(self.radio_source_memory)
+        group_source.setLayout(layout_source)
+        layout.addWidget(group_source)
         
         # 2. Percentage Selection
         group_percentage = QGroupBox("2. Percentage to Remove")
@@ -132,6 +152,16 @@ class BackgroundRemoverDialog(QDialog):
         percentage = self.spinbox.value()
         action_type = "move" if self.radio_move.isChecked() else "remove"
         
+        in_memory_data = None
+        if hasattr(self, 'radio_source_memory') and self.radio_source_memory.isChecked() and self.parent():
+            # Update parent's frame annotations first
+            if hasattr(self.parent(), 'update_frame_annotations'):
+                self.parent().update_frame_annotations()
+            in_memory_data = {
+                'image_files': getattr(self.parent(), 'image_files', []),
+                'frame_annotations': getattr(self.parent(), 'frame_annotations', {})
+            }
+        
         if percentage == 0:
             QMessageBox.information(self, "Finished", "0% selected, nothing to do.")
             return
@@ -146,7 +176,7 @@ class BackgroundRemoverDialog(QDialog):
         self.progress_bar.setValue(0)
         self.lbl_status.setText("Starting...")
         
-        self.thread = BackgroundRemoverThread(dataset_path, percentage, action_type)
+        self.thread = BackgroundRemoverThread(dataset_path, percentage, action_type, in_memory_data)
         self.thread.progress.connect(self.update_progress)
         self.thread.finished.connect(self.on_finished)
         self.thread.start()
@@ -172,6 +202,38 @@ class BackgroundRemoverDialog(QDialog):
             QMessageBox.critical(self, "Error", f"An error occurred: {result['error']}")
             self.lbl_status.setText("Error occurred.")
             return
+            
+        if result.get('removed_indices') and self.parent():
+            removed_indices = set(result['removed_indices'])
+            new_image_files = []
+            new_frame_annotations = {}
+            new_idx = 0
+            
+            p_image_files = getattr(self.parent(), 'image_files', [])
+            p_frame_annotations = getattr(self.parent(), 'frame_annotations', {})
+            
+            for old_idx, img in enumerate(p_image_files):
+                if old_idx not in removed_indices:
+                    new_image_files.append(img)
+                    if old_idx in p_frame_annotations:
+                        new_frame_annotations[new_idx] = p_frame_annotations[old_idx]
+                    new_idx += 1
+                    
+            self.parent().image_files = new_image_files
+            if hasattr(self.parent(), 'frame_annotations'):
+                self.parent().frame_annotations = new_frame_annotations
+            if hasattr(self.parent(), 'annotation_manager'):
+                self.parent().annotation_manager.frame_annotations = new_frame_annotations
+                
+            if hasattr(self.parent(), 'update_slider_range'):
+                self.parent().update_slider_range()
+            if hasattr(self.parent(), 'load_frame'):
+                if self.parent().current_frame >= len(new_image_files):
+                    self.parent().current_frame = max(0, len(new_image_files) - 1)
+                if new_image_files:
+                    self.parent().load_frame(self.parent().current_frame)
+                else:
+                    self.parent().canvas.clear_image()
             
         action_str = "Moved" if result['action'] == "move" else "Deleted"
         msg = (
