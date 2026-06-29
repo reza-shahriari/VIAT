@@ -115,3 +115,15 @@ checkpoints*
 viat/mobileclip2_b.ts
 viat/weights/clip/ViT-B-32.pt
 sam3_src*
+
+# Models and Weights
+weights/
+*.pt
+
+# Datasets and Temporary Files
+test_dataset/
+temp.jpg
+temp_main.py
+temp_canvas.py
+old_dialog.py
+code_blocks.txt
