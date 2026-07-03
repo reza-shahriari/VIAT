@@ -1,4 +1,4 @@
-"""
+﻿"""
 Logging utilities for the Video Annotation Tool.
 """
 

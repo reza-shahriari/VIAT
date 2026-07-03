@@ -1,4 +1,4 @@
-import os
+﻿import os
 import cv2
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
-from utils.single_class_extractor import scan_main_folder, extract_class_samples, execute_extraction
+from viat.utils.single_class_extractor import scan_main_folder, extract_class_samples, execute_extraction
 
 class ScannerThread(QThread):
     progress = pyqtSignal(int, int, str)

@@ -1,4 +1,4 @@
-"""Pascal VOC XML label-format plugin.
+﻿"""Pascal VOC XML label-format plugin.
 
 One ``.xml`` file per image, with ``<object><name>`` and ``<bndbox>``.
 """

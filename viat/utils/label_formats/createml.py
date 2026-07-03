@@ -1,4 +1,4 @@
-"""CreateML JSON label-format plugin.
+﻿"""CreateML JSON label-format plugin.
 
 One ``.json`` file per image (or one shared file), each entry:
     [{"image": "x.jpg", "annotations": [

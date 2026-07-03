@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex
+﻿from PyQt5.QtCore import Qt, QAbstractListModel, QModelIndex
 from PyQt5.QtGui import QColor, QFont
 
 class AnnotationListModel(QAbstractListModel):

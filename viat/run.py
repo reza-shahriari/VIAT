@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
 try:
     import torch

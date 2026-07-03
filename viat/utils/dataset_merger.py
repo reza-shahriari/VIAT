@@ -1,4 +1,4 @@
-"""
+﻿"""
 Dataset merger for VIAT.
 
 Merges multiple image datasets into a single target dataset:
@@ -16,7 +16,7 @@ Merges multiple image datasets into a single target dataset:
     the new class indices (from the target data.yaml).
 
 Usage from main.py:
-    from utils.dataset_merger import merge_dataset_into_target
+    from viat.utils.dataset_merger import merge_dataset_into_target
     result = merge_dataset_into_target(
         app, source_folder, target_folder,
         dataset_name="my_dataset",

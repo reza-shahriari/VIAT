@@ -540,7 +540,7 @@ def remove_class_and_images(
         fmt = None
         if info:
             try:
-                from utils.dataset_manager import get_dataset_format
+                from viat.utils.dataset_manager import get_dataset_format
                 fmt = get_dataset_format(app, info)
             except Exception:
                 pass
@@ -560,7 +560,7 @@ def remove_class_and_images(
                     img_h, img_w = 1080, 1920
                     # Quick size read
                     try:
-                        from utils.dataset_ops import _img_size
+                        from viat.utils.dataset_ops import _img_size
                         size = _img_size(img_path)
                         if size:
                             img_w, img_h = size
@@ -724,7 +724,7 @@ def auto_import_detections(
     if not hasattr(app.canvas, "class_attributes") or app.canvas.class_attributes is None:
         app.canvas.class_attributes = {}
 
-    from utils.dataset_manager import get_dataset_format, scan_dataset
+    from viat.utils.dataset_manager import get_dataset_format, scan_dataset
     if hasattr(app, "_viat_dataset_info") and app._viat_dataset_info:
         info = app._viat_dataset_info
     else:
@@ -940,7 +940,14 @@ def _rewrite_class_files(info, mapping: Dict[str, str]) -> None:
                 pass
 
     # data.yaml (best-effort: rewrite the names: block)
-    for name in ("data.yaml", "data.yml"):
+    candidates = ["data.yaml", "data.yml"]
+    try:
+        for f in os.listdir(info.root):
+            if f.endswith((".yaml", ".yml")) and f not in candidates:
+                candidates.append(f)
+    except OSError:
+        pass
+    for name in candidates:
         p = os.path.join(info.root, name)
         if not os.path.isfile(p):
             continue

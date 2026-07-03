@@ -1,4 +1,4 @@
-"""Logging utilities for the Video Annotation Tool."""
+﻿"""Logging utilities for the Video Annotation Tool."""
 
 import os
 import logging

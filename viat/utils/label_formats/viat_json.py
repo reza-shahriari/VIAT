@@ -1,4 +1,4 @@
-"""
+﻿"""
 VIAT custom JSON label-format plugin.
 
 A single JSON file per video, keyed by zero-padded frame number string:

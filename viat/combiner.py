@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 # Configuration: The name of the file to generate
 OUTPUT_FILENAME = "full_project_source.txt"

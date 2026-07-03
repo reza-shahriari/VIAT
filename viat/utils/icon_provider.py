@@ -1,4 +1,4 @@
-from PyQt5.QtGui import QIcon
+﻿from PyQt5.QtGui import QIcon
 import os
 import sys
 import qtawesome as qta

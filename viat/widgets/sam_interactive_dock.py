@@ -83,7 +83,7 @@ class SAMInteractiveDock(QDockWidget):
         self.chk_frame_by_frame.setChecked(False)
         self.chk_frame_by_frame.setToolTip(
             "When enabled, SAM runs independently on each frame using the same prompt.\n"
-            "The object is detected fresh per frame — no temporal tracking state is used.\n"
+            "The object is detected fresh per frame â€” no temporal tracking state is used.\n"
             "Useful when objects are unrelated across frames or appear/disappear."
         )
         self.chk_frame_by_frame.toggled.connect(self._update_execute_button_label)
@@ -100,9 +100,9 @@ class SAMInteractiveDock(QDockWidget):
         range_layout = QHBoxLayout(self.range_widget)
         range_layout.setContentsMargins(0, 0, 0, 0)
         self.spin_start = QSpinBox()
-        self.spin_start.setMinimum(0)
+        self.spin_start.setMinimum(1)
         self.spin_end = QSpinBox()
-        self.spin_end.setMinimum(0)
+        self.spin_end.setMinimum(1)
         range_layout.addWidget(QLabel("Start:"))
         range_layout.addWidget(self.spin_start)
         range_layout.addWidget(QLabel("End:"))
@@ -131,6 +131,9 @@ class SAMInteractiveDock(QDockWidget):
     def on_scope_changed(self, index):
         is_multi_frame = index > 0  # Whole Video or Custom Range
         self.range_widget.setVisible(index == 2)
+        if index == 2:
+            self.spin_start.setValue(self.current_frame + 1)
+            self.spin_end.setValue(self.total_frames)
         self.chk_frame_by_frame.setVisible(is_multi_frame)
         self._update_execute_button_label()
 
@@ -154,14 +157,14 @@ class SAMInteractiveDock(QDockWidget):
     def update_frame_info(self, current_frame, total_frames):
         self.current_frame = current_frame
         self.total_frames = total_frames
-        self.spin_start.setMaximum(max(0, total_frames - 1))
-        self.spin_end.setMaximum(max(0, total_frames - 1))
+        self.spin_start.setMaximum(max(1, total_frames))
+        self.spin_end.setMaximum(max(1, total_frames))
         
         if self.cmb_scope.currentIndex() == 2: # If Custom range is active, don't override unless necessary
             pass
         else:
-            self.spin_start.setValue(current_frame)
-            self.spin_end.setValue(total_frames - 1)
+            self.spin_start.setValue(current_frame + 1)
+            self.spin_end.setValue(total_frames)
 
     def on_track_clicked(self):
         scope = self.cmb_scope.currentIndex()
@@ -177,8 +180,8 @@ class SAMInteractiveDock(QDockWidget):
             end_f = self.total_frames - 1
         else:
             strategy = "detect" if use_frame_by_frame else "range"
-            start_f = self.spin_start.value()
-            end_f = self.spin_end.value()
+            start_f = self.spin_start.value() - 1
+            end_f = self.spin_end.value() - 1
             if start_f > end_f:
                 QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
                 return

@@ -1,4 +1,4 @@
-import os
+﻿import os
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QColor, QBrush
 from PyQt5.QtCore import Qt
 
-from utils.import_masks import scan_mask_colors, bgr_to_hex
+from viat.utils.import_masks import scan_mask_colors, bgr_to_hex
 
 
 class ImportMasksDialog(QDialog):

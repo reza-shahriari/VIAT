@@ -1,4 +1,4 @@
-import os
+﻿import os
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QGroupBox, QLineEdit, QProgressBar,
@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
-from utils.background_remover import execute_background_removal
+from viat.utils.background_remover import execute_background_removal
 
 class BackgroundRemoverThread(QThread):
     progress = pyqtSignal(int, int, str)

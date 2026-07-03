@@ -108,11 +108,16 @@ class EmptyFramesManagerDock(QDockWidget):
         
         self.list_widget.clear()
         for item_data in empty_frames:
-            if isinstance(item_data, str):
+            if isinstance(item_data, tuple):
+                display_text, actual_data = item_data
+                item = QListWidgetItem(display_text)
+                item.setData(Qt.UserRole, actual_data)
+            elif isinstance(item_data, str):
                 item = QListWidgetItem(f"Video {item_data}")
+                item.setData(Qt.UserRole, item_data)
             else:
                 item = QListWidgetItem(f"Frame {item_data}")
-            item.setData(Qt.UserRole, item_data)
+                item.setData(Qt.UserRole, item_data)
             self.list_widget.addItem(item)
             
         label_text = "Empty videos:" if (empty_frames and isinstance(empty_frames[0], str)) else "Empty frames:"

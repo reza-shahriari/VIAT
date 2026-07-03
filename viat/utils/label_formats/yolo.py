@@ -1,4 +1,4 @@
-"""
+﻿"""
 YOLO label-format plugin.
 
 Supports two line formats:

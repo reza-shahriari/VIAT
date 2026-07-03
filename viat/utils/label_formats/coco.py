@@ -1,4 +1,4 @@
-"""COCO label-format plugin.
+﻿"""COCO label-format plugin.
 
 A single JSON file per split (often named ``_annotations.coco.json`` or
 ``annotations.json``). Boxes are ``[x, y, w, h]`` in absolute pixels, with a

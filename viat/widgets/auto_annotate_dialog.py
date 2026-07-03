@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget, QListWidget, QListWidgetItem, QCheckBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+﻿from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget, QListWidget, QListWidgetItem, QCheckBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 from PyQt5.QtCore import Qt
 import re
 

@@ -1,4 +1,4 @@
-import os
+﻿import os
 import cv2
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 
 # Reuse the ScannerThread and utility functions from the single class extractor
 from .single_class_extractor_dialog import ScannerThread
-from utils.single_class_extractor import scan_main_folder
+from viat.utils.single_class_extractor import scan_main_folder
 
 
 class BatchPredictionDialog(QDialog):

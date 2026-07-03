@@ -1,4 +1,4 @@
-"""
+﻿"""
 Video Manager for VIAT
 
 This module contains the VideoManager class which handles all video-related
@@ -264,9 +264,9 @@ class VideoManager(QObject):
         
         # Import the hash function outside the loop
         try:
-            from utils import calculate_frame_hash
+            from viat.utils import calculate_frame_hash
         except ImportError:
-            print("Warning: Could not import calculate_frame_hash from utils. Using a simple hash function instead.")
+            print("Warning: Could not import calculate_frame_hash from viat.utils. Using a simple hash function instead.")
             # Define a simple hash function if import fails
             def calculate_frame_hash(img):
                 # Simple hash: resize to small image and calculate average of pixels

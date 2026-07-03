@@ -1,10 +1,10 @@
-import os
+﻿import os
 import hashlib
 import cv2
 import json
 import shutil
-from utils.dataset_manager import scan_dataset
-from utils.dataset_merger import merge_dataset_into_target
+from viat.utils.dataset_manager import scan_dataset
+from viat.utils.dataset_merger import merge_dataset_into_target
 
 class DatasetIntegrationManager:
     """Handles the business logic for the Dataset Integration Roadmap steps."""

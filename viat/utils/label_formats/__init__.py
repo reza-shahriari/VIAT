@@ -1,4 +1,4 @@
-"""Label-format plugin registry for VIAT.
+﻿"""Label-format plugin registry for VIAT.
 
 To add a new format:
   1. Create ``your_format.py`` with a subclass of :class:`LabelFormat`.

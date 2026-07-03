@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (
+﻿from PyQt5.QtWidgets import (
     QDockWidget,
     QWidget,
     QVBoxLayout,
@@ -421,7 +421,7 @@ class AnnotationDock(QDockWidget):
                                      "that fall below their current class thresholds. Continue?",
                                      QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            from utils.task_runner import run_task_with_progress
+            from viat.utils.task_runner import run_task_with_progress
             
             def clean_generator():
                 thresholds = self.main_window.class_thresholds

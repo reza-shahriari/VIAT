@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox,

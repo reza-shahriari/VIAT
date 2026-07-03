@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt, QRect
+﻿from PyQt5.QtCore import Qt, QRect
 
 # Edge detection constants
 EDGE_NONE = 0

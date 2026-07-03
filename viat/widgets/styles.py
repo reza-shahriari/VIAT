@@ -1,4 +1,4 @@
-"""Style management for the Video Annotation Tool."""
+﻿"""Style management for the Video Annotation Tool."""
 
 from PyQt5.QtWidgets import QApplication, QStyleFactory
 from PyQt5.QtGui import QPalette, QColor

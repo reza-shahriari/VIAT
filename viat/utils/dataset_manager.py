@@ -127,6 +127,16 @@ def detect_folder_type(folder_path: str) -> str:
     # Roboflow / Ultralytics markers
     if "data.yaml" in entries or "data.yml" in entries or "dataset.yaml" in entries or "dataset.yml" in entries:
         return "dataset"
+    for e in entries:
+        if e.endswith((".yaml", ".yml")):
+            p = os.path.join(folder_path, e)
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        if "names:" in f.read(1024):
+                            return "dataset"
+                except Exception:
+                    pass
     # images/labels split
     if "images" in entries and "labels" in entries:
         return "dataset"
@@ -329,6 +339,8 @@ def load_dataset_into_app(
     loader = DatasetLoaderThread(info, target_splits)
 
     def on_batch_loaded(imgs, splits, boxes_batch):
+        if getattr(app, "_dataset_loader", None) is not loader:
+            return
         start_idx = len(app.image_files)
         app.image_files.extend(imgs)
         app._viat_frame_to_split.extend(splits)
@@ -370,8 +382,10 @@ def load_dataset_into_app(
             app.load_current_image()
 
     def on_finished(stats):
-        if hasattr(app, "_dataset_loader"):
+        if getattr(app, "_dataset_loader", None) is loader:
             app._dataset_loader = None
+        if hasattr(app, "cancel_loading_action"):
+            app.cancel_loading_action.setVisible(False)
         
         msg = f"Loaded {app.total_frames} images; {len(stats['classes'])} classes."
         if stats['warnings']:
@@ -382,6 +396,8 @@ def load_dataset_into_app(
     loader.finishedLoading.connect(on_finished)
     
     app._dataset_loader = loader
+    if hasattr(app, "cancel_loading_action"):
+        app.cancel_loading_action.setVisible(True)
     loader.start()
 
     return {
@@ -533,7 +549,14 @@ def _parse_data_yaml_classes(root: str) -> Optional[List[str]]:
         # Minimal fallback parser (handles the common ``names: [a, b, c]``
         # and ``names:\n  0: a`` forms) so VIAT works without PyYAML.
         return _parse_data_yaml_fallback(root)
-    for name in ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml"):
+    candidates = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"]
+    try:
+        for f in os.listdir(root):
+            if f.endswith((".yaml", ".yml")) and f not in candidates:
+                candidates.append(f)
+    except OSError:
+        pass
+    for name in candidates:
         p = os.path.join(root, name)
         if os.path.isfile(p):
             try:
@@ -555,7 +578,14 @@ def _sort_key(x):
 
 
 def _parse_data_yaml_fallback(root: str) -> Optional[List[str]]:
-    for name in ("data.yaml", "data.yml", "dataset.yaml", "dataset.yml"):
+    candidates = ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"]
+    try:
+        for f in os.listdir(root):
+            if f.endswith((".yaml", ".yml")) and f not in candidates:
+                candidates.append(f)
+    except OSError:
+        pass
+    for name in candidates:
         p = os.path.join(root, name)
         if not os.path.isfile(p):
             continue
@@ -1145,7 +1175,7 @@ def export_raya_video_dataset(config, image_files, frame_annotations, class_colo
     import json
     import os
     import numpy as np
-    from utils.file_operations import export_raya_annotations, export_raya_with_classes_annotations
+    from viat.utils.file_operations import export_raya_annotations, export_raya_with_classes_annotations
     from annotation import BoundingBox
     from PyQt5.QtCore import QRectF
 

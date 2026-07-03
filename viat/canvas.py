@@ -17,7 +17,7 @@ Key features:
 """
 
 import cv2
-from PyQt5.QtWidgets import QWidget, QMenu
+from PyQt5.QtWidgets import QWidget, QMenu, QApplication
 from PyQt5.QtCore import Qt, QRect, QPoint,QTimer
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
 import sys
@@ -86,6 +86,7 @@ class VideoCanvas(QWidget):
         self.edge_start_pos = None
         # Smart edge movement
         self.smart_edge_enabled = False
+        self.show_attributes = False
 
         # Add zoom properties
         self.zoom_level = 1.0
@@ -420,7 +421,7 @@ class VideoCanvas(QWidget):
                 painter.drawText(score_rect, Qt.AlignCenter, score_text)
 
             # Draw attributes to the right of the box if there's space, otherwise to the left
-            if getattr(self, 'show_attributes', True) and annotation.attributes:
+            if getattr(self, 'show_attributes', False) and annotation.attributes:
                 # Calculate the total height needed for all attributes
                 attr_count = len(annotation.attributes)
                 attr_total_height = text_height * attr_count
@@ -843,6 +844,15 @@ class VideoCanvas(QWidget):
         # Otherwise, always return the smallest bounding box under the cursor
         return matching_annotations[0]
 
+    def is_auto_bbox_active(self):
+        """Return True if auto bbox mode is enabled and Shift key is not pressed."""
+        if not getattr(self.main_window, "auto_bbox_mode", False):
+            return False
+        # If Shift is pressed, temporarily disable auto bbox mode
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            return False
+        return True
+
     def mousePressEvent(self, event):
         # Prevent interaction if AI is currently processing this frame
         if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
@@ -882,9 +892,11 @@ class VideoCanvas(QWidget):
             # First, check if we're clicking on an existing annotation
             # Skip selection if Shift is pressed or if Auto BBox / SAM mode is active
             skip_selection = False
+            is_auto_bbox = getattr(self.main_window, "auto_bbox_mode", False)
             if event.modifiers() & Qt.ShiftModifier:
-                skip_selection = True
-            elif getattr(self.main_window, "auto_bbox_mode", False):
+                if not is_auto_bbox:
+                    skip_selection = True
+            elif self.is_auto_bbox_active():
                 skip_selection = True
             elif getattr(self, "sam_interactive_mode", False):
                 skip_selection = True
@@ -949,7 +961,7 @@ class VideoCanvas(QWidget):
                 self.update()
                 return
 
-            if getattr(self.main_window, "auto_bbox_mode", False):
+            if self.is_auto_bbox_active():
                 self.is_drawing = True
                 self.start_point = img_pos
                 self.current_point = img_pos
@@ -1140,8 +1152,12 @@ class VideoCanvas(QWidget):
                         attributes=default_attributes,
                         color=self.class_colors.get(self.current_class, QColor(255, 0, 0)),
                         score=1.0,
-                        segmentation=polygon if save_seg else None
+                        segmentation=polygon if save_seg else None,
+                        source="magic_wand"
                     )
+                    
+                    if hasattr(self.main_window, 'labeler_analytics'):
+                        self.main_window.labeler_analytics['tool_usage']['magic_wand'] += 1
                     if self.main_window:
                         self.main_window.save_undo_state()
                     self.annotations.append(annotation)
@@ -1355,7 +1371,7 @@ class VideoCanvas(QWidget):
             annotation = self.find_annotation_at_pos(event.pos())
             if annotation:
                 self.setCursor(Qt.PointingHandCursor)
-            elif getattr(self.main_window, "auto_bbox_mode", False):
+            elif self.is_auto_bbox_active():
                 self.setCursor(self.get_wand_cursor())
             else:
                 # Show crosshair cursor when in two-click mode and first point is set
@@ -1399,7 +1415,7 @@ class VideoCanvas(QWidget):
                 self.current_point = None
                 return
 
-            if getattr(self.main_window, "auto_bbox_mode", False) and self.is_drawing:
+            if self.is_auto_bbox_active() and self.is_drawing:
                 self.is_drawing = False
                 if self.start_point and self.current_point:
                     rect = QRect(self.start_point, self.current_point).normalized()

@@ -19,7 +19,7 @@ hand later.
 
 Usage from main.py / dataset_ops::
 
-    from utils.dataset_log import init_dataset_log, append_dataset_log
+    from viat.utils.dataset_log import init_dataset_log, append_dataset_log
 
     init_dataset_log(app, info)                    # call once on dataset open
     append_dataset_log(app, "Removed grayscale",   # call after each op
@@ -69,7 +69,14 @@ def extract_roboflow_info(root: str) -> dict:
 
 
 def _has_roboflow_block(root: str) -> bool:
-    for name in ("data.yaml", "data.yml"):
+    candidates = ["data.yaml", "data.yml"]
+    try:
+        for f in os.listdir(root):
+            if f.endswith((".yaml", ".yml")) and f not in candidates:
+                candidates.append(f)
+    except OSError:
+        pass
+    for name in candidates:
         p = os.path.join(root, name)
         if os.path.isfile(p):
             try:
@@ -86,7 +93,14 @@ def _load_yaml(root: str) -> Optional[dict]:
         import yaml
     except ImportError:
         return None
-    for name in ("data.yaml", "data.yml"):
+    candidates = ["data.yaml", "data.yml"]
+    try:
+        for f in os.listdir(root):
+            if f.endswith((".yaml", ".yml")) and f not in candidates:
+                candidates.append(f)
+    except OSError:
+        pass
+    for name in candidates:
         p = os.path.join(root, name)
         if os.path.isfile(p):
             try:
@@ -152,7 +166,7 @@ def init_dataset_log(app, info) -> str:
 
     # --- New log ---
     lines = []
-    lines.append(f"# Dataset Log — {os.path.basename(info.root)}")
+    lines.append(f"# Dataset Log â€” {os.path.basename(info.root)}")
     lines.append("")
     lines.append(f"_Created: {_now()}_")
     lines.append("")
@@ -179,13 +193,13 @@ def init_dataset_log(app, info) -> str:
     lines.append("")
     lines.append(f"- **Dataset root**: `{info.root}`")
     lines.append(f"- **Layout**: {info.layout}")
-    lines.append(f"- **Label format**: {info.label_format or 'none detected — TODO: fill in'}")
+    lines.append(f"- **Label format**: {info.label_format or 'none detected â€” TODO: fill in'}")
     lines.append(f"- **Total images**: {info.image_count}")
     lines.append(f"- **Splits**: {', '.join(f'{k}={v}' for k, v in per_split.items())}")
     lines.append(f"- **Classes** ({len(info.classes)}): {classes_str}")
     lines.append(f"- **Classes source**: {info.classes_source or 'inferred / TODO: verify'}")
     if info.classes_conflict:
-        lines.append(f"- ⚠ **Class conflict**: {info.classes_conflict}")
+        lines.append(f"- âš  **Class conflict**: {info.classes_conflict}")
     lines.append("")
 
     # Operations log (empty)

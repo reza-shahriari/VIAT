@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 YOLO inference script for VIAT dataset auto-labeling.
 

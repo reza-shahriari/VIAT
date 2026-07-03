@@ -1,4 +1,4 @@
-"""
+﻿"""
 Per-object visibility management for VIAT video annotations.
 
 Redesigned (patch10):

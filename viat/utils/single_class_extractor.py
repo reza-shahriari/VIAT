@@ -1,9 +1,9 @@
-import os
+﻿import os
 import shutil
 from typing import Dict, List, Tuple, Any
 
-from utils.dataset_manager import DatasetInfo, _resolve_classes, _detect_layout_and_splits, IMAGE_EXTENSIONS
-from utils.label_formats import get_format, all_formats
+from viat.utils.dataset_manager import DatasetInfo, _resolve_classes, _detect_layout_and_splits, IMAGE_EXTENSIONS
+from viat.utils.label_formats import get_format, all_formats
 
 def _image_size(path):
     try:

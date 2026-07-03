@@ -1,4 +1,4 @@
-import os
+﻿import os
 from PyQt5.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
     QListWidget, QPushButton, QLabel, QCheckBox

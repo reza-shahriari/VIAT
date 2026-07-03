@@ -33,20 +33,20 @@ from .utils.sam_manager import SamManager
 from .utils.sam3_native_manager import Sam3NativeManager
 import numpy as np
 import json
-from utils import save_project, load_project, export_annotations, get_config_directory, get_recent_projects, get_last_project, save_last_state, load_last_state, export_image_dataset_pascal_voc, export_image_dataset_yolo, export_image_dataset_coco, export_standard_annotations, mse_similarity, calculate_frame_hash, create_thumbnail, import_annotations, UICreator, export_dataset_dialog, export_dataset, import_dataset_dialog, load_dataset, PerfomanceManger, load_project_with_backup, backup_before_save
-from utils.dataset_manager import detect_folder_type as _viat_detect_folder_type, scan_dataset, load_dataset_into_app, DatasetInfo, SplitInfo
-from utils.dataset_ops import remove_bad_frames as _viat_remove_bad_frames, remap_class as _viat_remap_class, merge_classes as _viat_merge_classes
-from utils.dataset_ops import move_frames_to as _viat_move_frames_to, remove_bad_frames as _viat_remove_bad_frames_v2, move_to_removed as _viat_move_to_removed, move_to_review_label as _viat_move_to_review_label, remove_grayscale_images as _viat_remove_grayscale, remove_duplicate_groups as _viat_remove_dup_groups, remove_class_and_images as _viat_remove_class_and_images, remap_class as _viat_remap_class_v2, merge_classes as _viat_merge_classes_v2, auto_import_detections as _viat_auto_import_detections
-from utils.dataset_log import init_dataset_log as _viat_init_dataset_log, append_dataset_log as _viat_append_dataset_log
-from utils.dataset_manager import load_viat_json_for_video as _viat_load_json_video
-from utils.video_border import detect_and_adjust_borders as _viat_detect_adjust_borders
-from utils.video_border import detect_video_borders as _viat_detect_borders
-from utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibilityManager
-from utils.performance import PerformanceManager as _ViatPerformanceManager
-from utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
-from utils.dataset_merger import merge_dataset_into_target as _viat_merge_dataset, find_unmatched_classes as _viat_find_unmatched_classes
-from utils.icon_provider import IconProvider
-from utils.sam_manager import SamManager
+from viat.utils import save_project, load_project, export_annotations, get_config_directory, get_recent_projects, get_last_project, save_last_state, load_last_state, export_image_dataset_pascal_voc, export_image_dataset_yolo, export_image_dataset_coco, export_standard_annotations, mse_similarity, calculate_frame_hash, create_thumbnail, import_annotations, UICreator, export_dataset_dialog, export_dataset, import_dataset_dialog, load_dataset, PerfomanceManger, load_project_with_backup, backup_before_save
+from viat.utils.dataset_manager import detect_folder_type as _viat_detect_folder_type, scan_dataset, load_dataset_into_app, DatasetInfo, SplitInfo
+from viat.utils.dataset_ops import remove_bad_frames as _viat_remove_bad_frames, remap_class as _viat_remap_class, merge_classes as _viat_merge_classes
+from viat.utils.dataset_ops import move_frames_to as _viat_move_frames_to, remove_bad_frames as _viat_remove_bad_frames_v2, move_to_removed as _viat_move_to_removed, move_to_review_label as _viat_move_to_review_label, remove_grayscale_images as _viat_remove_grayscale, remove_duplicate_groups as _viat_remove_dup_groups, remove_class_and_images as _viat_remove_class_and_images, remap_class as _viat_remap_class_v2, merge_classes as _viat_merge_classes_v2, auto_import_detections as _viat_auto_import_detections
+from viat.utils.dataset_log import init_dataset_log as _viat_init_dataset_log, append_dataset_log as _viat_append_dataset_log
+from viat.utils.dataset_manager import load_viat_json_for_video as _viat_load_json_video
+from viat.utils.video_border import detect_and_adjust_borders as _viat_detect_adjust_borders
+from viat.utils.video_border import detect_video_borders as _viat_detect_borders
+from viat.utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibilityManager
+from viat.utils.performance import PerformanceManager as _ViatPerformanceManager
+from viat.utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
+from viat.utils.dataset_merger import merge_dataset_into_target as _viat_merge_dataset, find_unmatched_classes as _viat_find_unmatched_classes
+from viat.utils.icon_provider import IconProvider
+from viat.utils.sam_manager import SamManager
 from natsort import natsorted
 from copy import deepcopy
 from pathlib import Path
@@ -291,23 +291,11 @@ class AutoLabelWorker(QThread):
                                         sam3_native_manager.
                                         predict_mask_from_prompt(frame_rgb,
                                         box=box, text_prompt=combined_text))
-                                    if polygon_mask is not None and isinstance(
-                                        polygon_mask, np.ndarray):
-                                        if len(polygon_mask.shape) > 2:
-                                            polygon_mask = polygon_mask[0]
-                                        contours, _ = cv2.findContours(polygon_mask
-                                            .astype(np.uint8), cv2.
-                                            RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                                        if contours:
-                                            largest_contour = max(contours, key=cv2
-                                                .contourArea)
-                                            poly_pts = [(float(pt[0][0]), float(pt[
-                                                0][1])) for pt in largest_contour]
-                                            if poly_pts and len(poly_pts) > 0:
-                                                success_polygon = poly_pts
-                                                if rename_to:
-                                                    c_name = rename_to
-                                                break
+                                    if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
+                                        success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
+                                        if rename_to:
+                                            c_name = rename_to
+                                        break
                             if (not success_polygon and seg_model and 
                                 'sam3' not in seg_model.lower()):
                                 success_polygon = (self.sam_manager.
@@ -321,18 +309,8 @@ class AutoLabelWorker(QThread):
                             polygon_mask = (self.sam3_native_manager.
                                 predict_mask_from_prompt(frame_rgb, box=box,
                                 text_prompt=det.get('prompt', c_name)))
-                            if polygon_mask is not None and isinstance(
-                                polygon_mask, np.ndarray):
-                                if len(polygon_mask.shape) > 2:
-                                    polygon_mask = polygon_mask[0]
-                                contours, _ = cv2.findContours(polygon_mask
-                                    .astype(np.uint8), cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)
-                                if contours:
-                                    largest_contour = max(contours, key=cv2
-                                        .contourArea)
-                                    polygon = [(float(pt[0][0]), float(pt[0
-                                        ][1])) for pt in largest_contour]
+                            if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
+                                polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
                         else:
                             polygon = self.sam_manager.predict_mask_from_box(
                                 frame, box)
@@ -481,6 +459,16 @@ class VideoAnnotationTool(QMainWindow):
         self.seg_labeler = None
         self.is_image_dataset = False
         self.image_files = []
+        self.deleted_frames = set()
+        self.labeler_analytics = {
+            "prompts": [],
+            "tool_usage": {
+                "zero_shot": 0,
+                "tracking": 0,
+                "interpolation": 0,
+                "magic_wand": 0,
+            }
+        }
 
     @log_exceptions
     def setup_ui(self):
@@ -541,6 +529,20 @@ class VideoAnnotationTool(QMainWindow):
         the 'Edit' and 'View' menus without touching UICreator.
         """
         menubar = self.menuBar()
+        file_menu = None
+        for action in menubar.actions():
+            if action.text().replace('&', '') == 'File':
+                file_menu = action.menu()
+                break
+                
+        if file_menu:
+            file_menu.addSeparator()
+            act = file_menu.addAction('Compare Raya Annotations...')
+            act.triggered.connect(lambda: self.compare_raya_annotations())
+            
+            act = file_menu.addAction('View Labeler Analytics from JSON...')
+            act.triggered.connect(lambda: self.view_labeler_analytics())
+            
         dataset_menu = menubar.addMenu('&Dataset')
         img_menu = dataset_menu.addMenu('Image Dataset Operations')
         act = img_menu.addAction('Export Image Dataset...')
@@ -550,12 +552,9 @@ class VideoAnnotationTool(QMainWindow):
         act = img_menu.addAction('Convert Segmentation to BBox Project')
         act.triggered.connect(lambda : self.viat_convert_segmentation_to_bbox_project())
         img_menu.addSeparator()
-        act = img_menu.addAction('Auto-group by Scene Cuts (Visual)...')
-        act.triggered.connect(lambda : self.viat_auto_group_scene_cuts())
-        img_menu.addSeparator()
-        act = img_menu.addAction('Rotate Clockwise 90°')
+        act = img_menu.addAction('Rotate Clockwise 90Â°')
         act.triggered.connect(lambda : self.rotate_image_dataset('cw'))
-        act = img_menu.addAction('Rotate Counter-Clockwise 90°')
+        act = img_menu.addAction('Rotate Counter-Clockwise 90Â°')
         act.triggered.connect(lambda : self.rotate_image_dataset('ccw'))
         img_menu.addSeparator()
         act = img_menu.addAction('Remove Current Image')
@@ -673,7 +672,7 @@ class VideoAnnotationTool(QMainWindow):
             if reply == QMessageBox.Cancel:
                 return
             if reply == QMessageBox.Yes:
-                from utils.dataset_manager import update_dataset_labels
+                from viat.utils.dataset_manager import update_dataset_labels
                 self.statusBar.showMessage('Updating dataset labels...')
                 from PyQt5.QtWidgets import QApplication
                 QApplication.processEvents()
@@ -715,7 +714,7 @@ class VideoAnnotationTool(QMainWindow):
                 self.viat_remove_duplicates()
             if settings['auto_import'] and settings.get('json_paths'):
                 try:
-                    from utils.dataset_ops import auto_import_detections
+                    from viat.utils.dataset_ops import auto_import_detections
                     auto_import_detections(self, settings['json_paths'],
                         target_classes=settings.get('target_classes'))
                     if self.current_frame >= self.total_frames:
@@ -861,21 +860,25 @@ class VideoAnnotationTool(QMainWindow):
             matching_items = []
             
             if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups'):
+                current_vid = None
                 for vid_name, indices in self.video_groups.items():
-                    meets_criteria = False
-                    for i in indices:
-                        annots = self.frame_annotations.get(i, [])
+                    if self.current_frame in indices:
+                        current_vid = vid_name
+                        break
+                if current_vid:
+                    indices = self.video_groups[current_vid]
+                    for local_idx, absolute_idx in enumerate(indices):
+                        annots = self.frame_annotations.get(absolute_idx, [])
                         target_count = sum(1 for ann in annots if ann.class_name == class_name)
                         if (mode == "More than" and target_count > count) or \
                            (mode == "Less than" and target_count < count) or \
                            (mode == "Exactly" and target_count == count) or \
                            (mode == "Frames With Class" and target_count > 0) or \
                            (mode == "Frames Without Class" and target_count == 0):
-                            meets_criteria = True
-                            break
-                    if meets_criteria:
-                        matching_items.append(vid_name)
-                total_items = len(self.video_groups)
+                            matching_items.append((f"Frame {local_idx + 1}", absolute_idx))
+                    total_items = len(indices)
+                else:
+                    total_items = 0
             else:
                 for i in range(self.total_frames):
                     annots = self.frame_annotations.get(i, [])
@@ -920,7 +923,7 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def _run_zero_shot_batch(self, frame_indices, prompt, model_type):
-        if not hasattr(self, 'image_files') or not self.image_files:
+        if not hasattr(self, 'image_files') and not hasattr(self, 'video_filename'):
             return
         if not frame_indices:
             QMessageBox.information(self, "No Frames", "No frames to process.")
@@ -935,6 +938,14 @@ class VideoAnnotationTool(QMainWindow):
         
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            if hasattr(self, 'labeler_analytics'):
+                self.labeler_analytics['tool_usage']['zero_shot'] += 1
+                self.labeler_analytics['prompts'].append({
+                    "prompt": prompt,
+                    "model": model_type,
+                    "frames_count": len(frame_indices)
+                })
+                
             if not hasattr(self, 'zero_shot_manager') or self.zero_shot_manager is None:
                 from .utils.zero_shot_manager import ZeroShotManager
                 self.zero_shot_manager = ZeroShotManager()
@@ -961,7 +972,19 @@ class VideoAnnotationTool(QMainWindow):
                 QApplication.processEvents()
                 
                 # Load frame
-                frame = cv2.imread(self.image_files[target_idx])
+                frame = None
+                if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                    if 0 <= target_idx < len(self.image_files):
+                        frame = cv2.imread(self.image_files[target_idx])
+                else:
+                    if hasattr(self, 'video_filename'):
+                        cap = cv2.VideoCapture(self.video_filename)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+                        ret, bgr = cap.read()
+                        if ret:
+                            frame = bgr
+                        cap.release()
+                
                 if frame is None:
                     continue
                     
@@ -1037,13 +1060,22 @@ class VideoAnnotationTool(QMainWindow):
         self.update_frame_annotations()
         
         if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups'):
+            current_vid = None
             for vid_name, indices in self.video_groups.items():
-                has_annotations = any(i in self.frame_annotations and len(self.frame_annotations[i]) > 0 for i in indices)
-                if not has_annotations:
-                    empty_items.append(vid_name)
-                else:
-                    annotated_items.append(vid_name)
-            total_items = len(self.video_groups)
+                if self.current_frame in indices:
+                    current_vid = vid_name
+                    break
+            if current_vid:
+                indices = self.video_groups[current_vid]
+                for local_idx, absolute_idx in enumerate(indices):
+                    annots = self.frame_annotations.get(absolute_idx, [])
+                    if not annots:
+                        empty_items.append((f"Frame {local_idx + 1}", absolute_idx))
+                    else:
+                        annotated_items.append(absolute_idx)
+                total_items = len(indices)
+            else:
+                total_items = 0
         else:
             for idx in range(len(self.image_files)):
                 annots = self.frame_annotations.get(idx, [])
@@ -1290,8 +1322,7 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.sam_prompt_labels = []
             self.canvas.sam_prompt_box = None
             self.sam_interactive_dock.update_status(0, 0, False)
-            self.sam_interactive_dock.update_frame_info(self.current_frame,
-                self.total_frames)
+            self.update_frame_info()
             self.statusBar.showMessage(
                 'SAM Interactive Mode Enabled: Left click for pos point, drag for box, right click for neg point.'
                 )
@@ -1359,6 +1390,17 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if not hasattr(self, 'image_files') or not self.image_files:
                 return
+            
+            if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
+                current_vid = None
+                for vid_name, indices in self.video_groups.items():
+                    if self.current_frame in indices:
+                        current_vid = vid_name
+                        break
+                if current_vid:
+                    indices = self.video_groups[current_vid]
+                    start_f = indices[start_f] if start_f < len(indices) else indices[-1]
+                    end_f = indices[end_f] if end_f < len(indices) else indices[-1]
         elif not hasattr(self, 'cap') or not self.cap or not self.cap.isOpened(
             ):
             return
@@ -1494,7 +1536,7 @@ class VideoAnnotationTool(QMainWindow):
                     QMessageBox.warning(self, 'Error',
                         f'Failed to load Zero-Shot Model:\n{msg}')
                     return
-                zero_shot_model = self.zero_shot_manager.active_detector
+                zero_shot_model = self.zero_shot_manager.detector
                 if text_prompt:
                     zero_shot_model.set_classes([text_prompt])
             self.statusBar.showMessage(
@@ -1645,7 +1687,7 @@ class VideoAnnotationTool(QMainWindow):
             self.update_frame_annotations()
             if getattr(self, 'is_image_dataset', False) and hasattr(self,
                 '_viat_dataset_info'):
-                from utils.dataset_manager import update_dataset_labels
+                from viat.utils.dataset_manager import update_dataset_labels
                 from PyQt5.QtWidgets import QApplication
                 self.statusBar.showMessage(
                     'Updating dataset labels before merge...')
@@ -1984,7 +2026,7 @@ Would you like to locate it?"""
                     return False
             else:
                 return False
-        from utils.dataset_manager import scan_dataset, load_dataset_into_app
+        from viat.utils.dataset_manager import scan_dataset, load_dataset_into_app
         info = scan_dataset(base_folder)
         self._viat_dataset_info = info
         relative_paths = image_dataset_info.get('image_files', [])
@@ -2069,8 +2111,17 @@ The file might be corrupted or have an unsupported format."""
                 return False
 
     @log_exceptions
+    def cancel_dataset_loading(self):
+        if hasattr(self, '_dataset_loader') and self._dataset_loader:
+            self._dataset_loader.cancel()
+            self.statusBar.showMessage('Loading cancelled.', 3000)
+            if hasattr(self, 'cancel_loading_action'):
+                self.cancel_loading_action.setVisible(False)
+
+    @log_exceptions
     def reset_media_state(self):
         """Reset all state related to the current media (video or image dataset)"""
+        self.cancel_dataset_loading()
         if hasattr(self, 'canvas'):
             self.canvas.annotations = []
             self.canvas.selected_annotation = None
@@ -2168,6 +2219,8 @@ Would you like to load it?"""
     @log_exceptions
     def update_frame_info(self):
         """Update frame information in the UI."""
+        sam_active = hasattr(self, 'sam_interactive_dock') and self.sam_interactive_dock.isVisible()
+        
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             total = len(self.image_files) if self.image_files else 0
             
@@ -2180,6 +2233,8 @@ Would you like to load it?"""
                 if current_vid:
                     indices = self.video_groups[current_vid]
                     local_idx = indices.index(self.current_frame)
+                    if sam_active:
+                        self.sam_interactive_dock.update_frame_info(local_idx, len(indices))
                     self.frame_label.setText(f'{local_idx + 1}/{len(indices)}')
                     self.frame_slider.blockSignals(True)
                     self.frame_slider.setValue(local_idx)
@@ -2191,6 +2246,8 @@ Would you like to load it?"""
                             )
                     return
             
+            if sam_active:
+                self.sam_interactive_dock.update_frame_info(self.current_frame, total)
             self.frame_label.setText(f'{self.current_frame + 1}/{total}')
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame)
@@ -2201,6 +2258,8 @@ Would you like to load it?"""
                     f'Image: {os.path.basename(self.image_files[self.current_frame])}'
                     )
         elif self.cap and self.cap.isOpened():
+            if sam_active:
+                self.sam_interactive_dock.update_frame_info(self.current_frame, self.total_frames)
             self.frame_label.setText(
                 f'{self.current_frame}/{self.total_frames}')
             self.frame_slider.blockSignals(True)
@@ -2522,11 +2581,16 @@ Would you like to load it?"""
         temp_groups = {}
         for idx, path in enumerate(self.image_files):
             filename = os.path.basename(path)
-            match = re.match(r'^([a-zA-Z_]+)[-_\s]*(\d+)\.[^.]+$', filename)
+            
+            # Clean up Roboflow format: remove .rf.HASH and _jpg/_png before extension
+            clean_filename = re.sub(r'\.rf\.[a-f0-9]+\.', '.', filename)
+            clean_filename = re.sub(r'_(jpg|jpeg|png)\.', '.', clean_filename)
+            
+            match = re.match(r'^([a-zA-Z_]+)[-_\s]*(\d+)\.[^.]+$', clean_filename)
             if match:
                 prefix = match.group(1).strip()
             else:
-                match = re.match(r'^(.*?)[-_\s]*(\d+)\.[^.]+$', filename)
+                match = re.match(r'^(.*?)[-_\s]*(\d+)\.[^.]+$', clean_filename)
                 if match:
                     prefix = match.group(1).strip()
                 else:
@@ -2883,9 +2947,9 @@ Would you like to load it?"""
         return None
 
     @log_exceptions
-    def add_class(self):
+    def add_class(self, class_name=None, color=None):
         self.save_undo_state()
-        self.class_manager.add_class()
+        self.class_manager.add_class(class_name, color)
 
     @log_exceptions
     def import_classes_from_yolo_yaml(self):
@@ -3062,8 +3126,8 @@ Would you like to load it?"""
                 video_path = getattr(self, 'video_filename', None)
             class_attributes = getattr(self.canvas, 'class_attributes', {})
             # backup_before_save(filename)
-            from utils.task_runner import run_task_with_progress
-            from utils.file_operations import save_project_generator
+            from viat.utils.task_runner import run_task_with_progress
+            from viat.utils.file_operations import save_project_generator
             frame_annotations_copy = {k: list(v) for k, v in self.
                 frame_annotations.items()}
             class_colors_copy = dict(self.canvas.class_colors)
@@ -3088,7 +3152,7 @@ Would you like to load it?"""
                 ._annotations_imported) if hasattr(self,
                 '_annotations_imported') else [], class_thresholds=dict(
                 self.class_thresholds) if getattr(self, 'class_thresholds',
-                None) is not None else {}, maximum=100)
+                None) is not None else {}, deleted_frames=self.deleted_frames if hasattr(self, 'deleted_frames') else set(), labeler_analytics=self.labeler_analytics if hasattr(self, 'labeler_analytics') else None, maximum=100)
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(
@@ -3137,7 +3201,7 @@ The application has been reset to its initial state."""
             return
         if not filename:
             filename, _ = QFileDialog.getOpenFileName(self, 'Load Project',
-                '', 'VIAT Project Files (*.viat)')
+                '', 'JSON Files (*.json);;All Files (*)')
             if not filename:
                 return False
         try:
@@ -3178,6 +3242,19 @@ The application has been reset to its initial state."""
                 self.duplicate_frames_cache = duplicate_frames_cache
             if image_dataset_info:
                 self.image_dataset_info = image_dataset_info
+                
+            self.deleted_frames = set(project_data.get('deleted_frames', []))
+            
+            # Initialize or restore analytics
+            loaded_analytics = project_data.get('labeler_analytics', {})
+            self.labeler_analytics = {
+                "prompts": loaded_analytics.get("prompts", []),
+                "tool_usage": loaded_analytics.get("tool_usage", {
+                    "zero_shot": 0, "tracking": 0, "interpolation": 0, "magic_wand": 0
+                }),
+                "base_annotations": loaded_analytics.get("base_annotations", {})
+            }
+            
             self.toggle_tracking_mode(tracking_mode_enabled)
             if hasattr(self.interpolation_manager, 'set_active'):
                 self.interpolation_manager.set_active(interpolation_mode_active
@@ -3215,7 +3292,7 @@ The application has been reset to its initial state."""
             interpolation_manager, 'is_active') else False,
             'verification_mode_enabled': self.verification_mode if hasattr(
             self, 'verification_mode') else False,
-            'show_attributes': getattr(self.canvas, 'show_attributes', True),
+            'show_attributes': getattr(self.canvas, 'show_attributes', False),
             'show_segmentation': getattr(self.canvas, 'show_segmentation', False)}
         save_last_state(state)
 
@@ -3227,7 +3304,7 @@ The application has been reset to its initial state."""
             return False
             
         if 'show_attributes' in state:
-            self.canvas.show_attributes = state.get('show_attributes', True)
+            self.canvas.show_attributes = state.get('show_attributes', False)
         if 'show_segmentation' in state:
             self.canvas.show_segmentation = state.get('show_segmentation', False)
             
@@ -3276,6 +3353,7 @@ The application has been reset to its initial state."""
     @log_exceptions
     def reset_application_state(self):
         """Reset the application to its initial state."""
+        self.cancel_dataset_loading()
         self.project_file = None
         self.project_modified = False
         if self.cap:
@@ -3336,7 +3414,7 @@ Are you sure you want to proceed?"""
             , QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        from utils.dataset_manager import update_dataset_labels
+        from viat.utils.dataset_manager import update_dataset_labels
         self.statusBar.showMessage('Updating dataset labels...')
         QApplication.processEvents()
         updated, errors = update_dataset_labels(self._viat_dataset_info,
@@ -3425,7 +3503,7 @@ First error: {errors[0]}"""
                     'Select Directory for YOLO Export', default_path,
                     QFileDialog.ShowDirsOnly)
                 if export_dir:
-                    from utils.task_runner import run_task_with_progress
+                    from viat.utils.task_runner import run_task_with_progress
                     run_task_with_progress(self, 'Exporting YOLO',
                         'Exporting to YOLO format...',
                         export_image_dataset_yolo, export_dir, self.
@@ -3450,7 +3528,7 @@ First error: {errors[0]}"""
                     'Select Directory for Pascal VOC Export', default_path,
                     QFileDialog.ShowDirsOnly)
                 if export_dir:
-                    from utils.task_runner import run_task_with_progress
+                    from viat.utils.task_runner import run_task_with_progress
                     run_task_with_progress(self, 'Exporting Pascal VOC',
                         'Exporting to Pascal VOC format...',
                         export_image_dataset_pascal_voc, export_dir, self.
@@ -3491,14 +3569,14 @@ First error: {errors[0]}"""
                     ) if self.canvas.pixmap else 480
                 if hasattr(self, 'is_image_dataset'
                     ) and self.is_image_dataset and export_format == 'coco':
-                    from utils.task_runner import run_task_with_progress
+                    from viat.utils.task_runner import run_task_with_progress
                     run_task_with_progress(self, 'Exporting COCO',
                         'Exporting to COCO format...',
                         export_image_dataset_coco, filename, self.
                         image_files, self.frame_annotations, self.canvas.
                         class_colors, image_width, image_height, maximum=100)
                 elif export_format == 'raya_with_classes':
-                    from utils.file_operations import export_raya_with_classes_annotations
+                    from viat.utils.file_operations import export_raya_with_classes_annotations
                     all_annotations = []
                     for frame_num, annotations in self.frame_annotations.items(
                         ):
@@ -3534,7 +3612,7 @@ First error: {errors[0]}"""
             frame_annotations)
         if not config:
             return
-        from utils.task_runner import run_task_with_progress
+        from viat.utils.task_runner import run_task_with_progress
         result = run_task_with_progress(self, 'Exporting Dataset',
             'Initializing export...', export_dataset, self, config, self.
             image_files, self.frame_annotations, self.canvas.class_colors,
@@ -3555,7 +3633,7 @@ First error: {errors[0]}"""
             QMessageBox.warning(self, 'Create Dataset',
                 'No annotations to export!')
             return
-        from utils.dataset_manager import create_dataset_dialog, create_dataset
+        from viat.utils.dataset_manager import create_dataset_dialog, create_dataset
         config = create_dataset_dialog(self, self.image_files, self.
             frame_annotations, self.canvas.class_colors)
         if config:
@@ -3618,7 +3696,7 @@ First error: {errors[0]}"""
             image_width = 640
             image_height = 480
         try:
-            from utils.file_operations import import_annotations as import_annotations_func, detect_annotation_format, extract_raya_classes
+            from viat.utils.file_operations import import_annotations as import_annotations_func, detect_annotation_format, extract_raya_classes
             format_type = detect_annotation_format(filename)
             class_mapping = None
             if format_type == 'Raya with classes':
@@ -3647,6 +3725,15 @@ First error: {errors[0]}"""
                 if frame_num not in self.frame_annotations:
                     self.frame_annotations[frame_num] = []
                 self.frame_annotations[frame_num].extend(anns)
+                
+            # Store base annotations in labeler_analytics
+            if hasattr(self, 'labeler_analytics'):
+                if 'base_annotations' not in self.labeler_analytics:
+                    self.labeler_analytics['base_annotations'] = {}
+                for frame_num, anns in imported_frame_annotations.items():
+                    if str(frame_num) not in self.labeler_analytics['base_annotations']:
+                        self.labeler_analytics['base_annotations'][str(frame_num)] = []
+                    self.labeler_analytics['base_annotations'][str(frame_num)].extend([a.to_dict() for a in anns])
             if self.current_frame in imported_frame_annotations:
                 self.canvas.annotations.extend(imported_frame_annotations[
                     self.current_frame])
@@ -4333,6 +4420,8 @@ Do you want to scan the entire video now for duplicate frames?
                 'Interpolation mode is not active.')
             return
         self.interpolation_manager.perform_pending_interpolation()
+        if hasattr(self, 'labeler_analytics'):
+            self.labeler_analytics['tool_usage']['interpolation'] += 1
 
     @log_exceptions
     def update_frame_display(self):
@@ -4743,7 +4832,7 @@ Do you want to scan the entire video now for duplicate frames?
                 'verification_mode', False), 'annotations_imported_list': 
                 list(self._annotations_imported) if hasattr(self,
                 '_annotations_imported') else []}
-            from utils.task_runner import AutoSaveThread
+            from viat.utils.task_runner import AutoSaveThread
             self._autosave_thread = AutoSaveThread(self.autosave_file,
                 project_data_args, self)
 
@@ -5038,6 +5127,8 @@ Do you want to scan the entire video now for duplicate frames?
     @log_exceptions
     def perform_tracking(self, target_ann, tracker_name, start_frame, end_frame
         ):
+        if hasattr(self, 'labeler_analytics'):
+            self.labeler_analytics['tool_usage']['tracking'] += 1
         self.save_undo_state(range(start_frame + 1, end_frame + 1))
         try:
             tracker = self.tracker_manager.create_tracker(tracker_name)
@@ -5362,6 +5453,24 @@ Do you want to scan the entire video now for duplicate frames?
         return super().eventFilter(obj, event)
 
     @log_exceptions
+    def delete_current_frame(self):
+        if self.current_frame in self.deleted_frames:
+            self.deleted_frames.remove(self.current_frame)
+            self.statusBar.showMessage(f'Frame {self.current_frame} RESTORED.')
+        else:
+            self.deleted_frames.add(self.current_frame)
+            self.statusBar.showMessage(f'Frame {self.current_frame} DELETED.')
+        
+        # Clear annotations if deleting
+        if self.current_frame in self.deleted_frames:
+            if self.current_frame in self.frame_annotations:
+                del self.frame_annotations[self.current_frame]
+            self.canvas.annotations.clear()
+            self.canvas.update()
+            
+        self.update_frame_display()
+
+    @log_exceptions
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts that are NOT frame navigation.
         Arrow keys are handled globally in eventFilter so there is a
@@ -5377,6 +5486,9 @@ Do you want to scan the entire video now for duplicate frames?
             return
         if event.key() == Qt.Key_P and event.modifiers() & Qt.ControlModifier:
             self.propagate_annotations()
+            return
+        if event.key() == Qt.Key_X and event.modifiers() & Qt.ControlModifier:
+            self.delete_current_frame()
             return
         if event.key() == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
             self.copy_selected_annotation()
@@ -5643,7 +5755,7 @@ Image + label will be moved on disk (reversible)."""
         lines.append('')
         lines.append(f'Classes source: {info.classes_source}')
         if info.classes_conflict:
-            lines.append(f'⚠ {info.classes_conflict}')
+            lines.append(f'âš  {info.classes_conflict}')
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle('Dataset Statistics')
         msg_box.setText('\n'.join(lines))
@@ -5784,7 +5896,7 @@ This may take a moment for large datasets."""
             , QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        from utils.task_runner import run_task_with_progress
+        from viat.utils.task_runner import run_task_with_progress
         result = run_task_with_progress(self, 'Removing Grayscale Images',
             'Scanning for grayscale images...', _viat_remove_grayscale,
             self, maximum=100)
@@ -5812,7 +5924,7 @@ Others are moved to removed/duplicates/."""
             , QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
-        from utils.task_runner import run_task_with_progress
+        from viat.utils.task_runner import run_task_with_progress
         result = run_task_with_progress(self, 'Removing Duplicate Images',
             'Scanning for duplicates...', _viat_remove_dup_groups, self,
             maximum=100)
@@ -5912,7 +6024,7 @@ Others are moved to removed/duplicates/."""
     def viat_toggle_attribute_display(self):
         """Toggle showing attributes on the canvas."""
         self.canvas.show_attributes = not getattr(self.canvas,
-            'show_attributes', True)
+            'show_attributes', False)
         self.canvas.update()
         state = 'ON' if self.canvas.show_attributes else 'OFF'
         self.statusBar.showMessage(f'Attribute display: {state}', 3000)
@@ -5934,7 +6046,7 @@ Others are moved to removed/duplicates/."""
             content = open(log_path, 'r', encoding='utf-8').read()
             dialog = QDialog(self)
             dialog.setWindowTitle(
-                f'Dataset Log — {os.path.basename(info.root)}')
+                f'Dataset Log â€” {os.path.basename(info.root)}')
             dialog.setMinimumWidth(600)
             dialog.setMinimumHeight(500)
             layout = QVBoxLayout(dialog)
@@ -6031,7 +6143,7 @@ The file must be in VIAT JSON format:  "0000": {{"actors": {{...}}}}"""
         self.update_annotation_list()
         msg = f"""Borders: left={det['left_border']}px, right={det['right_border']}px (sampled {det['sampled']} frames).
 
-Annotations: {adj['removed']} removed (≥80% in border), {adj['clipped']} clipped, {adj['unchanged']} unchanged."""
+Annotations: {adj['removed']} removed (â‰¥80% in border), {adj['clipped']} clipped, {adj['unchanged']} unchanged."""
         QMessageBox.information(self, 'Video Borders Adjusted', msg)
         self.statusBar.showMessage(
             f"Borders fixed: {adj['removed']} removed, {adj['clipped']} clipped"
@@ -6047,7 +6159,7 @@ Annotations: {adj['removed']} removed (≥80% in border), {adj['clipped']} clipp
         if (self.object_visibility_manager and self.
             object_visibility_manager.active):
             return
-        from utils.object_visibility import ObjectVisibilityManager
+        from viat.utils.object_visibility import ObjectVisibilityManager
         self.object_visibility_manager = ObjectVisibilityManager(self)
         if not self.object_visibility_manager.start():
             QMessageBox.warning(self, 'Object Visibility',
@@ -6276,7 +6388,7 @@ Annotations: {adj['removed']} removed (≥80% in border), {adj['clipped']} clipp
                 frame = cv2.imread(self.image_files[self.current_frame])
             else:
                 return
-            from utils.seg_video_labeler import SegmentationVideoLabeler
+            from viat.utils.seg_video_labeler import SegmentationVideoLabeler
             tmp_labeler = SegmentationVideoLabeler(self)
             color_hsv = tmp_labeler.pick_color_from_frame(frame, x, y)
             self.statusBar.showMessage(
@@ -6324,7 +6436,7 @@ Annotations: {adj['removed']} removed (≥80% in border), {adj['clipped']} clipp
                 if not class_name:
                     return
                 if self.seg_labeler is None:
-                    from utils.seg_video_labeler import SegmentationVideoLabeler
+                    from viat.utils.seg_video_labeler import SegmentationVideoLabeler
                     self.seg_labeler = SegmentationVideoLabeler(self)
                 self.seg_labeler.add_tracked_object(color_hsv=color_hsv,
                     class_name=class_name, actor_id=actor_edit.text().strip
@@ -6432,7 +6544,7 @@ Per object: {result['per_object']}"""
                     box_dict['actor_id'] = actor_id
                 boxes_by_frame[frame_num].append(box_dict)
         try:
-            from utils.label_formats.viat_json import ViatJsonLabelFormat
+            from viat.utils.label_formats.viat_json import ViatJsonLabelFormat
             fmt = ViatJsonLabelFormat()
             content = fmt.dump(boxes_by_frame, (0, 0), [])
             with open(filename, 'w', encoding='utf-8') as f:
@@ -6492,7 +6604,7 @@ Continue?"""
             , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if reply != QMessageBox.Yes:
             return
-        from utils.task_runner import run_task_with_progress
+        from viat.utils.task_runner import run_task_with_progress
         result = run_task_with_progress(self, 'Auto-Import Detections',
             'Importing detections...', _viat_auto_import_detections, self,
             filename, move_to_review=True, add_as_annotations=False,
@@ -7082,6 +7194,64 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
                 self.statusBar.showMessage('Ready')
 
 
+    @log_exceptions
+    def compare_raya_annotations(self):
+        """Show dialog to select two Raya files and compare them."""
+        base_file, _ = QFileDialog.getOpenFileName(self, 'Select Base Raya File', '', 'Text Files (*.txt);;All Files (*)')
+        if not base_file:
+            return
+            
+        mod_file, _ = QFileDialog.getOpenFileName(self, 'Select Modified Raya File', '', 'Text Files (*.txt);;All Files (*)')
+        if not mod_file:
+            return
+            
+        out_md = os.path.join(os.path.dirname(mod_file), 'comparison_report.md')
+        
+        from viat.utils.compare_raya import compare_annotations
+        success, msg = compare_annotations(base_file, mod_file, out_md)
+        if success:
+            QMessageBox.information(self, 'Comparison Complete', f'Report saved to:\n{out_md}')
+        else:
+            QMessageBox.critical(self, 'Comparison Error', f'Failed to compare files:\n{msg}')
+            
+    @log_exceptions
+    def view_labeler_analytics(self):
+        """Generate labeler analytics report from a VIAT JSON project."""
+        if self.project_modified or not hasattr(self, 'project_file') or not self.project_file:
+            reply = QMessageBox.warning(self, 'Unsaved Changes', 
+                                     'You must save the project before generating analytics to ensure all tracking data is included. Would you like to save now?',
+                                     QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.save_project()
+                if self.project_modified: # If they cancelled the save dialog
+                    return
+            else:
+                return
+
+        json_file = self.project_file
+        base_raya_file = None
+        try:
+            import json
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+            if not data.get('labeler_analytics', {}).get('base_annotations'):
+                reply = QMessageBox.question(self, 'Base Pre-labels Missing', 
+                                             'This project does not contain embedded base pre-labels.\nWould you like to select the original Base Annotation file (Raya/YOLO/etc) for comparison?',
+                                             QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    base_raya_file, _ = QFileDialog.getOpenFileName(self, 'Select Base Annotation File', '', 'All Files (*);;Text Files (*.txt);;JSON Files (*.json);;XML Files (*.xml)')
+        except Exception as e:
+            print(f"Error checking for embedded base annotations: {e}")
+
+        out_md = os.path.join(os.path.dirname(json_file), 'analytics_report.md')
+        
+        from viat.utils.analytics_report import generate_analytics_report
+        success, msg = generate_analytics_report(json_file, out_md, base_raya_file)
+        if success:
+            QMessageBox.information(self, 'Analytics Complete', f'Report saved to:\n{out_md}')
+        else:
+            QMessageBox.critical(self, 'Analytics Error', f'Failed to generate report:\n{msg}')
+
 class ClassMappingDialog(QDialog):
 
     def __init__(self, imported_classes, existing_classes, parent=None):
@@ -7144,26 +7314,4 @@ class ClassMappingDialog(QDialog):
                 id_mapping[idx] = self.mapping[imp_class]
         return id_mapping
 
-    @log_exceptions
-    def viat_auto_group_scene_cuts(self):
-        if not getattr(self, 'is_image_dataset', False) or not getattr(self, 'image_files', []):
-            QMessageBox.warning(self, "Error", "No image dataset loaded.")
-            return
-            
-        from widgets.scene_detect_dialog import SceneDetectDialog
-        dialog = SceneDetectDialog(self, image_files=self.image_files)
-        if dialog.exec_() == QDialog.Accepted:
-            self.custom_video_groups = dialog.video_groups
-            self.custom_single_images = dialog.single_images
-            
-            # Restart video mode if it's on to refresh groups
-            was_video_mode = getattr(self, 'video_mode', False)
-            if was_video_mode and hasattr(self, 'video_manager_dock'):
-                # Force refresh
-                self.toggle_video_mode(False)
-                self.toggle_video_mode(True)
-            else:
-                if hasattr(self, 'video_manager_dock'):
-                    self.video_manager_dock.chk_video_mode.setChecked(True)
-            
-            QMessageBox.information(self, "Success", f"Grouped into {len(self.custom_video_groups)} scenes!")
+    

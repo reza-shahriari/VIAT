@@ -847,8 +847,32 @@ class ClassManager:
         """
         self.main_window = main_window
 
-    def add_class(self):
+    def add_class(self, class_name=None, color=None):
         """Add a new class with custom attributes."""
+        if class_name is not None:
+            if class_name in self.main_window.canvas.class_colors:
+                return
+
+            if color is None:
+                color = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+            
+            self.main_window.canvas.class_colors[class_name] = color
+
+            if not hasattr(self.main_window.canvas, "class_attributes") or self.main_window.canvas.class_attributes is None:
+                self.main_window.canvas.class_attributes = {}
+            if class_name not in self.main_window.canvas.class_attributes:
+                self.main_window.canvas.class_attributes[class_name] = {}
+            
+            self.main_window.class_attributes = self.main_window.canvas.class_attributes
+            
+            if hasattr(self.main_window, "refresh_class_ui"):
+                self.main_window.refresh_class_ui()
+            if hasattr(self.main_window, "canvas"):
+                self.main_window.canvas.update()
+            if hasattr(self.main_window, "save_config"):
+                self.main_window.save_config()
+            return
+
         # Create dialog
         dialog = self.create_class_dialog()
 

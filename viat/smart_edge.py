@@ -1,4 +1,4 @@
-"""
+﻿"""
 Smart Edge Movement Module for Video Annotation Tool
 
 This module provides computer vision-based edge detection and refinement

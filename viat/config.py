@@ -1,4 +1,4 @@
-"""Configuration settings for the Video Annotation Tool."""
+﻿"""Configuration settings for the Video Annotation Tool."""
 
 # Default application settings
 DEFAULT_SETTINGS = {

@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+﻿from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import QProgressDialog, QMessageBox
 import traceback
 
@@ -114,7 +114,7 @@ class AutoSaveThread(QThread):
 
     def run(self):
         try:
-            from utils.file_operations import save_project
+            from viat.utils.file_operations import save_project
             save_project(self.filename, **self.project_data_args)
             self.finished_autosave.emit(True, self.filename)
         except Exception as e:

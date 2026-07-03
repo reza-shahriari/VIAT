@@ -340,7 +340,7 @@ class SamManager:
                 kwargs['labels'] = labels
             if box:
                 kwargs['bboxes'] = box
-            if text_prompt and "fastsam" in model_type.lower():
+            if text_prompt and ("fastsam" in model_type.lower() or "sam3" in model_type.lower()):
                 kwargs['texts'] = text_prompt
 
             source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator

@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 import traceback
 from viat.logger import logger
 

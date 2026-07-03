@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (
+﻿from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QCheckBox, QFileDialog, QMessageBox, QGroupBox, QLineEdit, QProgressBar,
     QFormLayout

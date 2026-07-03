@@ -1,4 +1,4 @@
-"""Base class for label-format plugins.
+﻿"""Base class for label-format plugins.
 
 A *LabelFormat* knows how to:
   * locate the label file for a given image (``find_label_file``)

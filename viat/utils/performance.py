@@ -1,4 +1,4 @@
-"""
+﻿"""
 Frame caching + fast seek for VIAT video playback performance.
 
 Problem: large videos are slow because cv2.VideoCapture.set(POS_FRAMES) is
@@ -217,5 +217,5 @@ class PerformanceManager:
 
 
 # Backward-compat alias: the original class name had a typo (PerfomanceManger).
-# main.py imports `PerfomanceManger` from utils, so we alias it here.
+# main.py imports `PerfomanceManger` from viat.utils, so we alias it here.
 PerfomanceManger = PerformanceManager

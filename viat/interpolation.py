@@ -1,4 +1,4 @@
-"""
+﻿"""
 Interpolation module for VIAT.
 
 This module provides functionality to interpolate annotations between keyframes,

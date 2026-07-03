@@ -90,8 +90,10 @@ def save_json_atomically(filename, data):
     try:
         with open(tmp_filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp_filename, filename)
+            f.flush()
+            os.fsync(f.fileno())
         backup_before_save(filename)
+        os.replace(tmp_filename, filename)
     except Exception as e:
         print("Error while saving JSON:", e)
         if os.path.exists(tmp_filename):
@@ -121,7 +123,8 @@ def save_project_generator(
     verification_mode_enabled=False,
     annotations_imported_list=None,
     class_thresholds=None,
-
+    deleted_frames=None,
+    labeler_analytics=None
 ):
     yield 10, "Serializing annotations..."
     
@@ -167,6 +170,12 @@ def save_project_generator(
         "interpolation_mode_active": interpolation_mode_active,
         "verification_mode_enabled": verification_mode_enabled,
         "annotations_imported_list": annotations_imported_list,
+        "deleted_frames": list(deleted_frames) if deleted_frames else [],
+        "labeler_analytics": {
+            "prompts": labeler_analytics.get("prompts", []) if labeler_analytics else [],
+            "tool_usage": labeler_analytics.get("tool_usage", {}) if labeler_analytics else {},
+            "base_annotations": labeler_analytics.get("base_annotations", {}) if labeler_analytics else {}
+        } if labeler_analytics else {}
     }
 
     # Add frame hashes if available
@@ -1636,16 +1645,13 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
                         width = int(float(parts[3]))
                         height = int(float(parts[4]))
 
-                        # Create the bounding box using the provided class
-                        bbox = bbox_class(x, y, width, height)
-                        bbox.frame = frame_num
-
                         # Get mapped class name
                         class_name = class_mapping.get(class_id, f"Class {class_id}")
-                        bbox.class_name = class_name
-                        
-                        # Use a default color, actual color assignment should happen in the main canvas
-                        bbox.color = QColor(255, 0, 0)
+
+                        # Create the bounding box using the provided class
+                        rect = QRect(x, y, width, height)
+                        bbox = bbox_class(rect, class_name, {}, QColor(255, 0, 0), source="loaded")
+                        bbox.frame = frame_num
 
                         # Extract optional attributes
                         if len(parts) > 5:

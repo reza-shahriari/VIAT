@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,

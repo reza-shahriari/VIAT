@@ -1,15 +1,15 @@
-"""
+﻿"""
 Video border detection & label adjustment for VIAT.
 
 Problem: some videos have black/gray border columns on the left and/or right
 edges (letterboxing, pillarboxing, or scene-rendering artifacts). Labels that
-fall fully or mostly (≥80%) inside these borders should be removed; labels
+fall fully or mostly (â‰¥80%) inside these borders should be removed; labels
 that partially overlap the border should be clipped to the non-border area.
 
 This module:
   1. Samples frames from the video to detect border columns.
   2. For each annotation, computes what fraction of its area is in the border.
-  3. Removes annotations that are ≥80% in the border.
+  3. Removes annotations that are â‰¥80% in the border.
   4. Clips annotations that partially overlap the border (adjusts bbox + seg).
   5. Leaves annotations outside the border unchanged.
 
@@ -154,11 +154,11 @@ def adjust_annotations_for_borders(
     For each annotation in every frame:
       * Compute what fraction of the annotation's bbox area is inside the
         border region (left_border columns + right_border columns).
-      * If ≥ ``removal_threshold`` (80% by default) of the annotation is in
-        the border → remove it.
-      * If partially in the border → clip the bbox to the non-border area.
+      * If â‰¥ ``removal_threshold`` (80% by default) of the annotation is in
+        the border â†’ remove it.
+      * If partially in the border â†’ clip the bbox to the non-border area.
         Also clip the segmentation polygon if present.
-      * If not in the border → leave unchanged.
+      * If not in the border â†’ leave unchanged.
 
     Args:
         app: the VideoAnnotationTool main window.

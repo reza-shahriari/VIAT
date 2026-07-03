@@ -420,7 +420,18 @@ class UICreator:
         self.main_window.toolbar.addWidget(self.save_seg_checkbox)
 
         self.main_window.toolbar.addSeparator()
-       
+
+        # Add cancel loading button
+        self.main_window.cancel_loading_btn = QPushButton("Cancel Loading")
+        self.main_window.cancel_loading_btn.setStyleSheet(
+            "background-color: #F56C6C; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;"
+        )
+        self.main_window.cancel_loading_btn.clicked.connect(self.main_window.cancel_dataset_loading)
+        
+        self.main_window.cancel_loading_action = self.main_window.toolbar.addWidget(self.main_window.cancel_loading_btn)
+        self.main_window.cancel_loading_action.setVisible(False)
+        self.main_window.toolbar.addSeparator()
+
         # Add verification mode toggle
         self.verify_mode_action = QAction("Auto Clean Mode", self.main_window)
         self.verify_mode_action.setCheckable(True)
