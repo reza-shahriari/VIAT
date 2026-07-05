@@ -1,19 +1,32 @@
-﻿import os
+import os
 import cv2
 import numpy as np
-
 try:
     import torch
-    from ultralytics import YOLOWorld
-    ULTRALYTICS_AVAILABLE = True
 except ImportError:
-    ULTRALYTICS_AVAILABLE = False
+    torch = None
 
-try:
-    from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection, AutoModelForCausalLM
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
+_ULTRALYTICS_AVAILABLE = None
+def check_ultralytics():
+    global _ULTRALYTICS_AVAILABLE
+    if _ULTRALYTICS_AVAILABLE is None:
+        try:
+            import ultralytics
+            _ULTRALYTICS_AVAILABLE = True
+        except ImportError:
+            _ULTRALYTICS_AVAILABLE = False
+    return _ULTRALYTICS_AVAILABLE
+
+_TRANSFORMERS_AVAILABLE = None
+def check_transformers():
+    global _TRANSFORMERS_AVAILABLE
+    if _TRANSFORMERS_AVAILABLE is None:
+        try:
+            import transformers
+            _TRANSFORMERS_AVAILABLE = True
+        except ImportError:
+            _TRANSFORMERS_AVAILABLE = False
+    return _TRANSFORMERS_AVAILABLE
 
 def is_valid_model_dir(directory):
     if not os.path.isdir(directory):
@@ -23,6 +36,28 @@ def is_valid_model_dir(directory):
         os.path.exists(os.path.join(directory, "preprocessor_config.json"))
     )
 
+
+
+def _extract_class_names(classes_list):
+    """Normalize a mixed list of strings or dicts to a plain list of name strings.
+    
+    Handles three common shapes coming from the config:
+      - ['Car', 'Person', ...]              -> ['Car', 'Person', ...]
+      - [{'name': 'Car', ...}, ...]         -> ['Car', ...]
+      - [{'class': 'Car', ...}, ...]        -> ['Car', ...]
+    """
+    if not classes_list:
+        return []
+    result = []
+    for c in classes_list:
+        if isinstance(c, dict):
+            name = c.get('name') or c.get('class') or c.get('label') or ''
+            if name:
+                result.append(str(name))
+        elif isinstance(c, str):
+            if c:
+                result.append(c)
+    return result
 
 
 class ZeroShotDetector:
@@ -46,7 +81,7 @@ class YoloWorldDetector(ZeroShotDetector):
         self.target_indices = {}
 
     def load_model(self, model_type, checkpoints_dir):
-        if not ULTRALYTICS_AVAILABLE:
+        if not check_ultralytics():
             return False, "Ultralytics is not installed. Please run: pip install ultralytics"
             
         try:
@@ -86,6 +121,8 @@ class YoloWorldDetector(ZeroShotDetector):
 
     def set_classes(self, classes_list):
         if self.model:
+            # Normalize: classes_list may be list-of-dicts from classes_info config
+            classes_list = _extract_class_names(classes_list)
             self.classes = classes_list
             
             if self.is_standard_yolo:
@@ -116,9 +153,9 @@ class YoloWorldDetector(ZeroShotDetector):
             return []
             
         if visual_prompts is not None:
-            results = self.model(image_array, visual_prompts=visual_prompts, verbose=False, conf=0.05)
+            results = self.model(image_array, visual_prompts=visual_prompts, verbose=True, conf=0.05)
         else:
-            results = self.model(image_array, verbose=False, conf=0.05)
+            results = self.model(image_array, verbose=True, conf=0.05)
             
         detections = []
         
@@ -159,7 +196,7 @@ class GroundingDinoDetector(ZeroShotDetector):
         self.text_prompt = ""
 
     def load_model(self, model_type, checkpoints_dir):
-        if not TRANSFORMERS_AVAILABLE:
+        if not check_transformers():
             return False, "Transformers is not installed. Please run: pip install -r dino_req.txt"
         
         try:
@@ -172,10 +209,11 @@ class GroundingDinoDetector(ZeroShotDetector):
             else:
                 path = model_type
 
+            from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
             self.processor = AutoProcessor.from_pretrained(path)
             self.model = AutoModelForZeroShotObjectDetection.from_pretrained(path)
             
-            if torch.cuda.is_available():
+            if torch is not None and torch.cuda.is_available():
                 self.model = self.model.to("cuda")
             
             return True, "Model loaded successfully"
@@ -196,16 +234,19 @@ class GroundingDinoDetector(ZeroShotDetector):
             pil_image = Image.fromarray(image_rgb)
             
             inputs = self.processor(images=pil_image, text=self.text_prompt, return_tensors="pt")
+            # Keep a reference to input_ids before possibly converting the dict to GPU tensors
+            input_ids = inputs["input_ids"]
             
-            if torch.cuda.is_available():
+            if torch is not None and torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
+                input_ids = input_ids.to("cuda")
                 
             with torch.no_grad():
                 outputs = self.model(**inputs)
                 
             results = self.processor.post_process_grounded_object_detection(
                 outputs,
-                inputs.input_ids,
+                input_ids,
                 box_threshold=0.05,
                 text_threshold=0.05,
                 target_sizes=[pil_image.size[::-1]]
@@ -237,7 +278,7 @@ class Florence2Detector(ZeroShotDetector):
         self.text_prompt = ""
 
     def load_model(self, model_type, checkpoints_dir):
-        if not TRANSFORMERS_AVAILABLE:
+        if not check_transformers():
             return False, "Transformers is not installed. Please run: pip install -r florence_req.txt"
         
         try:
@@ -259,6 +300,7 @@ class Florence2Detector(ZeroShotDetector):
             
             for path in paths_to_try:
                 try:
+                    from transformers import AutoProcessor, AutoModelForCausalLM
                     self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
                     self.model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True)
                     loaded = True
@@ -318,7 +360,7 @@ class Florence2Detector(ZeroShotDetector):
             
             self.model.prepare_inputs_for_generation = types.MethodType(patched_prep, self.model)
 
-            if torch.cuda.is_available():
+            if torch is not None and torch.cuda.is_available():
                 self.model = self.model.to("cuda")
                 
             return True, "Model loaded successfully"
@@ -341,7 +383,7 @@ class Florence2Detector(ZeroShotDetector):
             
             inputs = self.processor(text=self.text_prompt, images=pil_image, return_tensors="pt")
             
-            if torch.cuda.is_available():
+            if torch is not None and torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
                 
             with torch.no_grad():
@@ -384,7 +426,7 @@ class LocateAnythingDetector(ZeroShotDetector):
         self.text_prompt = ""
 
     def load_model(self, model_type, checkpoints_dir):
-        if not TRANSFORMERS_AVAILABLE:
+        if not check_transformers():
             return False, "Transformers is not installed. Please run: pip install -r locate_anything_req.txt"
         
         try:
@@ -413,6 +455,7 @@ class LocateAnythingDetector(ZeroShotDetector):
                 try:
                     print(f"Attempting to load LocateAnything from: {path}")
                     try:
+                        from transformers import AutoProcessor
                         self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
                     except Exception as e:
                         if sys.version_info < (3, 10):
@@ -431,6 +474,7 @@ class LocateAnythingDetector(ZeroShotDetector):
                                     if 'from __future__ import annotations' not in content:
                                         with open(f, 'w', encoding='utf-8') as file:
                                             file.write('from __future__ import annotations\n' + content)
+                            from transformers import AutoProcessor
                             self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
                         else:
                             raise e
@@ -502,9 +546,6 @@ class LocateAnythingDetector(ZeroShotDetector):
                 generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             print(f"LocateAnything Output: {generated_text}")
             
-            with open("temp.txt", "a") as f:
-                f.write(f"LocateAnything Output for classes {self.classes}:\n{generated_text}\n\n")
-            
             detections = []
             
             # Simple heuristic regex for finding boxes
@@ -562,16 +603,19 @@ class Sam3TextDetector(ZeroShotDetector):
     def __init__(self):
         self.predictor = None
         self.classes = []
+        self.class_names = []
+        self.class_prompts = []
+        self.predict_counter = 0
 
     def load_model(self, model_type, checkpoints_dir):
-        if not ULTRALYTICS_AVAILABLE:
+        if not check_ultralytics():
             return False, "Ultralytics is not installed. Please run: pip install ultralytics"
             
         try:
             from ultralytics.models.sam import SAM3SemanticPredictor
             model_path = os.path.join(checkpoints_dir, model_type)
             
-            overrides = dict(conf=0.05, task="segment", mode="predict", model=model_type, half=True, verbose=False)
+            overrides = dict(conf=0.05, task="segment", mode="predict", model=model_type, half=True, verbose=False, save=False)
             
             if not os.path.exists(model_path):
                 old_cwd = os.getcwd()
@@ -591,15 +635,28 @@ class Sam3TextDetector(ZeroShotDetector):
             return False, f"Failed to load SAM3 Text Predictor: {str(e)}"
 
     def set_classes(self, classes_list):
-        self.classes = classes_list
+        if not classes_list:
+            self.classes = []
+            self.class_names = []
+            self.class_prompts = []
+            return
+            
+        if isinstance(classes_list[0], dict):
+            self.classes = classes_list
+            self.class_names = [c['name'] for c in classes_list]
+            self.class_prompts = [c.get('prompt', c['name']) for c in classes_list]
+        else:
+            self.classes = classes_list
+            self.class_names = classes_list
+            self.class_prompts = classes_list
 
     def predict(self, image_array, visual_prompts=None):
-        if not self.predictor or not self.classes:
+        if not self.predictor or not self.class_names:
             return []
             
         try:
             self.predictor.set_image(image_array)
-            results = self.predictor(text=self.classes)
+            results = self.predictor(text=self.class_prompts)
             
             detections = []
             if len(results) > 0 and results[0].boxes is not None:
@@ -610,7 +667,7 @@ class Sam3TextDetector(ZeroShotDetector):
                     cls_id = int(box.cls[0].cpu().numpy())
                     score = float(box.conf[0].cpu().numpy())
                     
-                    class_name = self.classes[cls_id] if cls_id < len(self.classes) else f"class_{cls_id}"
+                    class_name = self.class_names[cls_id] if cls_id < len(self.class_names) else f"class_{cls_id}"
                     
                     det = {
                         'box': [int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])],
@@ -624,6 +681,7 @@ class Sam3TextDetector(ZeroShotDetector):
                             det['segmentation'] = polygon
                             
                     detections.append(det)
+                    
             return detections
         except Exception as e:
             print(f"SAM3 inference error: {e}")
@@ -650,11 +708,14 @@ class ZeroShotManager:
         self.current_model_type = None
 
     def is_available(self):
-        return ULTRALYTICS_AVAILABLE
+        return check_ultralytics()
 
-    def load_model(self, model_type="yolov8s-world.pt"):
+    def load_model(self, model_type="yolov8s-world.pt", checkpoints_dir=None):
         if self.current_model_type == model_type and self.detector is not None:
             return True, "Model already loaded"
+        
+        # Allow callers to override the checkpoints directory
+        chkp_dir = checkpoints_dir if checkpoints_dir is not None else self.chkp_dir
             
         if "yolo" in model_type.lower():
             self.detector = YoloWorldDetector()
@@ -669,14 +730,16 @@ class ZeroShotManager:
         else:
             return False, f"Unknown zero-shot model type: {model_type}"
             
-        success, msg = self.detector.load_model(model_type, self.chkp_dir)
+        success, msg = self.detector.load_model(model_type, chkp_dir)
         if success:
             self.current_model_type = model_type
         return success, msg
 
     def set_classes(self, classes_list):
         if self.detector:
-            self.detector.set_classes(classes_list)
+            # Normalize list-of-dicts (classes_info) to plain list of name strings
+            # before forwarding to any detector so none of them have to handle dicts.
+            self.detector.set_classes(_extract_class_names(classes_list))
 
     def predict(self, image_array, score_threshold=0.70):
         if not self.detector:

@@ -1,17 +1,19 @@
-﻿import os
+import os
 import cv2
 import numpy as np
+import tempfile
+from PIL import Image
 
-try:
-    import torch
-    import tempfile
-    from PIL import Image
-    from sam3.model_builder import build_sam3_image_model, build_sam3_video_predictor, build_sam3_predictor
-    from sam3.model.sam3_image_processor import Sam3Processor
-    SAM3_NATIVE_AVAILABLE = True
-except ImportError as e:
-    print(f"SAM3 Native Import Error: {e}")
-    SAM3_NATIVE_AVAILABLE = False
+_SAM3_AVAILABLE = None
+def check_sam3():
+    global _SAM3_AVAILABLE
+    if _SAM3_AVAILABLE is None:
+        try:
+            import sam3
+            _SAM3_AVAILABLE = True
+        except ImportError:
+            _SAM3_AVAILABLE = False
+    return _SAM3_AVAILABLE
 
 def abs_to_rel_coords(coords, IMG_WIDTH, IMG_HEIGHT, coord_type="point"):
     if coord_type == "point":
@@ -30,16 +32,20 @@ class Sam3NativeManager:
         self.image_processor = None
         self.video_predictor = None
         self.current_model_type = None
+        self.current_session_id = None
+        self.current_img_hash = None
+        self.current_box = None
+        self.current_text_prompt = None
 
     def is_available(self):
-        return SAM3_NATIVE_AVAILABLE
+        return check_sam3()
 
     def load_model(self, model_type="sam3.1_l.pt"):
         """
         Loads the SAM3 model.
         Returns (success_bool, message_string).
         """
-        if not SAM3_NATIVE_AVAILABLE:
+        if not check_sam3():
             return False, "SAM3 native package is not installed."
 
         if self.current_model_type == model_type and self.image_model is not None:
@@ -63,12 +69,16 @@ class Sam3NativeManager:
             try:
                 # We load both image and video models depending on the need
                 if "sam3.1" in model_type.lower():
+                    from sam3.model_builder import build_sam3_predictor
                     self.video_predictor = build_sam3_predictor(checkpoint_path=model_path, version="sam3.1", use_fa3=False)
                 else:
+                    from sam3.model_builder import build_sam3_video_predictor
                     self.video_predictor = build_sam3_video_predictor(checkpoint_path=model_path)
                     
                 self.current_session_id = None
                 self.current_img_hash = None
+                self.current_box = None
+                self.current_text_prompt = None
                 self.temp_dir = os.path.join(tempfile.gettempdir(), "sam3_native_session")
                 os.makedirs(self.temp_dir, exist_ok=True)
             finally:
@@ -102,10 +112,17 @@ class Sam3NativeManager:
         img_bytes = image_array.tobytes()
         img_hash = hashlib.md5(img_bytes).hexdigest()
 
-        if self.current_session_id is None or img_hash != self.current_img_hash:
-            # New image, start new session
+        # Check if the box or text prompt has changed (indicating a new object/prompt query)
+        box_tuple = tuple(box) if box is not None else None
+        prompt_changed = (box_tuple != self.current_box) or (text_prompt != self.current_text_prompt)
+
+        if self.current_session_id is None or img_hash != self.current_img_hash or prompt_changed:
+            # New image or new prompt, start new session to prevent prompt accumulation
             if self.current_session_id is not None:
-                self.video_predictor.handle_request({"type": "close_session", "session_id": self.current_session_id})
+                try:
+                    self.video_predictor.handle_request({"type": "close_session", "session_id": self.current_session_id})
+                except Exception as e:
+                    print(f"[SAM3 Native] Failed to close session: {e}")
             
             # Save image
             img_path = os.path.join(self.temp_dir, "00000.jpg")
@@ -115,8 +132,10 @@ class Sam3NativeManager:
             res = self.video_predictor.handle_request({"type": "start_session", "resource_path": self.temp_dir, "offload_video_to_cpu": True})
             self.current_session_id = res["session_id"]
             self.current_img_hash = img_hash
+            self.current_box = box_tuple
+            self.current_text_prompt = text_prompt
         else:
-            # Same image, clear previous prompts by resetting the session
+            # Same image and same box/text prompt (adding/refining points), clear points in the session
             self.video_predictor.handle_request({"type": "reset_session", "session_id": self.current_session_id})
 
         IMG_HEIGHT, IMG_WIDTH = image_array.shape[:2]
@@ -138,9 +157,8 @@ class Sam3NativeManager:
                 if has_text:
                     vg_req["text"] = text_prompt
                 if has_box:
-                    x1, y1, x2, y2 = box
-                    vg_req["bounding_boxes"] = [[x1/IMG_WIDTH, y1/IMG_HEIGHT, (x2-x1)/IMG_WIDTH, (y2-y1)/IMG_HEIGHT]]
-                    vg_req["bounding_box_labels"] = [1]
+                    box_rel = abs_to_rel_coords(np.array([box]), IMG_WIDTH, IMG_HEIGHT, coord_type="box")
+                    vg_req["box"] = torch.tensor(box_rel, dtype=torch.float32)
                 self.video_predictor.handle_request(vg_req)
 
             # Points-only prompt
@@ -156,6 +174,9 @@ class Sam3NativeManager:
             self.video_predictor.handle_request(pt_req)
         else:
             # Text and/or box only
+            # SAM3 handle_request maps:
+            #   "bounding_boxes"       → add_prompt(bounding_boxes=...) → model(boxes_xywh=...)
+            #   "bounding_box_labels"  → required companion (1=fg per box)
             prompt_req = {
                 "type": "add_prompt",
                 "session_id": self.current_session_id,
@@ -167,9 +188,24 @@ class Sam3NativeManager:
             if has_text:
                 prompt_req["text"] = text_prompt
             if has_box:
-                x1, y1, x2, y2 = box
-                prompt_req["bounding_boxes"] = [[x1/IMG_WIDTH, y1/IMG_HEIGHT, (x2-x1)/IMG_WIDTH, (y2-y1)/IMG_HEIGHT]]
-                prompt_req["bounding_box_labels"] = [1]
+                # Convert absolute xyxy → normalized xywh
+                x1n = box[0] / IMG_WIDTH
+                y1n = box[1] / IMG_HEIGHT
+                wn  = (box[2] - box[0]) / IMG_WIDTH
+                hn  = (box[3] - box[1]) / IMG_HEIGHT
+                x1n = max(0.0, min(1.0, x1n))
+                y1n = max(0.0, min(1.0, y1n))
+                wn  = max(0.0, min(1.0, wn))
+                hn  = max(0.0, min(1.0, hn))
+                prompt_req["bounding_boxes"] = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
+                prompt_req["bounding_box_labels"] = torch.tensor([1], dtype=torch.int32)
+                
+            print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
+            if has_text:
+                print(f"[SAM3 Debug] Text prompt: {text_prompt}")
+            if has_box:
+                print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
+
             res = self.video_predictor.handle_request(prompt_req)
             print(f"[SAM3 Native] add_prompt returned dict keys: {res.keys()}")
             if "outputs" in res:
@@ -228,11 +264,33 @@ class Sam3NativeManager:
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
+            print("[SAM3 Native] cv2.findContours found no contours.")
             return None
 
         # Return largest contour
         largest_contour = max(contours, key=cv2.contourArea)
-        return largest_contour.reshape(-1, 2).tolist()
+        polygon_pts = largest_contour.reshape(-1, 2).tolist()
+        
+        # --- DEBUG IMAGE SAVING ---
+        try:
+            import time
+            debug_img = cv2.cvtColor(image_array.copy(), cv2.COLOR_RGB2BGR)
+            if has_box:
+                cv2.rectangle(debug_img, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 0, 255), 2)
+                cv2.putText(debug_img, "Prompt Box", (int(box[0]), int(box[1]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            if has_text:
+                cv2.putText(debug_img, f"Text: {text_prompt}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                
+            pts = np.array(polygon_pts, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(debug_img, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+            
+            dbg_path = os.path.join(tempfile.gettempdir(), f"sam3_debug_{int(time.time()*1000)}.jpg")
+            cv2.imwrite(dbg_path, debug_img)
+            print(f"[SAM3 Debug] Saved debug image to {dbg_path}")
+        except Exception as e:
+            print(f"[SAM3 Debug] Failed to save debug image: {e}")
+            
+        return polygon_pts
 
     def track_video_from_prompt(self, resource_path, start_f, end_f, points=None, labels=None, box=None, text_prompt=None):
         """
@@ -243,6 +301,17 @@ class Sam3NativeManager:
             yield False, "SAM3 Video Predictor not loaded."
             return
             
+        # Close any active preview session to free VRAM and clear state variables
+        if self.current_session_id is not None:
+            try:
+                self.video_predictor.handle_request({"type": "close_session", "session_id": self.current_session_id})
+            except Exception as e:
+                print(f"[SAM3 Native] Failed to close active preview session: {e}")
+            self.current_session_id = None
+            self.current_img_hash = None
+            self.current_box = None
+            self.current_text_prompt = None
+
         try:
             # Start session with CPU offloading to reduce VRAM usage
             response = self.video_predictor.handle_request(
@@ -292,14 +361,20 @@ class Sam3NativeManager:
                 )
                 
             if box:
-                box_rel = abs_to_rel_coords(np.array([box]), W, H, coord_type="box")
-                box_tensor = torch.tensor(box_rel, dtype=torch.float32)
+                # Convert absolute xyxy → normalized xywh for SAM3 API
+                x1n = max(0.0, min(1.0, box[0] / W))
+                y1n = max(0.0, min(1.0, box[1] / H))
+                wn  = max(0.0, min(1.0, (box[2] - box[0]) / W))
+                hn  = max(0.0, min(1.0, (box[3] - box[1]) / H))
+                box_tensor = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
+                box_labels = torch.tensor([1], dtype=torch.int32)
                 self.video_predictor.handle_request(
                     request=dict(
                         type="add_prompt",
                         session_id=session_id,
                         frame_index=start_f,
-                        box=box_tensor,
+                        bounding_boxes=box_tensor,
+                        bounding_box_labels=box_labels,
                         obj_id=obj_id,
                     )
                 )
@@ -387,3 +462,17 @@ class Sam3NativeManager:
             import traceback
             traceback.print_exc()
             yield False, f"SAM3 Native tracking failed: {str(e)}"
+
+    def clear_session(self):
+        """
+        Closes any active session and resets state variables.
+        """
+        if self.video_predictor and self.current_session_id is not None:
+            try:
+                self.video_predictor.handle_request({"type": "close_session", "session_id": self.current_session_id})
+            except Exception as e:
+                print(f"[SAM3 Native] Failed to close session on clear: {e}")
+        self.current_session_id = None
+        self.current_img_hash = None
+        self.current_box = None
+        self.current_text_prompt = None

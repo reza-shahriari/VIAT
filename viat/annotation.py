@@ -93,7 +93,7 @@ class BoundingBox:
     Represents a bounding box annotation with class and attributes.
     """
 
-    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=1.0, segmentation=None):
+    def __init__(self, rect, class_name, attributes=None, color=None, source="manual", score=1.0, segmentation=None, uncertain=False):
         """
         Initialize a bounding box annotation.
 
@@ -107,6 +107,7 @@ class BoundingBox:
             segmentation (list, optional): List of (x, y) pixel tuples for polygon
                 segmentation. When present, the canvas can draw the polygon outline
                 (if show_segmentation is enabled) in addition to the bounding box.
+            uncertain (bool, optional): Indicates if the model was uncertain about the class
         """
         self.rect = rect
         self.class_name = class_name
@@ -117,6 +118,7 @@ class BoundingBox:
         self.verified = source == "manual"  # Auto-verify manual annotations
         self.score = score  # Store confidence score for detections
         self.segmentation = segmentation  # None or list of (x, y) pixel tuples
+        self.uncertain = uncertain  # Indicates if zero-shot classifier was uncertain
 
     def to_dict(self):
         """Convert to a dictionary for serialization"""
@@ -149,6 +151,7 @@ class BoundingBox:
                 if self.segmentation
                 else None
             ),
+            "uncertain": self.uncertain,
         }
 
     @classmethod
@@ -182,8 +185,9 @@ class BoundingBox:
         segmentation = data.get("segmentation", None)
         if segmentation:
             segmentation = [tuple(p) for p in segmentation]
+        uncertain = data.get("uncertain", False)
 
-        bbox = cls(rect, class_name, attributes, color, source, score, segmentation=segmentation)
+        bbox = cls(rect, class_name, attributes, color, source, score, segmentation=segmentation, uncertain=uncertain)
         bbox.verified = data.get("verified", source == "manual")
         bbox.original_source = data.get("original_source", source)
         return bbox
@@ -215,7 +219,7 @@ class BoundingBox:
             new_segmentation = [(x, y) for (x, y) in self.segmentation]
 
         # Return a new BoundingBox with the copied properties
-        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score, segmentation=new_segmentation)
+        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score, segmentation=new_segmentation, uncertain=self.uncertain)
         bbox.verified = self.verified
         bbox.original_source = self.original_source
         return bbox
@@ -526,12 +530,9 @@ class AnnotationManager:
         # Create the bounding box with default class
         current_class = self.canvas.current_class
         bbox = BoundingBox(
-            center_x - width // 2,
-            center_y - height // 2,
-            center_x + width // 2,
-            center_y + height // 2,
+            QRect(center_x - width // 2, center_y - height // 2, width, height),
             current_class,
-            self.canvas.class_colors[current_class],
+            color=self.canvas.class_colors.get(current_class, QColor(255, 0, 0)),
         )
 
         # Add default attributes if class has attribute configuration

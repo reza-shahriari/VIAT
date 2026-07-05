@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
 from viat.widgets.sam_interactive_dock import SAMInteractiveDock
 from viat.widgets.empty_frames_dock import EmptyFramesManagerDock
+from viat.widgets.uncertain_frames_dock import UncertainFramesManagerDock
 from viat.widgets.class_frames_dock import ClassFramesManagerDock
 from viat.widgets.video_manager_dock import VideoManagerDock
 
@@ -235,6 +236,18 @@ class UICreator:
         toggle_class_frames_action.triggered.connect(toggle_class_frames)
         view_menu.addAction(toggle_class_frames_action)
         
+        # Toggle Uncertain Frames Manager
+        toggle_uncertain_frames_action = QAction("Uncertain Frames Manager", self.main_window, checkable=True)
+        toggle_uncertain_frames_action.setChecked(False)
+        def toggle_uncertain_frames(checked):
+            if hasattr(self.main_window, 'uncertain_frames_dock'):
+                self.main_window.uncertain_frames_dock.setVisible(checked)
+                if checked:
+                    if hasattr(self.main_window, 'refresh_uncertain_frames_dock'):
+                        self.main_window.refresh_uncertain_frames_dock()
+        toggle_uncertain_frames_action.triggered.connect(toggle_uncertain_frames)
+        view_menu.addAction(toggle_uncertain_frames_action)
+        
         # Toggle Video Manager
         toggle_video_manager_action = QAction("Video Manager", self.main_window, checkable=True)
         toggle_video_manager_action.setChecked(True)
@@ -276,6 +289,13 @@ class UICreator:
         )
         create_dataset_action.triggered.connect(self.main_window.create_dataset)
         tools_menu.addAction(create_dataset_action)
+        
+        # Zero-Shot Classification Refiner
+        zero_shot_refiner_action = QAction("Zero-Shot Classification Refiner...", self.main_window)
+        zero_shot_refiner_action.setToolTip("Refine bounding boxes with zero-shot classification")
+        if hasattr(self.main_window, "open_zero_shot_refiner_dialog"):
+            zero_shot_refiner_action.triggered.connect(self.main_window.open_zero_shot_refiner_dialog)
+        tools_menu.addAction(zero_shot_refiner_action)
 
         # Add separator
         tools_menu.addSeparator()
@@ -510,6 +530,13 @@ class UICreator:
             Qt.RightDockWidgetArea, self.main_window.class_frames_dock
         )
         self.main_window.class_frames_dock.hide() # Hidden by default
+        
+        # Uncertain Frames Manager dock
+        self.main_window.uncertain_frames_dock = UncertainFramesManagerDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.uncertain_frames_dock
+        )
+        self.main_window.uncertain_frames_dock.hide() # Hidden by default
 
         # Video Manager dock
         self.main_window.video_manager_dock = VideoManagerDock(self.main_window)

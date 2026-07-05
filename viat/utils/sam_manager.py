@@ -2,12 +2,17 @@ import os
 import cv2
 import numpy as np
 
-try:
-    import torch
-    from ultralytics import SAM
-    ULTRALYTICS_AVAILABLE = True
-except ImportError:
-    ULTRALYTICS_AVAILABLE = False
+_ULTRALYTICS_AVAILABLE = None
+
+def check_ultralytics():
+    global _ULTRALYTICS_AVAILABLE
+    if _ULTRALYTICS_AVAILABLE is None:
+        try:
+            import ultralytics
+            _ULTRALYTICS_AVAILABLE = True
+        except ImportError:
+            _ULTRALYTICS_AVAILABLE = False
+    return _ULTRALYTICS_AVAILABLE
 
 
 class SamManager:
@@ -20,14 +25,14 @@ class SamManager:
         self.current_model_type = None
 
     def is_available(self):
-        return ULTRALYTICS_AVAILABLE
+        return check_ultralytics()
 
     def load_model(self, model_type="sam2.1_s.pt"):
         """
         Loads the SAM model.
         Returns (success_bool, message_string).
         """
-        if not ULTRALYTICS_AVAILABLE:
+        if not check_ultralytics():
             return False, "Ultralytics is not installed. Please run: pip install ultralytics"
 
         if self.current_model_type == model_type and self.model is not None:
@@ -54,10 +59,12 @@ class SamManager:
                 old_cwd = os.getcwd()
                 os.chdir(chkp_dir)
                 try:
+                    from ultralytics import SAM
                     self.model = SAM(model_type)
                 finally:
                     os.chdir(old_cwd)
             else:
+                from ultralytics import SAM
                 self.model = SAM(model_path)
                 
             self.current_model_type = model_type
@@ -217,7 +224,7 @@ class SamManager:
         bboxes: list of bounding boxes [[x1, y1, x2, y2], ...] corresponding to objects in the FIRST frame yielded.
         Returns a generator yielding lists of polygons corresponding to the bboxes for each frame.
         """
-        if not ULTRALYTICS_AVAILABLE:
+        if not check_ultralytics():
             yield False, "Ultralytics is not installed."
             return
 
@@ -247,6 +254,8 @@ class SamManager:
                 self.video_predictor_type = model_type
                 
             predictor = self.video_predictor
+            # Force reset inference state to prevent prompt accumulation and crossover
+            predictor.inference_state = {}
                 
             # Predictor requires list or path, not generator
             source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
@@ -303,7 +312,7 @@ class SamManager:
         frame_generator: a Python generator that yields numpy arrays (frames).
         Returns a generator yielding lists of polygons corresponding to the prompts for each frame.
         """
-        if not ULTRALYTICS_AVAILABLE:
+        if not check_ultralytics():
             yield False, "Ultralytics is not installed."
             return
 
@@ -333,6 +342,8 @@ class SamManager:
                 self.video_predictor_type = model_type
                 
             predictor = self.video_predictor
+            # Force reset inference state to prevent prompt accumulation and crossover
+            predictor.inference_state = {}
                 
             kwargs = {'stream': True}
             if points and labels:
@@ -396,3 +407,10 @@ class SamManager:
             import traceback
             traceback.print_exc()
             yield False, f"Tracking failed: {str(e)}"
+
+    def clear_session(self):
+        """
+        Resets the predictor inference state.
+        """
+        if hasattr(self, 'video_predictor') and self.video_predictor is not None:
+            self.video_predictor.inference_state = {}

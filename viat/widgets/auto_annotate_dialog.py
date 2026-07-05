@@ -1,4 +1,4 @@
-﻿from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget, QListWidget, QListWidgetItem, QCheckBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QRadioButton, QPushButton, QButtonGroup, QMessageBox, QSpinBox, QWidget, QListWidget, QListWidgetItem, QCheckBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 from PyQt5.QtCore import Qt
 import re
 
@@ -181,7 +181,8 @@ class AutoAnnotateDialog(QDialog):
             'seg_model': seg_model, 'save_segmentation': self.chk_save_seg.
             isChecked(), 'strategy': 'independent', 'start_frame':
             start_frame, 'end_frame': end_frame, 'threshold': self.
-            threshold_spin.value(), 'dedup_iou': self.dedup_spin.value()}
+            threshold_spin.value(), 'min_score': self.threshold_spin.value() / 100.0,
+            'dedup_iou': self.dedup_spin.value()}
 
     def populate_classes_table(self):
         self.classes_table.setRowCount(0)

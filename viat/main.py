@@ -24,6 +24,7 @@ from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions, logger
 from .widgets.auto_annotate_dialog import AutoAnnotateDialog
+from .widgets.scene_detect_dialog import SceneDetectDialog
 from .utils.zero_shot_manager import ZeroShotManager
 from .tracking.nossort import NOCSORT
 from .tracking.manager import TrackerManager
@@ -139,6 +140,14 @@ class AutoLabelWorker(QThread):
             strategy = self.config.get('strategy', 'independent')
             seg_model = self.config.get('seg_model')
             helper_classes = self.config.get('helper_classes', [])
+            # Also check classes_config for helper entries in case helper_classes
+            # wasn't populated (e.g. config printed before run_auto_label_dataset ran)
+            if not helper_classes:
+                helper_classes = [c for c in self.config.get('classes_config', [])
+                                  if 'helper' in c.get('action', '').lower()]
+            # Determine if we have a SAM3 manager ready for helper refinement
+            _sam3_mgr = self.sam3_native_manager
+            _has_sam3 = _sam3_mgr is not None and _sam3_mgr.is_available() and _sam3_mgr.video_predictor is not None
 
             def calculate_iou(boxA, boxB):
                 xA = max(boxA[0], boxB[0])
@@ -170,46 +179,12 @@ class AutoLabelWorker(QThread):
                             yield f_idx, frame
             if strategy == 'tracking':
                 pass
-            frame_detections = {f_idx: [] for f_idx in range(start_frame, 
-                end_frame + 1)}
-            if helper_classes and seg_model:
-                for f_idx in range(start_frame, end_frame + 1):
-                    existing_anns = self.config.get('existing_annotations_data'
-                        , {}).get(f_idx, [])
-                    for i, ann in enumerate(existing_anns):
-                        matching_configs = [hc for hc in helper_classes if 
-                            ann.class_name == hc['name']]
-                        if matching_configs:
-                            box = [ann.rect.x(), ann.rect.y(), ann.rect.x() +
-                                ann.rect.width(), ann.rect.y() + ann.rect.
-                                height()]
-                            frame_detections[f_idx].append({'box': box,
-                                'class_name': ann.class_name, 'score': 
-                                getattr(ann, 'score', 1.0) if hasattr(ann,
-                                'score') else 1.0, 'original_ann_idx': i,
-                                'is_helper': True, 'helper_configs':
-                                matching_configs})
-            det_models = self.config.get('det_models', [])
-            for model_name in det_models:
-                if self.is_cancelled:
-                    break
-                if model_name == 'existing_annotations':
-                    pass
-                else:
-                    success, _ = self.zero_shot_manager.load_model(model_name)
-                    if success:
-                        self.zero_shot_manager.set_classes(self.config.get(
-                            'classes', []))
-                        for f_idx, frame in get_frame_generator():
-                            if self.is_cancelled:
-                                break
-                            model_dets = self.zero_shot_manager.predict(frame)
-                            for det in model_dets:
-                                det['is_helper'] = False
-                            frame_detections[f_idx].extend(model_dets)
+            frame_detections = {f_idx: [] for f_idx in range(start_frame, end_frame + 1)}
             min_score = self.config.get('min_score', 0.05)
             dedup_iou_thresh = self.config.get('dedup_iou', 0.7)
             classes_config = self.config.get('classes_config', [])
+            det_models = self.config.get('det_models', [])
+
             dedup_rules = {}
             for c in classes_config:
                 if c['action'] == 'Detect (Zero-Shot)':
@@ -217,22 +192,116 @@ class AutoLabelWorker(QThread):
                     if rule == '*':
                         dedup_rules[c['name']] = '*'
                     elif rule:
-                        dedup_rules[c['name']] = [x.strip() for x in rule.
-                            split(',')]
+                        dedup_rules[c['name']] = [x.strip() for x in rule.split(',')]
                     else:
                         dedup_rules[c['name']] = [c['name'].lower()]
-            for f_idx in range(start_frame, end_frame + 1):
-                existing_anns = self.config.get('existing_annotations_data', {}
-                    ).get(f_idx, [])
-                helpers = [d for d in frame_detections[f_idx] if d.get(
-                    'is_helper')]
-                detected = [d for d in frame_detections[f_idx] if not d.get
-                    ('is_helper') and d['score'] >= min_score]
-                detected = apply_nms(detected, iou_threshold=0.5,
-                    class_agnostic=True, class_priority=self.config.get(
-                    'classes', []))
+
+            # Build detect prompts once (text labels to search for with zero-shot models).
+            # Use extract_prompt if set, otherwise class name.
+            # Only include Detect-action classes; pure Helper classes are excluded.
+            detect_prompts = []
+            for _c in classes_config:
+                if isinstance(_c, dict):
+                    action = _c.get('action', '')
+                    if 'detect' in action.lower() or not action:
+                        prompt = _c.get('extract_prompt', '').strip() or _c.get('name', '').strip()
+                        if prompt:
+                            detect_prompts.append(prompt)
+                elif isinstance(_c, str) and _c.strip():
+                    detect_prompts.append(_c.strip())
+
+            processed_count = 0
+            for f_idx, frame in get_frame_generator():
+                if self.is_cancelled:
+                    break
+                self.frame_started.emit(f_idx)
+                
+                current_detections = []
+
+                # --- Helper class refinement (SAM3-based) ---
+                # Activates when helper_classes exist AND a SAM3 manager is ready.
+                # Does NOT require seg_model to be set.
+                _use_helper = bool(helper_classes) and (_has_sam3 or (seg_model and 'sam3' in (seg_model or '').lower()))
+                if _use_helper:
+                    existing_anns = self.config.get('existing_annotations_data', {}).get(f_idx, [])
+                    for i, ann in enumerate(existing_anns):
+                        matching_configs = [hc for hc in helper_classes if ann.class_name == hc['name']]
+                        if matching_configs:
+                            box = [ann.rect.x(), ann.rect.y(),
+                                   ann.rect.x() + ann.rect.width(),
+                                   ann.rect.y() + ann.rect.height()]
+                            current_detections.append({
+                                'box': box,
+                                'class_name': ann.class_name,
+                                'score': 1.0,
+                                'original_ann_idx': i,
+                                'is_helper': True,
+                                'helper_configs': matching_configs
+                            })
+
+                for model_name in det_models:
+                    if self.is_cancelled:
+                        break
+                    if model_name == 'existing_annotations':
+                        # Load existing frame annotations as detections to be
+                        # refined by the seg_model (SAM3 / SAM2).
+                        # If classes_config has Detect/Helper entries, only load
+                        # those classes; otherwise load ALL existing annotations.
+                        refine_class_filter = set()
+                        for _c in classes_config:
+                            if _c.get('action', '') not in ('Ignore', 'Remove Labels'):
+                                refine_class_filter.add(_c['name'])
+                        ex_anns = self.config.get('existing_annotations_data', {}).get(f_idx, [])
+                        for i, ann in enumerate(ex_anns):
+                            if refine_class_filter and ann.class_name not in refine_class_filter:
+                                continue
+                            b = [ann.rect.x(), ann.rect.y(),
+                                 ann.rect.x() + ann.rect.width(),
+                                 ann.rect.y() + ann.rect.height()]
+                            # Guard: skip zero-area boxes (bad QRect rounding)
+                            if b[2] <= b[0] or b[3] <= b[1]:
+                                # Try float rect
+                                try:
+                                    rf = ann.rect
+                                    b = [rf.x(), rf.y(),
+                                         rf.x() + rf.width(),
+                                         rf.y() + rf.height()]
+                                except Exception:
+                                    pass
+                            if b[2] > b[0] and b[3] > b[1]:
+                                current_detections.append({
+                                    'box': [float(v) for v in b],
+                                    'class_name': ann.class_name,
+                                    'score': 1.0,
+                                    'original_ann_idx': i,
+                                    'is_helper': False,  # SAM3 refines in-place
+                                    'is_existing': True,
+                                })
+                        continue  # don't try to load as a zero-shot model
+                    # Skip zero-shot models when there are no detect-action classes
+                    if not detect_prompts:
+                        continue
+                    success, _ = self.zero_shot_manager.load_model(model_name)
+                    if success:
+                        self.zero_shot_manager.set_classes(detect_prompts)
+                        model_dets = self.zero_shot_manager.predict(frame)
+                        for det in model_dets:
+                            det['is_helper'] = False
+                        current_detections.extend(model_dets)
+
+                existing_anns = self.config.get('existing_annotations_data', {}).get(f_idx, [])
+                helpers = [d for d in current_detections if d.get('is_helper')]
+                detected = [d for d in current_detections if not d.get('is_helper') and d.get('score', 1.0) >= min_score]
+                detected = apply_nms(detected, iou_threshold=0.5, class_agnostic=True, class_priority=self.config.get('classes', []))
+                
                 filtered_detected = []
                 for d in detected:
+                    # is_existing detections are existing annotation boxes being
+                    # refined by SAM3 - they naturally have IOU ~1.0 with originals
+                    # and must bypass dedup so SAM3 can process them.
+                    if d.get('is_existing'):
+                        filtered_detected.append(d)
+                        continue
                     is_duplicate = False
                     c_name = d['class_name']
                     rule = dedup_rules.get(c_name, [c_name.lower()])
@@ -245,84 +314,109 @@ class AutoLabelWorker(QThread):
                             should_check = True
                         if should_check:
                             boxA = d['box']
-                            boxB = [ann.rect.x(), ann.rect.y(), ann.rect.x(
-                                ) + ann.rect.width(), ann.rect.y() + ann.
-                                rect.height()]
+                            boxB = [ann.rect.x(), ann.rect.y(), ann.rect.x() + ann.rect.width(), ann.rect.y() + ann.rect.height()]
                             iou = calculate_iou(boxA, boxB)
                             if iou > dedup_iou_thresh:
                                 is_duplicate = True
                                 break
                     if not is_duplicate:
                         filtered_detected.append(d)
-                frame_detections[f_idx] = helpers + filtered_detected
-            processed_count = 0
-            for f_idx, frame in get_frame_generator():
-                if self.is_cancelled:
-                    break
-                self.frame_started.emit(f_idx)
-                detections = frame_detections[f_idx]
+                
+                final_detections = helpers + filtered_detected
                 frame_anns = []
-                for det in detections:
+                
+                for det in final_detections:
                     box = det['box']
                     c_name = det['class_name']
                     score = det['score']
                     polygon = det.get('segmentation')
                     is_helper = det.get('is_helper', False)
-                    if not polygon and seg_model:
+                    
+                    if not polygon:
                         if is_helper:
+                            # Helper refinement: use SAM3 native with box prompt first,
+                            # then optionally text prompt. Send box and text SEPARATELY
+                            # because combining them in one add_prompt call can produce
+                            # empty masks in some SAM3 versions.
                             matching_configs = det.get('helper_configs', [])
                             success_polygon = None
-                            if ('sam3' in seg_model.lower() and self.
-                                sam3_native_manager and self.
-                                sam3_native_manager.is_available()):
-                                frame_rgb = cv2.cvtColor(frame, cv2.
-                                    COLOR_BGR2RGB)
-                                import numpy as np
+                            if _has_sam3:
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                                 for hc in matching_configs:
-                                    extract_prompt = hc.get('extract_prompt',
-                                        '')
-                                    ignore_prompt = hc.get('ignore_prompt', '')
-                                    rename_to = hc.get('rename_to', '')
-                                    combined_text = extract_prompt
-                                    if ignore_prompt:
-                                        combined_text += (
-                                            f', but not {ignore_prompt}')
-                                    polygon_mask = (self.
-                                        sam3_native_manager.
-                                        predict_mask_from_prompt(frame_rgb,
-                                        box=box, text_prompt=combined_text))
+                                    extract_prompt = hc.get('extract_prompt', '').strip()
+                                    ignore_prompt = hc.get('ignore_prompt', '').strip()
+                                    rename_to = hc.get('rename_to', '').strip()
+                                    
+                                    final_text_prompt = extract_prompt
+                                    if extract_prompt and ignore_prompt:
+                                        final_text_prompt = f"{extract_prompt}, but not {ignore_prompt}"
+                                        
+                                    # Try box + text first
+                                    polygon_mask = _sam3_mgr.predict_mask_from_prompt(
+                                        frame_rgb,
+                                        box=box,
+                                        text_prompt=final_text_prompt if final_text_prompt else None
+                                    )
                                     if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
                                         success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
                                         if rename_to:
                                             c_name = rename_to
                                         break
-                            if (not success_polygon and seg_model and 
-                                'sam3' not in seg_model.lower()):
-                                success_polygon = (self.sam_manager.
-                                    predict_mask_from_box(frame, box))
+                                    elif final_text_prompt:
+                                        # Fallback: box alone without text
+                                        polygon_mask = _sam3_mgr.predict_mask_from_prompt(
+                                            frame_rgb, box=box
+                                        )
+                                        if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
+                                            success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
+                                            if rename_to:
+                                                c_name = rename_to
+                                            break
+                            elif seg_model and 'sam3' in (seg_model or '').lower() and self.sam3_native_manager:
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                for hc in matching_configs:
+                                    extract_prompt = hc.get('extract_prompt', '').strip()
+                                    ignore_prompt = hc.get('ignore_prompt', '').strip()
+                                    rename_to = hc.get('rename_to', '').strip()
+                                    
+                                    final_text_prompt = extract_prompt
+                                    if extract_prompt and ignore_prompt:
+                                        final_text_prompt = f"{extract_prompt}, but not {ignore_prompt}"
+                                        
+                                    polygon_mask = self.sam3_native_manager.predict_mask_from_prompt(
+                                        frame_rgb, box=box,
+                                        text_prompt=final_text_prompt if final_text_prompt else None
+                                    )
+                                    if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
+                                        success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
+                                        if rename_to:
+                                            c_name = rename_to
+                                        break
+                            elif seg_model and self.sam_manager:
+                                success_polygon = self.sam_manager.predict_mask_from_box(frame, box)
                             polygon = success_polygon
-                        elif 'sam3' in seg_model.lower(
-                            ) and self.sam3_native_manager and self.sam3_native_manager.is_available(
-                            ):
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            import numpy as np
-                            polygon_mask = (self.sam3_native_manager.
-                                predict_mask_from_prompt(frame_rgb, box=box,
-                                text_prompt=det.get('prompt', c_name)))
-                            if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
-                                polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
-                        else:
-                            polygon = self.sam_manager.predict_mask_from_box(
-                                frame, box)
+                        elif seg_model:
+                            # Existing annotation refinement (is_existing=True) or
+                            # plain detected box refinement via seg model
+                            if 'sam3' in (seg_model or '').lower() and _has_sam3:
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                # Validate box before sending to SAM3
+                                if box and box[2] > box[0] and box[3] > box[1]:
+                                    polygon_mask = _sam3_mgr.predict_mask_from_prompt(
+                                        frame_rgb, box=box, text_prompt=None
+                                    )
+                                    if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
+                                        polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
+                            else:
+                                polygon = self.sam_manager.predict_mask_from_box(frame, box)
+                            
                         if polygon and len(polygon) > 0:
                             x_coords = [pt[0] for pt in polygon]
                             y_coords = [pt[1] for pt in polygon]
-                            box = [min(x_coords), min(y_coords), max(
-                                x_coords), max(y_coords)]
-                    frame_anns.append({'box': list(box), 'class_name':
-                        c_name, 'score': score, 'segmentation': polygon,
-                        'source': 'refined' if is_helper else 'detected',
-                        'original_ann_idx': det.get('original_ann_idx')})
+                            box = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
+                            
+                    frame_anns.append({'box': list(box), 'class_name': c_name, 'score': score, 'segmentation': polygon, 'source': 'refined' if is_helper else 'detected', 'original_ann_idx': det.get('original_ann_idx')})
+                    
                 self.frame_processed.emit(f_idx, frame_anns)
                 processed_count += 1
                 self.progress_updated.emit(processed_count)
@@ -514,6 +608,7 @@ class VideoAnnotationTool(QMainWindow):
         self.resize(1200, 800)
         self.setup_sam_interactive()
         self.setup_empty_frames_manager()
+        self.setup_uncertain_frames_manager()
         self.setup_class_frames_manager()
         self.setup_video_manager()
         self.setWindowTitle('VIAT - Video Image Annotation Tool')
@@ -537,6 +632,10 @@ class VideoAnnotationTool(QMainWindow):
                 
         if file_menu:
             file_menu.addSeparator()
+            act = file_menu.addAction('Fast Export Video & Next')
+            act.setShortcut('Ctrl+Shift+E')
+            act.triggered.connect(lambda: self.fast_export_video_and_next())
+            
             act = file_menu.addAction('Compare Raya Annotations...')
             act.triggered.connect(lambda: self.compare_raya_annotations())
             
@@ -605,6 +704,8 @@ class VideoAnnotationTool(QMainWindow):
         act = img_menu.addAction('Dataset Integration Wizard (Roadmap)...')
         act.triggered.connect(lambda : self.viat_launch_integration_wizard())
         vid_menu = dataset_menu.addMenu('Video Annotation Operations')
+        act = vid_menu.addAction('Split Video by Scene Cuts...')
+        act.triggered.connect(lambda : self.viat_split_video_scenes())
         act = vid_menu.addAction('Import VIAT JSON Annotations...')
         act.triggered.connect(lambda : self.viat_import_video_json())
         act = vid_menu.addAction('Fix Video Borders (remove/clip labels)...')
@@ -719,7 +820,10 @@ class VideoAnnotationTool(QMainWindow):
                         target_classes=settings.get('target_classes'))
                     if self.current_frame >= self.total_frames:
                         self.current_frame = max(0, self.total_frames - 1)
+                    self.frame_slider.blockSignals(True)
                     self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+                    self.frame_slider.setValue(self.current_frame)
+                    self.frame_slider.blockSignals(False)
                     self.load_current_image()
                     self.update_frame_info()
                     self.update_annotation_list()
@@ -793,6 +897,11 @@ class VideoAnnotationTool(QMainWindow):
                 on_empty_frames_filter_toggled)
             self.empty_frames_dock.zero_shot_requested.connect(self.
                 on_zero_shot_empty_requested)
+
+    def setup_uncertain_frames_manager(self):
+        if hasattr(self, 'uncertain_frames_dock'):
+            self.uncertain_frames_dock.frame_selected.connect(self.on_dock_item_selected)
+            self.uncertain_frames_dock.refresh_requested.connect(self.refresh_uncertain_frames_dock)
                 
     def setup_class_frames_manager(self):
         self.nav_class_filter_active = False
@@ -1048,6 +1157,18 @@ class VideoAnnotationTool(QMainWindow):
 
     def on_empty_frames_filter_toggled(self, checked):
         self.only_show_empty_frames = checked
+
+    def refresh_uncertain_frames_dock(self):
+        if not hasattr(self, 'uncertain_frames_dock'):
+            return
+            
+        uncertain_frames = []
+        for frame_idx, annots in self.frame_annotations.items():
+            if any(getattr(ann, 'uncertain', False) for ann in annots):
+                uncertain_frames.append(frame_idx)
+                
+        uncertain_frames.sort()
+        self.uncertain_frames_dock.update_data(uncertain_frames)
 
     def refresh_empty_frames_dock(self):
         if not hasattr(self, 'empty_frames_dock'):
@@ -1336,6 +1457,19 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.sam_prompt_labels = []
         self.canvas.sam_prompt_box = None
         self.sam_interactive_dock.update_status(0, 0, False)
+        
+        # Clear sessions in both managers
+        if hasattr(self, 'sam3_native_manager') and self.sam3_native_manager is not None:
+            try:
+                self.sam3_native_manager.clear_session()
+            except Exception as e:
+                print(f"Failed to clear SAM3 native session: {e}")
+        if hasattr(self, 'sam_manager') and self.sam_manager is not None:
+            try:
+                self.sam_manager.clear_session()
+            except Exception as e:
+                print(f"Failed to clear SAM session: {e}")
+                
         self.canvas.update()
 
     def on_sam_preview_requested(self):
@@ -1390,20 +1524,19 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if not hasattr(self, 'image_files') or not self.image_files:
                 return
-            
-            if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
-                current_vid = None
-                for vid_name, indices in self.video_groups.items():
-                    if self.current_frame in indices:
-                        current_vid = vid_name
-                        break
-                if current_vid:
-                    indices = self.video_groups[current_vid]
-                    start_f = indices[start_f] if start_f < len(indices) else indices[-1]
-                    end_f = indices[end_f] if end_f < len(indices) else indices[-1]
-        elif not hasattr(self, 'cap') or not self.cap or not self.cap.isOpened(
-            ):
+        elif not hasattr(self, 'cap') or not self.cap or not self.cap.isOpened():
             return
+            
+        if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
+            current_vid = None
+            for vid_name, indices in self.video_groups.items():
+                if self.current_frame in indices:
+                    current_vid = vid_name
+                    break
+            if current_vid:
+                indices = self.video_groups[current_vid]
+                start_f = indices[start_f] if start_f < len(indices) else indices[-1]
+                end_f = indices[end_f] if end_f < len(indices) else indices[-1]
         points = [[p.x(), p.y()] for p in self.canvas.sam_prompt_points
             ] if self.canvas.sam_prompt_points else None
         labels = (self.canvas.sam_prompt_labels if self.canvas.
@@ -1832,6 +1965,106 @@ class VideoAnnotationTool(QMainWindow):
             self.load_video_file(filename)
 
     @log_exceptions
+    def fast_export_video_and_next(self):
+        """Fast export to Raya with classes TXT and load next video."""
+        if not hasattr(self, 'video_filename') or not self.video_filename:
+            return
+
+        # 1. Export Raya with classes
+        default_dir = os.path.dirname(self.video_filename)
+        default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
+        export_path = os.path.join(default_dir, default_filename + '.txt')
+
+        from viat.utils.file_operations import export_raya_with_classes_annotations
+        all_annotations = []
+        for frame_num, annotations in self.frame_annotations.items():
+            for annotation in annotations:
+                import copy
+                annotation_copy = copy.copy(annotation)
+                annotation_copy.frame = frame_num
+                all_annotations.append(annotation_copy)
+                
+        if not all_annotations and self.canvas.annotations:
+            all_annotations = self.canvas.annotations
+            
+        classes = list(self.canvas.class_colors.keys())
+        try:
+            export_raya_with_classes_annotations(export_path, all_annotations, classes)
+            self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to fast export: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return
+            
+        # 2. Find next video
+        video_exts = ['.mp4', '.avi', '.mov', '.mkv']
+        all_files = os.listdir(default_dir)
+        video_files = [f for f in all_files if os.path.splitext(f)[1].lower() in video_exts]
+        video_files = natsorted(video_files)
+        
+        current_idx = -1
+        current_basename = os.path.basename(self.video_filename)
+        if current_basename in video_files:
+            current_idx = video_files.index(current_basename)
+            
+        next_video_path = None
+        for i in range(current_idx + 1, len(video_files)):
+            candidate_name = video_files[i]
+            candidate_base = os.path.splitext(candidate_name)[0]
+            candidate_txt = candidate_base + '.txt'
+            if candidate_txt in all_files:
+                continue
+            else:
+                next_video_path = os.path.join(default_dir, candidate_name)
+                break
+                
+        if next_video_path:
+            self.image_dataset_info = None
+            self.is_image_dataset = False
+            self.canvas.annotations = []
+            self.frame_annotations = {}
+            self.current_frame = 0
+            self.frame_hashes = {}
+            self.duplicate_frames_cache = {}
+            self.load_video_file(next_video_path)
+        else:
+            filename, _ = QFileDialog.getOpenFileName(self, 'Open Video', default_dir, 'Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)')
+            if filename:
+                self.image_dataset_info = None
+                self.is_image_dataset = False
+                self.canvas.annotations = []
+                self.frame_annotations = {}
+                self.current_frame = 0
+                self.frame_hashes = {}
+                self.duplicate_frames_cache = {}
+                self.load_video_file(filename)
+
+    @log_exceptions
+    def open_scene_detect_for_video(self):
+        """Open scene detection dialog for the current loaded video."""
+        if not self.video_filename:
+            return
+            
+        dialog = SceneDetectDialog(self, video_path=self.video_filename)
+        if dialog.exec_() == QDialog.Accepted:
+            self.video_mode = True
+            self.custom_video_groups = dialog.video_groups
+            self.custom_single_images = dialog.single_images
+            self.update_video_groups()
+            
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.set_active(True)
+                self.video_manager_dock.chk_video_mode.blockSignals(True)
+                self.video_manager_dock.chk_video_mode.setChecked(True)
+                self.video_manager_dock.chk_video_mode.blockSignals(False)
+                # Select first video cut
+                if self.video_groups:
+                    first_vid = list(self.video_groups.keys())[0]
+                    self.video_manager_dock.select_video(first_vid)
+                    self.on_video_selected(first_vid)
+
+    @log_exceptions
     def load_video_file(self, filename):
         """Load a video file and display the first frame."""
         if self.cap:
@@ -1844,7 +2077,11 @@ class VideoAnnotationTool(QMainWindow):
         self.video_filename = filename
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame = 0
-        self.frame_slider.setMaximum(self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setMinimum(0)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(0)
+        self.frame_slider.blockSignals(False)
         ret, frame = self.cap.read()
         if ret:
             self.canvas.set_frame(frame)
@@ -1877,6 +2114,15 @@ class VideoAnnotationTool(QMainWindow):
             if not hasattr(self, '_loading_from_project'
                 ) or not self._loading_from_project:
                 self.check_for_annotation_files(filename)
+                
+                # reply_cuts = QMessageBox.question(self,
+                #     'Scene Cut Detection',
+                #     "Would you like to automatically detect cuts and enable video mode for this video?\n"
+                #     "(This splits the video into cuts for easier management)",
+                #     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                # if reply_cuts == QMessageBox.Yes:
+                #     QTimer.singleShot(500, self.open_scene_detect_for_video)
+                    
             return True
         else:
             QMessageBox.critical(self, 'Error', 'Could not read video frame!')
@@ -1976,7 +2222,11 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'video_manager_dock'):
             self.video_manager_dock.show()
         self.load_current_image()
-        self.frame_slider.setMaximum(self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setMinimum(0)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(0)
+        self.frame_slider.blockSignals(False)
         self.update_frame_info()
         folder_name = os.path.basename(folder_path)
         self.setWindowTitle(
@@ -2061,9 +2311,11 @@ Would you like to locate it?"""
                 self.class_attributes = self.canvas.class_attributes
                 self.current_frame = min(self.current_frame, max(0, self.
                     total_frames - 1))
+                self.frame_slider.blockSignals(True)
                 self.frame_slider.setMinimum(0)
                 self.frame_slider.setMaximum(max(0, self.total_frames - 1))
                 self.frame_slider.setValue(self.current_frame)
+                self.frame_slider.blockSignals(False)
                 self.load_current_image()
                 self.update_frame_info()
             self._dataset_loader.finishedLoading.connect(apply_project_overlay)
@@ -2383,6 +2635,15 @@ Would you like to load it?"""
                 self.update_frame_display()
         else:
             prev = max(0, self.current_frame - 1)
+            
+            if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
+                current_item = self.video_manager_dock.list_widget.currentItem()
+                if current_item:
+                    current_vid = current_item.text()
+                    indices = self.video_groups.get(current_vid, [])
+                    if indices:
+                        prev = max(indices[0], prev)
+                        
             if self.seek_to_frame(prev):
                 self.update_frame_display()
 
@@ -2431,14 +2692,30 @@ Would you like to load it?"""
             next_frame_number = self.interpolation_manager.get_next_frame(self
                 .current_frame)
         elif self.cap and self.cap.isOpened():
-            next_frame_number = self.current_frame + 1
-            if next_frame_number >= self.total_frames:
-                self.play_timer.stop()
-                self.is_playing = False
-                self.statusBar.showMessage('End of video')
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                self.seek_to_frame(0)
-                return
+            if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
+                current_item = self.video_manager_dock.list_widget.currentItem()
+                if current_item:
+                    current_vid = current_item.text()
+                    indices = self.video_groups.get(current_vid, [])
+                    if indices:
+                        if self.current_frame < indices[-1]:
+                            next_frame_number = self.current_frame + 1
+                        elif self.is_playing:
+                            next_frame_number = indices[0]
+                            self.statusBar.showMessage(f'Looping back to start of {current_vid}')
+                        else:
+                            self.statusBar.showMessage(f'End of {current_vid}')
+                            return
+                            
+            if next_frame_number is None:
+                next_frame_number = self.current_frame + 1
+                if next_frame_number >= self.total_frames:
+                    self.play_timer.stop()
+                    self.is_playing = False
+                    self.statusBar.showMessage('End of video')
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.seek_to_frame(0)
+                    return
         if next_frame_number is not None and self.seek_to_frame(
             next_frame_number):
             self.update_frame_display()
@@ -2491,6 +2768,53 @@ Would you like to load it?"""
             self.video_manager_dock.prev_video_requested.connect(self.on_prev_video_requested)
             self.video_manager_dock.next_video_requested.connect(self.on_next_video_requested)
             self.video_manager_dock.sam_tracking_toggled.connect(self.toggle_sam_interactive_mode)
+            self.video_manager_dock.remove_video_requested.connect(self.remove_current_cut)
+
+    @log_exceptions
+    def remove_current_cut(self):
+        if not getattr(self, 'video_mode', False) or not hasattr(self, 'video_manager_dock'):
+            return
+            
+        current_item = self.video_manager_dock.list_widget.currentItem()
+        if not current_item:
+            return
+            
+        current_vid = current_item.text()
+        if not hasattr(self, 'video_groups') or current_vid not in self.video_groups:
+            return
+            
+        indices = self.video_groups[current_vid]
+        
+        # Move all frames in this cut to removed/
+        result = _viat_move_to_removed(self, indices)
+        
+        # The total frames have changed, so we need to update slider
+        if self.current_frame >= self.total_frames:
+            self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
+        
+        # We need to rebuild video groups because all frame indices have shifted
+        self.update_video_groups()
+        if hasattr(self, 'video_manager_dock'):
+            self.video_manager_dock.set_videos(list(self.video_groups.keys()))
+            
+            # Select another cut
+            row = self.video_manager_dock.list_widget.row(current_item)
+            if self.video_manager_dock.list_widget.count() > 0:
+                new_row = min(row, self.video_manager_dock.list_widget.count() - 1)
+                self.video_manager_dock.list_widget.setCurrentRow(new_row)
+        
+        self.load_current_image()
+        self.update_frame_info()
+        self.update_annotation_list()
+        
+        self.statusBar.showMessage(
+            f"Removed cut {current_vid} ({result['moved_images']} imgs moved to {result['dest_dir']})"
+        )
+        self.update_frame_display()
 
     def on_video_selected(self, video_name):
         if not video_name or video_name not in getattr(self, 'video_groups', {}):
@@ -2560,6 +2884,79 @@ Would you like to load it?"""
             
         if hasattr(self, 'refresh_empty_frames_dock'):
             self.refresh_empty_frames_dock()
+        
+    def open_zero_shot_refiner_dialog(self):
+        from widgets.zero_shot_classification_dialog import ZeroShotClassificationDialog
+        from utils.zero_shot_classifier import ZeroShotClassifierManager
+        
+        dialog = ZeroShotClassificationDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            config = dialog.get_config()
+            
+            manager = ZeroShotClassifierManager()
+            success, msg = manager.load_model(config['model_type'])
+            
+            if not success:
+                QMessageBox.critical(self, "Model Error", msg)
+                return
+                
+            rules_config = manager.load_rules_from_json(config['json_path'])
+            if not rules_config:
+                QMessageBox.critical(self, "JSON Error", "Could not load JSON rules file.")
+                return
+                
+            total_frames = len(self.frame_annotations)
+            if total_frames == 0:
+                QMessageBox.information(self, "Info", "No annotations to refine.")
+                return
+                
+            progress = QProgressDialog("Refining annotations using Zero-Shot Classification...", "Cancel", 0, total_frames, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.show()
+            
+            from PyQt5.QtWidgets import QApplication
+            import cv2
+            
+            frames_processed = 0
+            for frame_idx, annotations in self.frame_annotations.items():
+                if progress.wasCanceled():
+                    break
+                    
+                if not annotations:
+                    frames_processed += 1
+                    progress.setValue(frames_processed)
+                    continue
+                    
+                # Load frame image
+                if frame_idx >= len(self.image_files):
+                    frames_processed += 1
+                    progress.setValue(frames_processed)
+                    continue
+                image_path = self.image_files[frame_idx]
+                image_array = cv2.imread(image_path)
+                
+                if image_array is not None:
+                    manager.refine_annotations(
+                        image_array, 
+                        annotations, 
+                        rules_config, 
+                        min_confidence=config['min_confidence'],
+                        overlap_margin=config['overlap_margin']
+                    )
+                    
+                frames_processed += 1
+                progress.setValue(frames_processed)
+                QApplication.processEvents()
+                
+            progress.setValue(total_frames)
+            
+            self.project_modified = True
+            self.load_current_frame_annotations()
+            self.update_frame_display()
+            self.refresh_uncertain_frames_dock()
+            self.refresh_class_dock()
+            
+            QMessageBox.information(self, "Complete", "Zero-Shot Classification Refiner finished.")
         if hasattr(self, 'refresh_class_frames_dock'):
             self.refresh_class_frames_dock()
 
@@ -3363,8 +3760,10 @@ The application has been reset to its initial state."""
         self.current_frame = 0
         self.total_frames = 0
         self.is_playing = False
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(0)
         self.frame_slider.setMaximum(100)
+        self.frame_slider.blockSignals(False)
         self.frame_label.setText('0/0')
         self.canvas.annotations = []
         self.frame_annotations = {}
@@ -4905,11 +5304,22 @@ Do you want to scan the entire video now for duplicate frames?
             return
         detect_classes = [c['name'] for c in classes_config if c['action'] ==
             'Detect (Zero-Shot)']
+        
+        classes_info = []
+        for c in classes_config:
+            if c['action'] == 'Detect (Zero-Shot)':
+                prompt = c.get('extract_prompt', '').strip()
+                if not prompt:
+                    prompt = c['name']
+                classes_info.append({'name': c['name'], 'prompt': prompt})
+
         helper_classes = [c for c in classes_config if 'Helper' in c['action']]
         remove_classes = [c['name'] for c in classes_config if 'Remove' in
             c['action']]
         config['classes'] = detect_classes
+        config['classes_info'] = classes_info
         config['helper_classes'] = helper_classes
+        config['remove_classes'] = remove_classes
         if remove_classes:
             for f in range(start_frame, end_frame + 1):
                 if f in self.frame_annotations:
@@ -5041,40 +5451,81 @@ Do you want to scan the entire video now for duplicate frames?
                 .frame_annotations[f_idx]):
                 original_ann = self.frame_annotations[f_idx][original_ann_idx]
             if original_ann:
-                orig_box = [original_ann.rect.x(), original_ann.rect.y(), 
-                    original_ann.rect.x() + original_ann.rect.width(), 
-                    original_ann.rect.y() + original_ann.rect.height()]
-                xA = max(box[0], orig_box[0])
-                yA = max(box[1], orig_box[1])
-                xB = min(box[2], orig_box[2])
-                yB = min(box[3], orig_box[3])
-                interArea = max(0, xB - xA) * max(0, yB - yA)
-                boxAArea = (box[2] - box[0]) * (box[3] - box[1])
-                origArea = (orig_box[2] - orig_box[0]) * (orig_box[3] -
-                    orig_box[1])
-                iou = interArea / float(boxAArea + origArea - interArea
-                    ) if boxAArea + origArea - interArea > 0 else 0
-                change_percent = (1.0 - iou) * 100
-                if change_percent > threshold:
-                    original_ann.verified = False
+                # --- Helper refinement with rename (e.g. bm21 -> truck) ---
+                # When the output class name differs from the source annotation
+                # (a rename was configured, e.g. rename_to='truck'),
+                # ALWAYS append a NEW annotation and leave the original UNTOUCHED.
+                is_renamed_helper = (
+                    ann_dict.get('source') == 'refined' and
+                    ann_dict['class_name'] != original_ann.class_name
+                )
+                if is_renamed_helper:
+                    # Keep original annotation (bm21) intact;
+                    # add the renamed result (truck) as a brand-new annotation.
                     default_attributes = {'Size': -1, 'Quality': -1}
                     if hasattr(self, 'get_default_attributes_for_class'):
-                        default_attributes = (self.
-                            get_default_attributes_for_class(ann_dict[
-                            'class_name']))
-                    annotation = BoundingBox(rect=rect, class_name=ann_dict
-                        ['class_name'], attributes=default_attributes,
-                        color=color, source=ann_dict['source'], score=
-                        ann_dict['score'], segmentation=ann_dict[
-                        'segmentation'] if save_seg else None)
+                        default_attributes = self.get_default_attributes_for_class(
+                            ann_dict['class_name'])
+                    new_color = self.canvas.class_colors.get(
+                        ann_dict['class_name'], color)
+                    annotation = BoundingBox(
+                        rect=rect,
+                        class_name=ann_dict['class_name'],
+                        attributes=default_attributes,
+                        color=new_color,
+                        source=ann_dict['source'],
+                        score=ann_dict['score'],
+                        segmentation=ann_dict['segmentation'] if save_seg else None
+                    )
                     annotation.verified = False
                     self.frame_annotations[f_idx].append(annotation)
+                    # Register the new class if needed
+                    if hasattr(self, 'project_classes') and ann_dict['class_name'] not in self.project_classes:
+                        self.project_classes.append(ann_dict['class_name'])
                 else:
-                    original_ann.rect = rect
-                    if ann_dict.get('segmentation'):
-                        original_ann.segmentation = ann_dict['segmentation'
-                            ] if save_seg else None
-                    original_ann.source = ann_dict['source']
+                    # Same-class update: use dedup_iou threshold to decide
+                    # in-place update (high overlap) vs new annotation (low overlap).
+                    # Using dedup_iou (default 0.7) so the behaviour is consistent
+                    # with the user-configured IOU setting, not the change-percent
+                    # threshold which at value=1 would always create a new annotation.
+                    iou_update_thresh = 0.7
+                    if hasattr(self, 'auto_label_worker') and self.auto_label_worker:
+                        iou_update_thresh = self.auto_label_worker.config.get('dedup_iou', 0.7)
+                    orig_box = [original_ann.rect.x(), original_ann.rect.y(),
+                        original_ann.rect.x() + original_ann.rect.width(),
+                        original_ann.rect.y() + original_ann.rect.height()]
+                    xA = max(box[0], orig_box[0])
+                    yA = max(box[1], orig_box[1])
+                    xB = min(box[2], orig_box[2])
+                    yB = min(box[3], orig_box[3])
+                    interArea = max(0, xB - xA) * max(0, yB - yA)
+                    boxAArea = (box[2] - box[0]) * (box[3] - box[1])
+                    origArea = (orig_box[2] - orig_box[0]) * (orig_box[3] - orig_box[1])
+                    iou = interArea / float(boxAArea + origArea - interArea) \
+                        if boxAArea + origArea - interArea > 0 else 0
+                    if iou < iou_update_thresh:
+                        # Low overlap → SAM3 found a meaningfully different region → new annotation
+                        default_attributes = {'Size': -1, 'Quality': -1}
+                        if hasattr(self, 'get_default_attributes_for_class'):
+                            default_attributes = self.get_default_attributes_for_class(
+                                ann_dict['class_name'])
+                        annotation = BoundingBox(
+                            rect=rect,
+                            class_name=ann_dict['class_name'],
+                            attributes=default_attributes,
+                            color=color,
+                            source=ann_dict['source'],
+                            score=ann_dict['score'],
+                            segmentation=ann_dict['segmentation'] if save_seg else None
+                        )
+                        annotation.verified = False
+                        self.frame_annotations[f_idx].append(annotation)
+                    else:
+                        # High overlap → update original in-place (update box + segmentation)
+                        original_ann.rect = rect
+                        if ann_dict.get('segmentation'):
+                            original_ann.segmentation = ann_dict['segmentation'] if save_seg else None
+                        original_ann.source = ann_dict['source']
             else:
                 default_attributes = {'Size': -1, 'Quality': -1}
                 if hasattr(self, 'get_default_attributes_for_class'):
@@ -5487,7 +5938,7 @@ Do you want to scan the entire video now for duplicate frames?
         if event.key() == Qt.Key_P and event.modifiers() & Qt.ControlModifier:
             self.propagate_annotations()
             return
-        if event.key() == Qt.Key_X and event.modifiers() & Qt.ControlModifier:
+        if event.key() == Qt.Key_X and event.modifiers() & Qt.ShiftModifier:
             self.delete_current_frame()
             return
         if event.key() == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
@@ -5546,12 +5997,13 @@ Do you want to scan the entire video now for duplicate frames?
                 self.perform_autosave()
             self.perform_autosave()
 
-    def _viat_ensure_dataset(self):
+    def _viat_ensure_dataset(self, show_warning=True):
         """Return the loaded DatasetInfo or show a warning."""
         info = getattr(self, '_viat_dataset_info', None)
         if info is None or not getattr(self, 'is_image_dataset', False):
-            QMessageBox.warning(self, 'Dataset Operation',
-                'Open an image dataset first (File > Open Image Folder).')
+            if show_warning:
+                QMessageBox.warning(self, 'Dataset Operation',
+                    'Open an image dataset first (File > Open Image Folder).')
             return None
         return info
 
@@ -5582,7 +6034,10 @@ Image + label will be moved on disk (reversible)."""
         result = _viat_remove_bad_frames(self, [self.current_frame])
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5626,7 +6081,10 @@ Image + label will be moved on disk (reversible)."""
         result = _viat_remove_bad_frames(self, frames)
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5851,14 +6309,19 @@ Image + label will be moved on disk (reversible)."""
 
         No confirmation dialog -- the user pressed Shift+X / Ctrl+X intentionally.
         """
-        if not self._viat_ensure_dataset():
+        if not self._viat_ensure_dataset(show_warning=False):
+            # If it's a video file, fallback to deleting the frame
+            self.delete_current_frame()
             return
         if not 0 <= self.current_frame < self.total_frames:
             return
         result = _viat_move_to_removed(self, [self.current_frame])
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5877,7 +6340,10 @@ Image + label will be moved on disk (reversible)."""
         result = _viat_move_to_review_label(self, [self.current_frame])
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5904,7 +6370,10 @@ This may take a moment for large datasets."""
             return
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5932,7 +6401,10 @@ Others are moved to removed/duplicates/."""
             return
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -5998,7 +6470,10 @@ Others are moved to removed/duplicates/."""
             remove_images=remove_images)
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
@@ -6063,6 +6538,79 @@ Others are moved to removed/duplicates/."""
                 'Could not create DATASET_LOG.md')
 
     @log_exceptions
+    def viat_split_video_scenes(self):
+        """Detect scene cuts in the currently open video and split it into separate clips."""
+        if not self.video_filename or self.is_image_dataset:
+            QMessageBox.warning(self, "Split Video", "Please open a video file first.")
+            return
+
+        from PyQt5.QtWidgets import QInputDialog, QFileDialog
+        
+        # Get threshold from user
+        threshold, ok = QInputDialog.getDouble(
+            self, 'Split Video by Scene Cuts',
+            'Enter the cut detection threshold (Adaptive default = 3.0, lower = more cuts):',
+            3.0, 1.0, 100.0, 1
+        )
+        if not ok:
+            return
+
+        # Default session dir
+        base_dir = os.path.dirname(self.video_filename)
+        base_name = os.path.splitext(os.path.basename(self.video_filename))[0]
+        default_session_dir = os.path.join(base_dir, f"{base_name}_clips")
+
+        session_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory for Clips", default_session_dir
+        )
+        if not session_dir:
+            return
+
+        # Prepare to close current video to avoid file lock issues when removing
+        video_path_to_split = self.video_filename
+        
+        # We need to make sure we don't have pending unsaved changes before closing
+        if not self.check_unsaved_changes():
+            return
+            
+        # Close the video
+        if hasattr(self, 'video_manager'):
+            self.video_manager.close_video()
+        else:
+            if self.cap:
+                self.cap.release()
+                self.cap = None
+
+        def split_generator():
+            yield 0, "Detecting scenes and splitting (this may take a while)..."
+            from viat.utils.scene_splitter import split_video_by_scenes
+            # This handles the detection, ffmpeg splitting, and original deletion
+            res_dir, num = split_video_by_scenes(video_path_to_split, session_dir, threshold)
+            yield res_dir, num
+
+        from viat.utils.task_runner import run_task_with_progress
+        
+        try:
+            result = run_task_with_progress(
+                self, "Splitting Video", "Detecting scenes...", 
+                split_generator, maximum=0
+            )
+            
+            if result:
+                res_dir, num = result
+                msg = f"Successfully split video into {num} clips.\nOutput directory: {res_dir}\nOriginal video was removed."
+                QMessageBox.information(self, "Split Video Complete", msg)
+                
+                # Optional: prompt user to open the new clips directory as image dataset or let them do it manually
+                reply = QMessageBox.question(self, "Open Clips", "Would you like to open the output directory as a sequence?",
+                                           QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.open_image_dataset(res_dir)
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to split video:\n{str(e)}")
+
+    @log_exceptions
     def viat_import_video_json(self):
         """Import a VIAT custom JSON annotation file.
 
@@ -6083,7 +6631,10 @@ Others are moved to removed/duplicates/."""
                     max_frame = max(int(k) for k in data.keys() if str(k).
                         isdigit())
                     self.total_frames = max_frame + 1
+                    self.frame_slider.blockSignals(True)
                     self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+                    self.frame_slider.setValue(self.current_frame)
+                    self.frame_slider.blockSignals(False)
             except Exception as e:
                 QMessageBox.warning(self, 'Import JSON',
                     f"""Could not read JSON file:
@@ -6613,7 +7164,10 @@ Continue?"""
             return
         if self.current_frame >= self.total_frames:
             self.current_frame = max(0, self.total_frames - 1)
+        self.frame_slider.blockSignals(True)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
+        self.frame_slider.setValue(self.current_frame)
+        self.frame_slider.blockSignals(False)
         self.load_current_image()
         self.update_frame_info()
         self.update_annotation_list()
