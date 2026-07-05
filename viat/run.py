@@ -1,6 +1,8 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
+print("Starting Video Annotation Tool...")
 # Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
 try:
+    print("Initializing PyTorch environment (this may take a moment)...")
     import torch
 except ImportError:
     pass
@@ -35,6 +37,7 @@ def main():
     )
     window.setWindowIcon(QIcon(icon_path))
     window.show()
+    print("Application UI loaded successfully.")
     sys.exit(app.exec_())
 
 
