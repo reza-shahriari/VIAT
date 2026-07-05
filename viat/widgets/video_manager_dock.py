@@ -1,4 +1,4 @@
-﻿import os
+import os
 from PyQt5.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
     QListWidget, QPushButton, QLabel, QCheckBox
@@ -13,6 +13,7 @@ class VideoManagerDock(QDockWidget):
     prev_video_requested = pyqtSignal()
     next_video_requested = pyqtSignal()
     sam_tracking_toggled = pyqtSignal(bool)
+    remove_video_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__("Video Manager", parent)
@@ -41,6 +42,11 @@ class VideoManagerDock(QDockWidget):
         nav_layout.addWidget(self.btn_next)
         
         layout.addLayout(nav_layout)
+        
+        self.btn_remove = QPushButton("Remove Cut (All frames)")
+        self.btn_remove.clicked.connect(self.remove_video_requested.emit)
+        self.btn_remove.setEnabled(False)
+        layout.addWidget(self.btn_remove)
         
         # Video List
         layout.addWidget(QLabel("Videos:"))
@@ -82,4 +88,5 @@ class VideoManagerDock(QDockWidget):
         self.list_widget.setEnabled(is_active)
         self.btn_prev.setEnabled(is_active)
         self.btn_next.setEnabled(is_active)
+        self.btn_remove.setEnabled(is_active)
         self.btn_sam_track.setEnabled(is_active)
