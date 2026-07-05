@@ -113,6 +113,7 @@ Thumbs.db
 
 checkpoints*
 viat/mobileclip2_b.ts
+viat/mobileclip_blt.ts
 viat/weights/clip/ViT-B-32.pt
 sam3_src*
 
