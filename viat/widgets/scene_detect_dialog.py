@@ -1,4 +1,4 @@
-﻿import cv2
+import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QSpinBox,
@@ -80,12 +80,71 @@ class SceneDetectWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
 
+class VideoSceneDetectWorker(QThread):
+    progress_updated = pyqtSignal(int, int)
+    finished_processing = pyqtSignal(list, list) # video_groups list, single_images list
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, video_path, threshold=27.0, min_scene_len=15):
+        super().__init__()
+        self.video_path = video_path
+        self.threshold = threshold
+        self.min_scene_len = min_scene_len
+        self.is_cancelled = False
+
+    def run(self):
+        try:
+            from scenedetect import open_video, SceneManager
+            from scenedetect.detectors import ContentDetector
+            
+            video = open_video(self.video_path)
+            scene_manager = SceneManager()
+            scene_manager.add_detector(ContentDetector(threshold=self.threshold, min_scene_len=self.min_scene_len))
+            
+            # Start detection
+            scene_manager.detect_scenes(video, show_progress=False)
+            
+            if self.is_cancelled:
+                return
+                
+            scene_list = scene_manager.get_scene_list()
+            
+            video_groups = {}
+            single_images = []
+            
+            if not scene_list:
+                # Get total frames somehow, fallback to 1, usually video_manager has it anyway, but we just want to say scene_1 is whole thing
+                video_groups["AutoScene_1"] = [] # Empty list handled later, or just return empty
+                self.finished_processing.emit([video_groups], [])
+                return
+            
+            scene_idx = 1
+            for i, scene in enumerate(scene_list):
+                start_idx = scene[0].get_frames()
+                end_idx = scene[1].get_frames()
+                
+                length = end_idx - start_idx
+                
+                if length >= 2:
+                    video_groups[f"AutoScene_{scene_idx}"] = list(range(start_idx, end_idx))
+                    scene_idx += 1
+                elif length == 1:
+                    single_images.append(start_idx)
+            
+            self.progress_updated.emit(100, 100)
+            self.finished_processing.emit([video_groups], single_images)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"Error: {str(e)}\n{traceback.format_exc()}")
+
+
 class SceneDetectDialog(QDialog):
-    def __init__(self, parent=None, image_files=None):
+    def __init__(self, parent=None, image_files=None, video_path=None):
         super().__init__(parent)
         self.image_files = image_files or []
+        self.video_path = video_path
         self.video_groups = {}
-        self.single_images = []
+        self.single_images = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -140,15 +199,19 @@ class SceneDetectDialog(QDialog):
         self.worker = None
 
     def start_detection(self):
-        if not self.image_files:
-            QMessageBox.warning(self, "Error", "No images to process.")
+        if not self.image_files and not self.video_path:
+            QMessageBox.warning(self, "Error", "No images or video to process.")
             return
             
         self.btn_start.setEnabled(False)
         self.spin_threshold.setEnabled(False)
         self.spin_min_len.setEnabled(False)
         
-        self.worker = SceneDetectWorker(self.image_files, self.spin_threshold.value(), self.spin_min_len.value())
+        if self.video_path:
+            self.worker = VideoSceneDetectWorker(self.video_path, self.spin_threshold.value(), self.spin_min_len.value())
+        else:
+            self.worker = SceneDetectWorker(self.image_files, self.spin_threshold.value(), self.spin_min_len.value())
+            
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.finished_processing.connect(self.on_finished)
         self.worker.error_occurred.connect(self.on_error)
