@@ -1,4 +1,4 @@
-﻿"""
+"""
 Segmentation video labeling for VIAT.
 
 Workflow:
@@ -249,6 +249,9 @@ class SegmentationVideoLabeler:
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
+                
+            if hasattr(self.app, '_process_frame_metadata'):
+                frame = self.app._process_frame_metadata(frame, frame_num)
 
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             for obj in self.tracked_objects:

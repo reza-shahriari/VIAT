@@ -1229,6 +1229,8 @@ class VideoCanvas(QWidget):
                         # Get current frame
                         ret, frame = self.main_window.cap.read()
                         if ret:
+                            if hasattr(self.main_window, '_process_frame_metadata'):
+                                frame = self.main_window._process_frame_metadata(frame, self.main_window.current_frame)
                             # Move back one frame to get the current frame again
                             self.main_window.cap.set(
                                 cv2.CAP_PROP_POS_FRAMES, self.main_window.current_frame

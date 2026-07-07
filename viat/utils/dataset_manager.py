@@ -1027,7 +1027,16 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
     # For per-image formats: one file per image.
     # For dataset-wide formats (COCO): one file per split.
     import shutil
+    import cv2
     from .label_formats.coco import CocoLabelFormat
+
+    is_video = hasattr(parent, 'video_filename') and parent.video_filename and not getattr(parent, 'is_image_dataset', False)
+    cap = None
+    video_metadata = None
+    frame_sizes = {}
+    if is_video:
+        cap = cv2.VideoCapture(parent.video_filename)
+        video_metadata = getattr(parent, 'video_metadata', None)
 
     written = 0
     total = len(image_files)
@@ -1045,12 +1054,40 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
         os.makedirs(img_dest_dir, exist_ok=True)
         os.makedirs(lbl_dest_dir, exist_ok=True)
 
-        # Copy the image
+        # Copy the image (or extract from video)
         img_name = os.path.basename(img_path)
-        try:
-            shutil.copy2(img_path, os.path.join(img_dest_dir, img_name))
-        except OSError:
-            pass
+        img_size = None
+        if is_video:
+            ret = False
+            if cap and cap.isOpened():
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ret, frame = cap.read()
+            if ret and frame is not None:
+                # Crop if video metadata has resize_mode == "pad"
+                if video_metadata and video_metadata.get("resize_mode") == "pad":
+                    sizes = video_metadata.get("original_sizes", {})
+                    orig_size = sizes.get(str(i))
+                    if orig_size and len(orig_size) == 2:
+                        orig_w, orig_h = orig_size
+                        frame = frame[:orig_h, :orig_w]
+                
+                # Normalize resolution if config has video_width/video_height specified
+                video_width = config.get("video_width")
+                video_height = config.get("video_height")
+                if video_width and video_height:
+                    frame = cv2.resize(frame, (video_width, video_height), interpolation=cv2.INTER_AREA)
+
+                img_size = (frame.shape[1], frame.shape[0])
+                cv2.imwrite(os.path.join(img_dest_dir, img_name), frame)
+        else:
+            try:
+                shutil.copy2(img_path, os.path.join(img_dest_dir, img_name))
+            except OSError:
+                pass
+            img_size = _image_size(img_path)
+
+        if img_size is not None:
+            frame_sizes[i] = img_size
 
         # Get the boxes for this frame
         anns = frame_annotations.get(i, [])
@@ -1083,7 +1120,6 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
 
         # Write the label file
         try:
-            img_size = _image_size(img_path)
             if img_size is None:
                 continue
             content = fmt.dump(boxes, img_size, classes)
@@ -1107,7 +1143,7 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
             for i, img_path in enumerate(image_files):
                 if split_of[i] != split:
                     continue
-                img_size = _image_size(img_path) or (0, 0)
+                img_size = frame_sizes.get(i) or _image_size(img_path) or (0, 0)
                 img_name = os.path.basename(img_path)
                 images_json.append({
                     "id": i, "file_name": img_name,
@@ -1141,6 +1177,9 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
             with open(out_json, "w", encoding="utf-8") as f:
                 json.dump(coco, f, indent=2)
             written += 1
+
+    if cap is not None:
+        cap.release()
 
     # Also write classes.txt / data.yaml so the export is a valid dataset
     _write_class_files(out_dir, classes)

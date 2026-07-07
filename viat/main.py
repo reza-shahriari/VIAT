@@ -554,6 +554,7 @@ class VideoAnnotationTool(QMainWindow):
         self.is_image_dataset = False
         self.image_files = []
         self.deleted_frames = set()
+        self.deleted_annotations = {}
         self.labeler_analytics = {
             "prompts": [],
             "tool_usage": {
@@ -761,8 +762,8 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def viat_launch_integration_wizard(self):
         """Launches the Dataset Integration Roadmap Setup."""
+        from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
         from widgets.dataset_wizard_dialog import DatasetWizardDialog
-        from PyQt5.QtWidgets import QDialog, QMessageBox
         self.update_frame_annotations()
         if getattr(self, 'is_image_dataset', False) and hasattr(self,
             '_viat_dataset_info'):
@@ -775,7 +776,6 @@ class VideoAnnotationTool(QMainWindow):
             if reply == QMessageBox.Yes:
                 from viat.utils.dataset_manager import update_dataset_labels
                 self.statusBar.showMessage('Updating dataset labels...')
-                from PyQt5.QtWidgets import QApplication
                 QApplication.processEvents()
                 updated, errors = update_dataset_labels(self.
                     _viat_dataset_info, self.frame_annotations, self.
@@ -791,6 +791,79 @@ class VideoAnnotationTool(QMainWindow):
             settings = dialog.settings
             if not settings:
                 return
+                
+            if dialog.is_video_mode:
+                # Video integration execution logic
+                import tempfile
+                import shutil
+                from viat.utils.dataset_manager import export_dataset
+                from viat.utils.dataset_merger import merge_dataset_into_target
+                
+                temp_dir = tempfile.mkdtemp(prefix="viat_video_integration_")
+                try:
+                    # Config for export
+                    export_config = {
+                        "output_dir": temp_dir,
+                        "format": "yolo",
+                        "make_splits": False,
+                        "valid_pct": 0,
+                        "video_width": 1920 if settings.get("normalize_res") else None,
+                        "video_height": 1080 if settings.get("normalize_res") else None,
+                        "resize_mode": "pad" if settings.get("remove_padding") else None,
+                        "include_classes": True
+                    }
+                    
+                    # Virtual image files
+                    video_base = os.path.splitext(os.path.basename(self.video_filename))[0]
+                    image_files = [f"{video_base}_frame_{i:06d}.jpg" for i in range(self.total_frames)]
+                    
+                    # Extract frames
+                    from viat.utils.task_runner import run_task_with_progress
+                    run_task_with_progress(self, 'Exporting Video Frames',
+                        'Extracting frames for integration...', export_dataset, self, export_config,
+                        image_files, self.frame_annotations, self.canvas.class_colors,
+                        maximum=100)
+                        
+                    # Merge temp dataset into main target dataset
+                    self.statusBar.showMessage('Merging video frames into target dataset...')
+                    QApplication.processEvents()
+                    
+                    result = merge_dataset_into_target(
+                        self,
+                        source_folder=temp_dir,
+                        target_folder=settings['main_dataset'],
+                        dataset_name=video_base,
+                        split_mode=settings.get('split_mode', 'keep'),
+                        random_valid_pct=settings.get('valid_pct', 10),
+                        class_mapping=settings['class_mapping'],
+                        progress_callback=lambda cur, tot, msg: self.statusBar.showMessage(f'Merging {cur}/{tot}: {msg}', 0)
+                    )
+                    
+                    if result.get('error'):
+                        QMessageBox.warning(self, 'Merge Error', result['error'])
+                    else:
+                        msg = f"""Video integration complete:
+  Frames integrated: {result['images_copied']}
+  Labels integrated: {result['labels_copied']}
+  Classes mapped: {result['classes_mapped']}
+  Target Dataset: {settings['main_dataset']}"""
+                        QMessageBox.information(self, 'Integration Complete', msg)
+                        
+                        reply = QMessageBox.question(self, 'Open Dataset',
+                            'Would you like to open the main dataset folder now?'
+                            , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                        if reply == QMessageBox.Yes:
+                            self.load_image_dataset_path(settings['main_dataset'])
+                except Exception as e:
+                    QMessageBox.warning(self, 'Integration Error', f'Failed during video integration: {str(e)}')
+                finally:
+                    # Clean up
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                return
+
             try:
                 from managers.dataset_integration import DatasetIntegrationManager
                 manager = DatasetIntegrationManager(self)
@@ -1989,7 +2062,8 @@ class VideoAnnotationTool(QMainWindow):
             
         classes = list(self.canvas.class_colors.keys())
         try:
-            export_raya_with_classes_annotations(export_path, all_annotations, classes)
+            deleted = getattr(self, 'deleted_frames', set())
+            export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted)
             self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to fast export: {str(e)}')
@@ -2075,6 +2149,18 @@ class VideoAnnotationTool(QMainWindow):
             self.cap = None
             return False
         self.video_filename = filename
+        
+        # Check for metadata file
+        self.video_metadata = None
+        metadata_path = os.path.join(os.path.dirname(filename), "dataset_video_metadata.json")
+        if os.path.exists(metadata_path):
+            try:
+                import json
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    self.video_metadata = json.load(f)
+            except Exception:
+                pass
+
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame = 0
         self.frame_slider.blockSignals(True)
@@ -2084,6 +2170,7 @@ class VideoAnnotationTool(QMainWindow):
         self.frame_slider.blockSignals(False)
         ret, frame = self.cap.read()
         if ret:
+            frame = self._process_frame_metadata(frame, 0)
             self.canvas.set_frame(frame)
             self.update_frame_info()
             self.statusBar.showMessage(
@@ -2115,20 +2202,22 @@ class VideoAnnotationTool(QMainWindow):
                 ) or not self._loading_from_project:
                 self.check_for_annotation_files(filename)
                 
-                # reply_cuts = QMessageBox.question(self,
-                #     'Scene Cut Detection',
-                #     "Would you like to automatically detect cuts and enable video mode for this video?\n"
-                #     "(This splits the video into cuts for easier management)",
-                #     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                # if reply_cuts == QMessageBox.Yes:
-                #     QTimer.singleShot(500, self.open_scene_detect_for_video)
-                    
             return True
         else:
             QMessageBox.critical(self, 'Error', 'Could not read video frame!')
             self.cap.release()
             self.cap = None
             return False
+
+    def _process_frame_metadata(self, frame, frame_num):
+        """Process the frame according to loaded metadata (e.g., cropping padded regions)."""
+        if hasattr(self, 'video_metadata') and self.video_metadata and self.video_metadata.get("resize_mode") == "pad":
+            sizes = self.video_metadata.get("original_sizes", {})
+            orig_size = sizes.get(str(frame_num))
+            if orig_size and len(orig_size) == 2:
+                orig_w, orig_h = orig_size
+                frame = frame[:orig_h, :orig_w]
+        return frame
 
     @log_exceptions
     def load_video_from_project(self, video_path, current_frame):
@@ -2142,6 +2231,7 @@ class VideoAnnotationTool(QMainWindow):
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
                 ret, frame = self.cap.read()
                 if ret:
+                    frame = self._process_frame_metadata(frame, current_frame)
                     self.current_frame = current_frame
                     self.canvas.set_frame(frame)
                     self.update_frame_info()
@@ -2565,6 +2655,19 @@ Would you like to load it?"""
             frame_number = 0
         elif frame_number >= self.total_frames:
             frame_number = self.total_frames - 1
+            
+        if not self._should_show_frame(frame_number):
+            nxt = frame_number + 1
+            while nxt < self.total_frames and not self._should_show_frame(nxt):
+                nxt += 1
+            if nxt < self.total_frames:
+                frame_number = nxt
+            else:
+                prv = frame_number - 1
+                while prv >= 0 and not self._should_show_frame(prv):
+                    prv -= 1
+                if prv >= 0:
+                    frame_number = prv
         if frame_number == self.current_frame + 1:
             ret, frame = self.cap.read()
         else:
@@ -2572,6 +2675,7 @@ Would you like to load it?"""
             ret, frame = self.cap.read()
         if not ret:
             return False
+        frame = self._process_frame_metadata(frame, frame_number)
         self.current_frame = frame_number
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(self.current_frame)
@@ -2583,6 +2687,9 @@ Would you like to load it?"""
         return True
 
     def _should_show_frame(self, frame_idx):
+        if hasattr(self, 'deleted_frames') and frame_idx in self.deleted_frames:
+            return False
+            
         if getattr(self, 'only_show_empty_frames', False):
             if self.frame_annotations.get(frame_idx, []):
                 return False
@@ -2634,18 +2741,22 @@ Would you like to load it?"""
                 self.load_current_frame_annotations()
                 self.update_frame_display()
         else:
-            prev = max(0, self.current_frame - 1)
-            
+            prev = self.current_frame - 1
+            min_idx = 0
             if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
                 current_item = self.video_manager_dock.list_widget.currentItem()
                 if current_item:
                     current_vid = current_item.text()
                     indices = self.video_groups.get(current_vid, [])
                     if indices:
-                        prev = max(indices[0], prev)
-                        
-            if self.seek_to_frame(prev):
-                self.update_frame_display()
+                        min_idx = indices[0]
+            
+            while prev >= min_idx and not self._should_show_frame(prev):
+                prev -= 1
+                
+            if prev >= min_idx:
+                if self.seek_to_frame(prev):
+                    self.update_frame_display()
 
     @log_exceptions
     def next_frame(self):
@@ -2709,12 +2820,21 @@ Would you like to load it?"""
                             
             if next_frame_number is None:
                 next_frame_number = self.current_frame + 1
+                while next_frame_number < self.total_frames and not self._should_show_frame(next_frame_number):
+                    next_frame_number += 1
+                    
                 if next_frame_number >= self.total_frames:
                     self.play_timer.stop()
                     self.is_playing = False
                     self.statusBar.showMessage('End of video')
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.seek_to_frame(0)
+                    first_valid = 0
+                    while first_valid < self.total_frames and not self._should_show_frame(first_valid):
+                        first_valid += 1
+                    if first_valid < self.total_frames:
+                        self.seek_to_frame(first_valid)
+                    else:
+                        self.seek_to_frame(0)
                     return
         if next_frame_number is not None and self.seek_to_frame(
             next_frame_number):
@@ -2954,7 +3074,7 @@ Would you like to load it?"""
             self.load_current_frame_annotations()
             self.update_frame_display()
             self.refresh_uncertain_frames_dock()
-            self.refresh_class_dock()
+            self.refresh_class_ui()
             
             QMessageBox.information(self, "Complete", "Zero-Shot Classification Refiner finished.")
         if hasattr(self, 'refresh_class_frames_dock'):
@@ -3161,10 +3281,23 @@ Would you like to load it?"""
         self.annotation_manager.edit_annotation(annotation, focus_first_field)
 
     @log_exceptions
+    def track_deleted_annotation(self, annotation):
+        """Track a deleted loaded/imported/detected annotation to keep it in the project file."""
+        if hasattr(self, 'deleted_annotations'):
+            orig_src = getattr(annotation, 'original_source', getattr(annotation, 'source', 'manual'))
+            if orig_src in ('loaded', 'imported', 'detected'):
+                frame_num = self.current_frame
+                if frame_num not in self.deleted_annotations:
+                    self.deleted_annotations[frame_num] = []
+                if annotation not in self.deleted_annotations[frame_num]:
+                    self.deleted_annotations[frame_num].append(annotation)
+
+    @log_exceptions
     def delete_annotation(self, annotation):
         """Delete the specified annotation."""
         if hasattr(self, 'canvas') and annotation in self.canvas.annotations:
             self.save_undo_state()
+            self.track_deleted_annotation(annotation)
             if self.annotation_manager.delete_annotation(annotation):
                 self.project_modified = True
                 self.update_annotation_list()
@@ -3180,6 +3313,7 @@ Would you like to load it?"""
         annotations_to_delete = self.canvas.selected_annotations.copy()
         for annotation in annotations_to_delete:
             if annotation in self.canvas.annotations:
+                self.track_deleted_annotation(annotation)
                 self.canvas.annotations.remove(annotation)
         self.canvas.selected_annotation = None
         self.canvas.selected_annotations = []
@@ -3197,6 +3331,7 @@ Would you like to load it?"""
         if hasattr(self.canvas, 'selected_annotation'
             ) and self.canvas.selected_annotation:
             self.save_undo_state()
+            self.track_deleted_annotation(self.canvas.selected_annotation)
             self.canvas.annotations.remove(self.canvas.selected_annotation)
             self.canvas.selected_annotation = None
             self.canvas.update()
@@ -3527,6 +3662,7 @@ Would you like to load it?"""
             from viat.utils.file_operations import save_project_generator
             frame_annotations_copy = {k: list(v) for k, v in self.
                 frame_annotations.items()}
+            deleted_annotations_copy = {k: list(v) for k, v in self.deleted_annotations.items()} if hasattr(self, 'deleted_annotations') else None
             class_colors_copy = dict(self.canvas.class_colors)
             annotations_copy = list(self.canvas.annotations)
             result = run_task_with_progress(self, 'Saving Project',
@@ -3549,7 +3685,7 @@ Would you like to load it?"""
                 ._annotations_imported) if hasattr(self,
                 '_annotations_imported') else [], class_thresholds=dict(
                 self.class_thresholds) if getattr(self, 'class_thresholds',
-                None) is not None else {}, deleted_frames=self.deleted_frames if hasattr(self, 'deleted_frames') else set(), labeler_analytics=self.labeler_analytics if hasattr(self, 'labeler_analytics') else None, maximum=100)
+                None) is not None else {}, deleted_frames=self.deleted_frames if hasattr(self, 'deleted_frames') else set(), labeler_analytics=self.labeler_analytics if hasattr(self, 'labeler_analytics') else None, deleted_annotations=deleted_annotations_copy, maximum=100)
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(
@@ -3614,12 +3750,13 @@ The application has been reset to its initial state."""
                 duplicate_frames_cache, image_dataset_info,
                 tracking_mode_enabled, interpolation_mode_active,
                 verification_mode_enabled, annotations_imported_list,
-                class_thresholds) = load_project(filename, BoundingBox)
+                class_thresholds, deleted_annotations) = load_project(filename, BoundingBox)
             self.canvas.annotations = annotations
             self.class_colors = class_colors
             self.canvas.class_colors = class_colors
             self.current_frame = current_frame
             self.frame_annotations = frame_annotations
+            self.deleted_annotations = deleted_annotations
             self.class_attributes = class_attributes
             self.canvas.class_attributes = self.class_attributes
             self.canvas.class_thresholds = self.class_thresholds
@@ -3986,12 +4123,14 @@ First error: {errors[0]}"""
                     if not all_annotations and self.canvas.annotations:
                         all_annotations = self.canvas.annotations
                     classes = list(self.canvas.class_colors.keys())
+                    deleted = getattr(self, 'deleted_frames', set())
                     export_raya_with_classes_annotations(filename,
-                        all_annotations, classes)
+                        all_annotations, classes, deleted_frames=deleted)
                 else:
+                    deleted = getattr(self, 'deleted_frames', set())
                     export_standard_annotations(filename, self.
                         frame_annotations, self.canvas.annotations,
-                        export_format, image_width, image_height)
+                        export_format, image_width, image_height, deleted_frames=deleted)
                 self.statusBar.showMessage(
                     f'Annotations exported to {os.path.basename(filename)}')
             except Exception as e:
@@ -4003,44 +4142,77 @@ First error: {errors[0]}"""
     @log_exceptions
     def export_image_dataset(self):
         """Export the current image dataset with advanced options."""
-        if not hasattr(self, 'is_image_dataset') or not self.is_image_dataset:
+        has_video = hasattr(self, 'video_filename') and self.video_filename
+        has_image_dataset = hasattr(self, 'is_image_dataset') and self.is_image_dataset
+        
+        if not has_image_dataset and not has_video:
             QMessageBox.warning(self, 'Export Image Dataset',
-                'Please open an image dataset first!')
+                'Please open an image dataset or a video file first!')
             return
-        config = export_dataset_dialog(self, self.image_files, self.
+            
+        if has_image_dataset:
+            image_files = self.image_files
+        else:
+            video_base = os.path.splitext(os.path.basename(self.video_filename))[0]
+            image_files = [f"{video_base}_frame_{i:06d}.jpg" for i in range(self.total_frames)]
+
+        config = export_dataset_dialog(self, image_files, self.
             frame_annotations)
         if not config:
             return
         from viat.utils.task_runner import run_task_with_progress
         result = run_task_with_progress(self, 'Exporting Dataset',
-            'Initializing export...', export_dataset, self, config, self.
+            'Initializing export...', export_dataset, self, config,
             image_files, self.frame_annotations, self.canvas.class_colors,
             maximum=100)
         if result:
             self.statusBar.showMessage('Export complete', 5000)
+            
+            # Suggest merging with another dataset
+            reply = QMessageBox.question(self, 'Merge Dataset',
+                'Export complete! Would you like to merge this exported dataset with another existing image dataset?'
+                , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                self.viat_merge_dataset(source_folder=config["output_dir"])
 
     @log_exceptions
     def create_dataset(self):
         """Create a new dataset from the current annotations."""
-        if not hasattr(self, 'is_image_dataset'
-            ) or not self.is_image_dataset or not self.image_files:
+        has_video = hasattr(self, 'video_filename') and self.video_filename
+        has_image_dataset = hasattr(self, 'is_image_dataset') and self.is_image_dataset
+        
+        if not has_image_dataset and not has_video:
             QMessageBox.warning(self, 'Create Dataset',
-                'This feature is only available for image datasets.')
+                'This feature is only available for image datasets or open video files.')
             return
         has_annotations = any(self.frame_annotations.values())
         if not has_annotations:
             QMessageBox.warning(self, 'Create Dataset',
                 'No annotations to export!')
             return
+            
+        if has_image_dataset:
+            image_files = self.image_files
+        else:
+            video_base = os.path.splitext(os.path.basename(self.video_filename))[0]
+            image_files = [f"{video_base}_frame_{i:06d}.jpg" for i in range(self.total_frames)]
+            
         from viat.utils.dataset_manager import create_dataset_dialog, create_dataset
-        config = create_dataset_dialog(self, self.image_files, self.
+        config = create_dataset_dialog(self, image_files, self.
             frame_annotations, self.canvas.class_colors)
         if config:
-            success = create_dataset(self, config, self.image_files, self.
+            success = create_dataset(self, config, image_files, self.
                 frame_annotations, self.canvas.class_colors)
             if success:
                 QMessageBox.information(self, 'Dataset Created',
                     f"Dataset created successfully in {config['output_dir']}")
+                
+                # Suggest merging with another dataset
+                reply = QMessageBox.question(self, 'Merge Dataset',
+                    'Dataset created! Would you like to merge this dataset with another existing image dataset?'
+                    , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                if reply == QMessageBox.Yes:
+                    self.viat_merge_dataset(source_folder=config["output_dir"])
 
     @log_exceptions
     def update_class_ui_after_import(self):
@@ -4377,6 +4549,7 @@ Do you want to scan the entire video now for duplicate frames?
             ret, frame = self.cap.read()
             if not ret:
                 break
+            frame = self._process_frame_metadata(frame, frame_num)
             progress_bar.setValue(frame_num)
             if frame_num % 10 == 0:
                 QApplication.processEvents()
@@ -4389,6 +4562,7 @@ Do you want to scan the entire video now for duplicate frames?
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
         ret, frame = self.cap.read()
         if ret:
+            frame = self._process_frame_metadata(frame, current_pos)
             self.canvas.set_frame(frame)
         self.frame_hashes, self.duplicate_frames_cache = (self.
             performance_manager.optimize_frame_hashes(self.frame_hashes,
@@ -4608,6 +4782,7 @@ Do you want to scan the entire video now for duplicate frames?
         if not ret:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
             return []
+        ref_frame = self._process_frame_metadata(ref_frame, reference_frame)
         progress = QDialog(self)
         progress.setWindowTitle('Finding Similar Frames')
         progress.setFixedSize(300, 100)
@@ -4631,6 +4806,7 @@ Do you want to scan the entire video now for duplicate frames?
             ret, frame = self.cap.read()
             if not ret:
                 break
+            frame = self._process_frame_metadata(frame, frame_num)
             similarity = mse_similarity(ref_frame, frame)
             if similarity >= similarity_threshold:
                 similar_frames.append(frame_num)
@@ -4743,6 +4919,7 @@ Do you want to scan the entire video now for duplicate frames?
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
             ret, frame = self.cap.read()
             if ret:
+                frame = self._process_frame_metadata(frame, frame_num)
                 thumbnail = create_thumbnail(frame, (160, 90))
                 h, w, c = thumbnail.shape
                 qimg = QImage(thumbnail.data, w, h, w * c, QImage.Format_RGB888
@@ -5210,6 +5387,7 @@ Do you want to scan the entire video now for duplicate frames?
             from copy import copy
             frame_annotations_copy = {k: list(v) for k, v in self.
                 frame_annotations.items()}
+            deleted_annotations_copy = {k: list(v) for k, v in self.deleted_annotations.items()} if hasattr(self, 'deleted_annotations') else None
             project_data_args = {'annotations': list(self.canvas.
                 annotations), 'class_colors': dict(self.canvas.class_colors
                 ), 'video_path': video_path, 'current_frame': self.
@@ -5230,7 +5408,8 @@ Do you want to scan the entire video now for duplicate frames?
                 False, 'verification_mode_enabled': getattr(self,
                 'verification_mode', False), 'annotations_imported_list': 
                 list(self._annotations_imported) if hasattr(self,
-                '_annotations_imported') else []}
+                '_annotations_imported') else [],
+                'deleted_annotations': deleted_annotations_copy}
             from viat.utils.task_runner import AutoSaveThread
             self._autosave_thread = AutoSaveThread(self.autosave_file,
                 project_data_args, self)
@@ -5593,6 +5772,8 @@ Do you want to scan the entire video now for duplicate frames?
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
             ret, frame = self.cap.read()
+            if ret:
+                frame = self._process_frame_metadata(frame, start_frame)
         if not ret:
             QMessageBox.critical(self, 'Tracking Error',
                 f'Failed to read start frame {start_frame}')
@@ -5623,6 +5804,8 @@ Do you want to scan the entire video now for duplicate frames?
             else:
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
                 ret, frame = self.cap.read()
+                if ret:
+                    frame = self._process_frame_metadata(frame, f_idx)
             if not ret:
                 break
             success, new_bbox = tracker.update(frame)
@@ -5795,6 +5978,7 @@ Do you want to scan the entire video now for duplicate frames?
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
                 ret, frame_img = self.cap.read()
                 if ret:
+                    frame_img = self._process_frame_metadata(frame_img, frame)
                     self.current_frame = frame
                     self.frame_slider.setValue(frame)
                     self.canvas.set_frame(frame_img)
@@ -5846,6 +6030,7 @@ Do you want to scan the entire video now for duplicate frames?
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
                 ret, frame_img = self.cap.read()
                 if ret:
+                    frame_img = self._process_frame_metadata(frame_img, frame)
                     self.current_frame = frame
                     self.frame_slider.setValue(frame)
                     self.canvas.set_frame(frame_img)
@@ -5905,21 +6090,16 @@ Do you want to scan the entire video now for duplicate frames?
 
     @log_exceptions
     def delete_current_frame(self):
-        if self.current_frame in self.deleted_frames:
-            self.deleted_frames.remove(self.current_frame)
-            self.statusBar.showMessage(f'Frame {self.current_frame} RESTORED.')
-        else:
-            self.deleted_frames.add(self.current_frame)
-            self.statusBar.showMessage(f'Frame {self.current_frame} DELETED.')
+        self.deleted_frames.add(self.current_frame)
+        self.statusBar.showMessage(f'Frame {self.current_frame} DELETED.')
         
         # Clear annotations if deleting
-        if self.current_frame in self.deleted_frames:
-            if self.current_frame in self.frame_annotations:
-                del self.frame_annotations[self.current_frame]
-            self.canvas.annotations.clear()
-            self.canvas.update()
-            
-        self.update_frame_display()
+        if self.current_frame in self.frame_annotations:
+            del self.frame_annotations[self.current_frame]
+        self.canvas.annotations.clear()
+        
+        # Auto-advance to the next valid frame
+        self.next_frame()
 
     @log_exceptions
     def keyPressEvent(self, event):
@@ -6935,6 +7115,7 @@ Annotations: {adj['removed']} removed (â‰¥80% in border), {adj['clipped']} c
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
                     return
+                frame = self._process_frame_metadata(frame, self.current_frame)
             elif self.is_image_dataset and self.image_files:
                 frame = cv2.imread(self.image_files[self.current_frame])
             else:
@@ -7192,9 +7373,14 @@ use Dataset > Import VIAT JSON Annotations to load the detections."""
     def viat_merge_dataset(self, source_folder=None, target_folder=None):
         """Merge another dataset into the current (target) dataset."""
         if not target_folder:
-            if not self._viat_ensure_dataset():
-                return
-            target_folder = self._viat_dataset_info.root
+            info = getattr(self, '_viat_dataset_info', None)
+            if info is not None and getattr(self, 'is_image_dataset', False):
+                target_folder = info.root
+            else:
+                target_folder = QFileDialog.getExistingDirectory(self,
+                    'Select Target Dataset to Merge Into', '', QFileDialog.ShowDirsOnly)
+                if not target_folder:
+                    return
         if not source_folder:
             source_folder = QFileDialog.getExistingDirectory(self,
                 'Select Source Dataset to Merge', '', QFileDialog.ShowDirsOnly)
@@ -7751,15 +7937,14 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
     @log_exceptions
     def compare_raya_annotations(self):
         """Show dialog to select two Raya files and compare them."""
-        base_file, _ = QFileDialog.getOpenFileName(self, 'Select Base Raya File', '', 'Text Files (*.txt);;All Files (*)')
-        if not base_file:
+        from viat.widgets.compare_raya_dialog import CompareRayaDialog
+        dlg = CompareRayaDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
             return
             
-        mod_file, _ = QFileDialog.getOpenFileName(self, 'Select Modified Raya File', '', 'Text Files (*.txt);;All Files (*)')
-        if not mod_file:
-            return
-            
-        out_md = os.path.join(os.path.dirname(mod_file), 'comparison_report.md')
+        base_file = dlg.base_file
+        mod_file = dlg.mod_file
+        out_md = dlg.out_md
         
         from viat.utils.compare_raya import compare_annotations
         success, msg = compare_annotations(base_file, mod_file, out_md)
@@ -7771,29 +7956,96 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
     @log_exceptions
     def view_labeler_analytics(self):
         """Generate labeler analytics report from a VIAT JSON project."""
-        if self.project_modified or not hasattr(self, 'project_file') or not self.project_file:
-            reply = QMessageBox.warning(self, 'Unsaved Changes', 
-                                     'You must save the project before generating analytics to ensure all tracking data is included. Would you like to save now?',
-                                     QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.save_project()
-                if self.project_modified: # If they cancelled the save dialog
-                    return
-            else:
+        if not hasattr(self, 'project_file') or not self.project_file:
+            json_file, _ = QFileDialog.getOpenFileName(self, 'Select VIAT Project File', '', 'JSON Files (*.json);;All Files (*)')
+            if not json_file:
                 return
-
-        json_file = self.project_file
+        else:
+            if self.project_modified:
+                reply = QMessageBox.warning(self, 'Unsaved Changes', 
+                                         'You must save the project before generating analytics to ensure all tracking data is included. Would you like to save now?',
+                                         QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.save_project()
+                    if self.project_modified: # If they cancelled the save dialog
+                        return
+                else:
+                    return
+            json_file = self.project_file
         base_raya_file = None
         try:
             import json
             with open(json_file, 'r') as f:
                 data = json.load(f)
-            if not data.get('labeler_analytics', {}).get('base_annotations'):
+            
+            analytics = data.setdefault('labeler_analytics', {})
+            base_annotations = analytics.get('base_annotations')
+            
+            if not base_annotations:
                 reply = QMessageBox.question(self, 'Base Pre-labels Missing', 
                                              'This project does not contain embedded base pre-labels.\nWould you like to select the original Base Annotation file (Raya/YOLO/etc) for comparison?',
                                              QMessageBox.Yes | QMessageBox.No)
                 if reply == QMessageBox.Yes:
                     base_raya_file, _ = QFileDialog.getOpenFileName(self, 'Select Base Annotation File', '', 'All Files (*);;Text Files (*.txt);;JSON Files (*.json);;XML Files (*.xml)')
+                    if base_raya_file:
+                        try:
+                            from viat.utils.file_operations import import_annotations as import_annotations_func
+                            from viat.annotation import BoundingBox
+                            
+                            # Get canvas dimensions or default to 640x480
+                            if self.canvas.pixmap:
+                                image_width = self.canvas.pixmap.width()
+                                image_height = self.canvas.pixmap.height()
+                            else:
+                                image_width = 640
+                                image_height = 480
+                                
+                            _, _, base_frames_parsed = import_annotations_func(
+                                base_raya_file, BoundingBox, image_width, image_height, data.get('class_colors', {})
+                            )
+                            
+                            loaded_base = {}
+                            for f_num, objs in base_frames_parsed.items():
+                                loaded_base[str(f_num)] = [obj.to_dict() for obj in objs]
+                                
+                            if loaded_base:
+                                analytics['base_annotations'] = loaded_base
+                                if hasattr(self, 'labeler_analytics') and self.project_file == json_file:
+                                    self.labeler_analytics['base_annotations'] = loaded_base
+                                try:
+                                    with open(json_file, 'w') as f:
+                                        json.dump(data, f, indent=4)
+                                except Exception as save_err:
+                                    print(f"Error saving imported base annotations: {save_err}")
+                        except Exception as import_err:
+                            QMessageBox.warning(self, 'Import Error', f'Failed to import base annotations: {import_err}')
+                
+                # Fallback if still not present
+                if not analytics.get('base_annotations'):
+                    reconstructed_base = {}
+                    frame_anns = data.get('frame_annotations', {})
+                    for frame_str, anns in frame_anns.items():
+                        base_anns_in_frame = []
+                        for ann in anns:
+                            if ann.get('deleted', False):
+                                continue
+                            orig_src = ann.get('original_source', ann.get('source', 'manual'))
+                            if orig_src in ('loaded', 'imported', 'detected'):
+                                import copy
+                                base_anns_in_frame.append(copy.deepcopy(ann))
+                        if base_anns_in_frame:
+                            reconstructed_base[frame_str] = base_anns_in_frame
+                    
+                    if reconstructed_base:
+                        analytics['base_annotations'] = reconstructed_base
+                        if hasattr(self, 'labeler_analytics') and self.project_file == json_file:
+                            self.labeler_analytics['base_annotations'] = reconstructed_base
+                        
+                        try:
+                            with open(json_file, 'w') as f:
+                                json.dump(data, f, indent=4)
+                        except Exception as save_err:
+                            print(f"Error saving reconstructed base annotations: {save_err}")
         except Exception as e:
             print(f"Error checking for embedded base annotations: {e}")
 

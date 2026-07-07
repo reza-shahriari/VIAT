@@ -131,7 +131,7 @@ class BoundingBox:
                 "height": self.rect.height(),
             },
             "class_name": self.class_name,
-            "attributes": self.attributes,
+            "attributes": self.attributes.copy() if self.attributes else {},
             "color": (
                 {
                     "r": self.color.red(),
@@ -567,6 +567,10 @@ class AnnotationManager:
             annotation: The annotation to delete
         """
         if annotation in self.canvas.annotations:
+            # Track deleted loaded annotations
+            if hasattr(self.main_window, "track_deleted_annotation"):
+                self.main_window.track_deleted_annotation(annotation)
+
             # Remove from canvas annotations
             self.canvas.annotations.remove(annotation)
 

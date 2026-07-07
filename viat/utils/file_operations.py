@@ -124,7 +124,8 @@ def save_project_generator(
     annotations_imported_list=None,
     class_thresholds=None,
     deleted_frames=None,
-    labeler_analytics=None
+    labeler_analytics=None,
+    deleted_annotations=None
 ):
     yield 10, "Serializing annotations..."
     
@@ -146,9 +147,13 @@ def save_project_generator(
             if idx % 100 == 0 and total_frames > 0:
                 yield 10 + int((idx / total_frames) * 70), f"Serializing frame {idx}/{total_frames}..."
                 
-            serialized_frame_annotations[str(frame_num)] = [
-                ann.to_dict() for ann in frame_anns
-            ]
+            serialized_anns = [ann.to_dict() for ann in frame_anns]
+            if deleted_annotations and frame_num in deleted_annotations:
+                for ann in deleted_annotations[frame_num]:
+                    d_ann = ann.to_dict()
+                    d_ann["deleted"] = True
+                    serialized_anns.append(d_ann)
+            serialized_frame_annotations[str(frame_num)] = serialized_anns
 
     # Create project data dictionary
     project_data = {
@@ -245,10 +250,16 @@ def load_project(filename, bbox_class):
 
     # Load frame annotations
     frame_annotations = {}
+    deleted_annotations = {}
     for frame_num, frame_anns in project_data.get("frame_annotations", {}).items():
-        frame_annotations[int(frame_num)] = [
-            bbox_class.from_dict(ann_data) for ann_data in frame_anns
-        ]
+        frame_annotations[int(frame_num)] = []
+        deleted_annotations[int(frame_num)] = []
+        for ann_data in frame_anns:
+            bbox = bbox_class.from_dict(ann_data)
+            if ann_data.get("deleted", False):
+                deleted_annotations[int(frame_num)].append(bbox)
+            else:
+                frame_annotations[int(frame_num)].append(bbox)
     
     # Load class attributes
     class_attributes = project_data.get("class_attributes", {})
@@ -304,7 +315,8 @@ def load_project(filename, bbox_class):
         interpolation_mode_active,
         verification_mode_enabled,
         annotations_imported_list,
-        class_thresholds
+        class_thresholds,
+        deleted_annotations
     )
 
 def get_recent_projects():
@@ -439,7 +451,7 @@ def load_last_state():
 
 
 def export_annotations(
-    filename, annotations, image_width, image_height, format_type="coco"
+    filename, annotations, image_width, image_height, format_type="coco", deleted_frames=None
 ):
     """Export annotations to various formats"""
     if format_type == "coco":
@@ -449,7 +461,7 @@ def export_annotations(
     elif format_type == "pascal_voc":
         export_pascal_voc(filename, annotations, image_width, image_height)
     elif format_type == "raya":
-        export_raya_annotations(filename, annotations)
+        export_raya_annotations(filename, annotations, deleted_frames=deleted_frames)
     else:
         raise ValueError(f"Unsupported export format: {format_type}")
 
@@ -656,16 +668,18 @@ def export_pascal_voc(filename, annotations, image_width, image_height):
         f.write(pretty_xml)
 
 
-def export_raya_annotations(filename, annotations):
+def export_raya_annotations(filename, annotations, deleted_frames=None):
     """
     Export annotations to Raya text format.
 
     Format: [class,x,y,width,height,size,quality,Difficult(optional)];
     If no detection: []
+    If deleted: DELETED;
 
     Args:
         filename (str): Path to save the Raya text file
         annotations (list): List of annotation objects
+        deleted_frames (set/list, optional): Frames to mark as deleted
     """
     try:
         # Group annotations by frame
@@ -678,14 +692,24 @@ def export_raya_annotations(filename, annotations):
 
         # Get the maximum frame number
         max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
+        if deleted_frames:
+            max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
 
         # Create lines for each frame
         lines = ["[]"] * (max_frame + 1)
+        
+        if deleted_frames:
+            for d in deleted_frames:
+                if d <= max_frame:
+                    lines[d] = "DELETED;"
 
         # Fill in annotations for frames that have them
         for frame_num, frame_annotations in annotations_by_frame.items():
+            if deleted_frames and frame_num in deleted_frames:
+                continue
             if not frame_annotations:
-                lines[frame_num] = "[]"
+                if not (deleted_frames and frame_num in deleted_frames):
+                    lines[frame_num] = "[]"
                 continue
 
             # Format annotations for this frame
@@ -721,7 +745,7 @@ def export_raya_annotations(filename, annotations):
     except Exception as e:
         raise Exception(f"Error exporting to Raya format: {str(e)}")
 
-def export_raya_with_classes_annotations(filename, annotations, classes):
+def export_raya_with_classes_annotations(filename, annotations, classes, deleted_frames=None):
     """
     Export annotations to Raya text format with a class header.
 
@@ -756,14 +780,24 @@ def export_raya_with_classes_annotations(filename, annotations, classes):
 
         # Get the maximum frame number
         max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
+        if deleted_frames:
+            max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
 
         # Create lines for each frame
         lines = ["[]"] * (max_frame + 1)
+        
+        if deleted_frames:
+            for d in deleted_frames:
+                if d <= max_frame:
+                    lines[d] = "DELETED;"
 
         # Fill in annotations for frames that have them
         for frame_num, frame_annotations in annotations_by_frame.items():
+            if deleted_frames and frame_num in deleted_frames:
+                continue
             if not frame_annotations:
-                lines[frame_num] = "[]"
+                if not (deleted_frames and frame_num in deleted_frames):
+                    lines[frame_num] = "[]"
                 continue
 
             # Format annotations for this frame
@@ -1113,6 +1147,7 @@ def export_standard_annotations(
     export_format,
     image_width,
     image_height,
+    deleted_frames=None,
 ):
     """
     Export annotations using the standard export function.
@@ -1124,12 +1159,14 @@ def export_standard_annotations(
         export_format (str): Format type ("coco", "yolo", "pascal_voc", "raya")
         image_width (int): Image width
         image_height (int): Image height
+        deleted_frames (set, optional): Set of deleted frames
     """
     # Collect all annotations from all frames
     all_annotations = []
     for frame_num, annotations in frame_annotations.items():
         for annotation in annotations:
-            annotation_copy = annotation
+            import copy
+            annotation_copy = copy.copy(annotation)
             annotation_copy.frame = frame_num
             all_annotations.append(annotation_copy)
 
@@ -1137,7 +1174,7 @@ def export_standard_annotations(
         all_annotations = canvas_annotations
 
     export_annotations(
-        filename, all_annotations, image_width, image_height, export_format
+        filename, all_annotations, image_width, image_height, export_format, deleted_frames=deleted_frames
     )
 
 

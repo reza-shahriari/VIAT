@@ -187,10 +187,17 @@ def generate_comparison_report_string(base_classes, base_deleted, base_frames, m
                 b_attrs = b_obj["attributes"]
                 m_attrs = m_obj["attributes"]
                 
+                attr_names = ["Size", "Quality", "Difficult"]
                 if isinstance(b_attrs, list):
-                    b_attrs = {f"Attr {i+1}": val for i, val in enumerate(b_attrs)}
+                    b_attrs = {
+                        attr_names[i] if i < len(attr_names) else f"Attr {i+1}": val
+                        for i, val in enumerate(b_attrs)
+                    }
                 if isinstance(m_attrs, list):
-                    m_attrs = {f"Attr {i+1}": val for i, val in enumerate(m_attrs)}
+                    m_attrs = {
+                        attr_names[i] if i < len(attr_names) else f"Attr {i+1}": val
+                        for i, val in enumerate(m_attrs)
+                    }
                     
                 all_keys = set(b_attrs.keys()) | set(m_attrs.keys())
                 for k in all_keys:

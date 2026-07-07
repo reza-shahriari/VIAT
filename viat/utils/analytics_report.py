@@ -12,22 +12,19 @@ def generate_analytics_report(project_json, output_md, base_raya_file=None):
             data = json.load(f)
             
         analytics = data.get('labeler_analytics', {})
-        if not analytics:
-            # Maybe it's an old project that wasn't saved with analytics
-            return False, "No labeler analytics found in this project file."
-            
-        base_annotations = analytics.get('base_annotations', {})
-            
-        prompts = analytics.get('prompts', [])
-        tool_usage = analytics.get('tool_usage', {})
+        base_annotations = analytics.get('base_annotations', {}) if analytics else {}
+        prompts = analytics.get('prompts', []) if analytics else []
+        tool_usage = analytics.get('tool_usage', {}) if analytics else {}
         deleted_frames = set(data.get('deleted_frames', []))
         
-        # We can also calculate annotation sources from the annotations themselves
-        annotations = data.get('annotations', [])
         source_counts = {}
-        for ann in annotations:
-            src = ann.get('original_source', ann.get('source', 'unknown'))
-            source_counts[src] = source_counts.get(src, 0) + 1
+        frame_anns = data.get('frame_annotations', {})
+        for frame_num, anns in frame_anns.items():
+            for ann in anns:
+                if ann.get('deleted', False):
+                    continue
+                src = ann.get('original_source', ann.get('source', 'unknown'))
+                source_counts[src] = source_counts.get(src, 0) + 1
             
         # Build the Markdown report
         report = f"# Labeler Analytics Report\n\n"
@@ -89,6 +86,8 @@ def generate_analytics_report(project_json, output_md, base_raya_file=None):
                         frame_num = int(frame_str)
                         objs = []
                         for ann in anns:
+                            if ann.get('deleted', False):
+                                continue
                             rect = ann.get('rect', {})
                             # The comparison expects a list [x, y, w, h]
                             box = [rect.get('x', 0), rect.get('y', 0), rect.get('width', 0), rect.get('height', 0)]

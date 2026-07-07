@@ -1,4 +1,4 @@
-﻿import cv2
+import cv2
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -99,6 +99,9 @@ class ClassInfoDialog(QDialog):
             elif self.main_window.cap and self.main_window.cap.isOpened():
                 self.main_window.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 ret, frame_img = self.main_window.cap.read()
+                if ret and frame_img is not None:
+                    if hasattr(self.main_window, '_process_frame_metadata'):
+                        frame_img = self.main_window._process_frame_metadata(frame_img, frame_idx)
             
             if frame_img is not None:
                 # Use the create_thumbnail tool function
