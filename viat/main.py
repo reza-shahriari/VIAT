@@ -637,6 +637,10 @@ class VideoAnnotationTool(QMainWindow):
             act.setShortcut('Ctrl+Shift+E')
             act.triggered.connect(lambda: self.fast_export_video_and_next())
             
+            act = file_menu.addAction('Delete Video & Next')
+            act.setShortcut('Ctrl+Shift+D')
+            act.triggered.connect(lambda: self.delete_video_and_next())
+            
             act = file_menu.addAction('Compare Raya Annotations...')
             act.triggered.connect(lambda: self.compare_raya_annotations())
             
@@ -2115,6 +2119,82 @@ class VideoAnnotationTool(QMainWindow):
                 self.load_video_file(filename)
 
     @log_exceptions
+    def delete_video_and_next(self):
+        """Delete the current video (and its .txt annotation if present) then load the next unannotated video."""
+        if not hasattr(self, 'video_filename') or not self.video_filename:
+            return
+
+        video_path = self.video_filename
+        default_dir = os.path.dirname(video_path)
+        default_filename = os.path.splitext(os.path.basename(video_path))[0]
+        txt_path = os.path.join(default_dir, default_filename + '.txt')
+
+        # Confirm deletion
+        msg = f'Delete video file:\n{os.path.basename(video_path)}'
+        if os.path.isfile(txt_path):
+            msg += f'\n\nAssociated annotation file:\n{os.path.basename(txt_path)}\n\nwill also be deleted.'
+        reply = QMessageBox.question(
+            self, 'Delete Video & Next', msg,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Find next video BEFORE deleting (so the file listing is still intact)
+        video_exts = ['.mp4', '.avi', '.mov', '.mkv']
+        all_files = os.listdir(default_dir)
+        video_files = natsorted([f for f in all_files if os.path.splitext(f)[1].lower() in video_exts])
+
+        current_basename = os.path.basename(video_path)
+        current_idx = video_files.index(current_basename) if current_basename in video_files else -1
+
+        next_video_path = None
+        for i in range(current_idx + 1, len(video_files)):
+            candidate_name = video_files[i]
+            candidate_base = os.path.splitext(candidate_name)[0]
+            candidate_txt = candidate_base + '.txt'
+            if candidate_txt in all_files:
+                continue
+            next_video_path = os.path.join(default_dir, candidate_name)
+            break
+
+        # Reset state before deleting
+        self.image_dataset_info = None
+        self.is_image_dataset = False
+        self.canvas.annotations = []
+        self.frame_annotations = {}
+        self.current_frame = 0
+        self.frame_hashes = {}
+        self.duplicate_frames_cache = {}
+        self.video_filename = None
+        
+        # Release the video capture object so the file is not locked
+        if getattr(self, 'cap', None):
+            self.cap.release()
+            self.cap = None
+
+        # Delete files
+        try:
+            if os.path.isfile(txt_path):
+                os.remove(txt_path)
+            os.remove(video_path)
+            self.statusBar.showMessage(f'Deleted {os.path.basename(video_path)}')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to delete file(s): {str(e)}')
+            return
+
+        # Load next video
+        if next_video_path:
+            self.load_video_file(next_video_path)
+        else:
+            filename, _ = QFileDialog.getOpenFileName(
+                self, 'Open Video', default_dir,
+                'Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)'
+            )
+            if filename:
+                self.load_video_file(filename)
+
+    @log_exceptions
     def open_scene_detect_for_video(self):
         """Open scene detection dialog for the current loaded video."""
         if not self.video_filename:
@@ -3006,77 +3086,125 @@ Would you like to load it?"""
             self.refresh_empty_frames_dock()
         
     def open_zero_shot_refiner_dialog(self):
-        from widgets.zero_shot_classification_dialog import ZeroShotClassificationDialog
-        from utils.zero_shot_classifier import ZeroShotClassifierManager
-        
-        dialog = ZeroShotClassificationDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            config = dialog.get_config()
-            
-            manager = ZeroShotClassifierManager()
-            success, msg = manager.load_model(config['model_type'])
-            
-            if not success:
-                QMessageBox.critical(self, "Model Error", msg)
-                return
-                
-            rules_config = manager.load_rules_from_json(config['json_path'])
-            if not rules_config:
-                QMessageBox.critical(self, "JSON Error", "Could not load JSON rules file.")
-                return
-                
-            total_frames = len(self.frame_annotations)
-            if total_frames == 0:
-                QMessageBox.information(self, "Info", "No annotations to refine.")
-                return
-                
-            progress = QProgressDialog("Refining annotations using Zero-Shot Classification...", "Cancel", 0, total_frames, self)
-            progress.setWindowModality(Qt.WindowModal)
-            progress.show()
-            
-            from PyQt5.QtWidgets import QApplication
-            import cv2
-            
-            frames_processed = 0
-            for frame_idx, annotations in self.frame_annotations.items():
-                if progress.wasCanceled():
-                    break
-                    
-                if not annotations:
-                    frames_processed += 1
-                    progress.setValue(frames_processed)
-                    continue
-                    
-                # Load frame image
-                if frame_idx >= len(self.image_files):
-                    frames_processed += 1
-                    progress.setValue(frames_processed)
-                    continue
-                image_path = self.image_files[frame_idx]
-                image_array = cv2.imread(image_path)
-                
-                if image_array is not None:
-                    manager.refine_annotations(
-                        image_array, 
-                        annotations, 
-                        rules_config, 
-                        min_confidence=config['min_confidence'],
-                        overlap_margin=config['overlap_margin']
-                    )
-                    
+        from .widgets.zero_shot_classification_dialog import ZeroShotClassificationDialog
+        from .utils.zero_shot_classifier import ZeroShotClassifierManager
+
+        # Collect current dataset class names to pre-populate the dialog.
+        # The canonical class registry in VIAT is canvas.class_colors (keys = class names).
+        known_classes = []
+        if hasattr(self, 'canvas') and hasattr(self.canvas, 'class_colors') and self.canvas.class_colors:
+            known_classes = sorted(self.canvas.class_colors.keys())
+        elif hasattr(self, 'frame_annotations'):
+            seen = set()
+            for anns in self.frame_annotations.values():
+                for a in anns:
+                    if hasattr(a, 'class_name') and a.class_name:
+                        seen.add(a.class_name)
+            known_classes = sorted(seen)
+
+        dialog = ZeroShotClassificationDialog(self, known_classes=known_classes)
+        if dialog.exec_() != QDialog.Accepted:
+            if hasattr(self, 'refresh_class_frames_dock'):
+                self.refresh_class_frames_dock()
+            return
+
+        config = dialog.get_config()
+
+        # Resolve the absolute checkpoints directory the same way ZeroShotManager does,
+        # so the cached model files land in the right place.
+        import sys as _sys
+        if getattr(_sys, 'frozen', False):
+            _project_root = os.path.dirname(_sys.executable)
+        else:
+            _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _chkp_dir = os.path.join(_project_root, "checkpoints")
+
+        # ── Load model ────────────────────────────────────────────────
+        manager = ZeroShotClassifierManager(checkpoints_dir=_chkp_dir)
+        success, msg = manager.load_model(config['model'])
+        if not success:
+            QMessageBox.critical(self, "Model Error", msg)
+            return
+
+        # ── Build rules_config from UI values (JSON import is already merged) ──
+        rules_config = ZeroShotClassifierManager.build_config(
+            mode=config['mode'],
+            rules=config['rules'],
+            classes=config['classes'],
+            overlap_groups=config.get('overlap_groups', []),
+            global_fallback=config.get('global_fallback', []),
+        )
+
+        total_frames = len(self.frame_annotations)
+        if total_frames == 0:
+            QMessageBox.information(self, "Info", "No annotations to refine.")
+            return
+
+        progress = QProgressDialog(
+            "Refining annotations using Zero-Shot Classification…",
+            "Cancel", 0, total_frames, self
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        frames_processed = 0
+        uncertain_count = 0
+
+        for frame_idx, annotations in self.frame_annotations.items():
+            if progress.wasCanceled():
+                break
+
+            if not annotations:
                 frames_processed += 1
                 progress.setValue(frames_processed)
-                QApplication.processEvents()
-                
-            progress.setValue(total_frames)
-            
-            self.project_modified = True
-            self.load_current_frame_annotations()
-            self.update_frame_display()
+                continue
+
+            if not hasattr(self, 'image_files') or frame_idx >= len(self.image_files):
+                frames_processed += 1
+                progress.setValue(frames_processed)
+                continue
+
+            image_array = cv2.imread(self.image_files[frame_idx])
+            if image_array is not None:
+                before = sum(1 for a in annotations if getattr(a, 'uncertain', False))
+                manager.refine_annotations(
+                    image_array,
+                    annotations,
+                    rules_config,
+                    min_confidence=config['min_confidence'],
+                    overlap_margin=config['overlap_margin'],
+                )
+                after = sum(1 for a in annotations if getattr(a, 'uncertain', False))
+                uncertain_count += (after - before)
+
+            frames_processed += 1
+            progress.setValue(frames_processed)
+            QApplication.processEvents()
+
+        progress.setValue(total_frames)
+
+        self.project_modified = True
+        self.load_current_frame_annotations()
+        self.update_frame_display()
+        if hasattr(self, 'refresh_uncertain_frames_dock'):
             self.refresh_uncertain_frames_dock()
+        if hasattr(self, 'refresh_class_ui'):
             self.refresh_class_ui()
-            
-            QMessageBox.information(self, "Complete", "Zero-Shot Classification Refiner finished.")
+
+        mode_label = {
+            "correctness": "Correctness Check",
+            "mislabel": "Mislabel Check",
+            "both": "Correctness + Mislabel Check",
+        }.get(config['mode'], config['mode'])
+
+        QMessageBox.information(
+            self, "Complete",
+            f"Zero-Shot Classification Refiner finished.\n\n"
+            f"Mode: {mode_label}\n"
+            f"New uncertain annotations flagged: {uncertain_count}\n\n"
+            "Review flagged items in the Uncertain Frames panel."
+        )
+
         if hasattr(self, 'refresh_class_frames_dock'):
             self.refresh_class_frames_dock()
 

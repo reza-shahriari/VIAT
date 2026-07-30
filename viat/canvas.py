@@ -126,6 +126,13 @@ class VideoCanvas(QWidget):
         self.sam_prompt_labels = []
         self.sam_prompt_box = None
 
+        # Blur pen tool state
+        self.blur_pen_active = False   # True when Blur Mode + Pen are both on
+        self.blur_pen_size = 30        # pen radius in image pixels
+        self.blur_kernel = 51          # Gaussian kernel size
+        self.blur_drawing = False      # True while mouse button is held
+        self.blur_last_pos = None      # last image-coordinate QPoint
+
 
     def set_pan_mode(self, enabled):
         """Enable or disable pan mode"""
@@ -524,6 +531,46 @@ class VideoCanvas(QWidget):
             painter.setFont(font)
             painter.drawText(overlay_rect, Qt.AlignCenter, "AI is Processing this Frame...\nPlease Wait.")
 
+        # Draw blur region overlay (semi-transparent red hatched rectangles)
+        blur_mgr = getattr(getattr(self, 'main_window', None), 'blur_manager', None)
+        cur_frame = getattr(getattr(self, 'main_window', None), 'current_frame', -1)
+        if blur_mgr is not None and blur_mgr.has_blur(cur_frame):
+            display_rect = self.get_display_rect()
+            if self.pixmap and display_rect.isValid():
+                img_w = self.pixmap.width()
+                img_h = self.pixmap.height()
+                disp_w = display_rect.width()
+                disp_h = display_rect.height()
+                scale_x = disp_w / img_w if img_w > 0 else 1
+                scale_y = disp_h / img_h if img_h > 0 else 1
+                dx = display_rect.x()
+                dy = display_rect.y()
+                for region in blur_mgr.get_regions(cur_frame):
+                    rx = int(dx + region['x'] * scale_x)
+                    ry = int(dy + region['y'] * scale_y)
+                    rw = max(1, int(region['w'] * scale_x))
+                    rh = max(1, int(region['h'] * scale_y))
+                    r_color = QColor(255, 40, 40, 100) if region['type'] == 'pen' else QColor(255, 140, 0, 120)
+                    painter.fillRect(rx, ry, rw, rh, r_color)
+                    painter.setPen(QPen(QColor(255, 80, 80, 200), 1, Qt.DashLine))
+                    painter.drawRect(rx, ry, rw, rh)
+
+        # Draw blur pen cursor indicator when pen is active
+        if getattr(self, 'blur_pen_active', False) and self.pixmap:
+            cursor_pos = self.mapFromGlobal(self.cursor().pos())
+            if self.rect().contains(cursor_pos):
+                display_rect = self.get_display_rect()
+                img_w = self.pixmap.width()
+                img_h = self.pixmap.height()
+                if img_w > 0 and img_h > 0 and display_rect.isValid():
+                    scale_x = display_rect.width() / img_w
+                    scale_y = display_rect.height() / img_h
+                    avg_scale = (scale_x + scale_y) / 2.0
+                    radius_disp = max(4, int(self.blur_pen_size * avg_scale))
+                    painter.setPen(QPen(QColor(255, 60, 60, 220), 2, Qt.DashLine))
+                    painter.setBrush(QBrush(QColor(255, 60, 60, 40)))
+                    painter.drawEllipse(cursor_pos, radius_disp, radius_disp)
+
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
@@ -856,6 +903,38 @@ class VideoCanvas(QWidget):
     def mousePressEvent(self, event):
         # Prevent interaction if AI is currently processing this frame
         if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
+            return
+
+        # Blur pen mode — left-click starts painting
+        if getattr(self, 'blur_pen_active', False) and event.button() == Qt.LeftButton:
+            self.blur_drawing = True
+            img_pos = self.display_to_image_pos(event.pos())
+            if img_pos and self.main_window:
+                blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                cur_frame = getattr(self.main_window, 'current_frame', 0)
+                if blur_mgr is not None:
+                    blur_mgr.add_pen_stroke(
+                        cur_frame, img_pos.x(), img_pos.y(),
+                        self.blur_pen_size, self.blur_kernel
+                    )
+                    if hasattr(self.main_window, '_refresh_blur_display'):
+                        self.main_window._refresh_blur_display()
+                    else:
+                        self.update()
+            return
+
+        # Blur pen mode — right-click erases a pen stroke under cursor
+        if getattr(self, 'blur_pen_active', False) and event.button() == Qt.RightButton:
+            img_pos = self.display_to_image_pos(event.pos())
+            if img_pos and self.main_window:
+                blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                cur_frame = getattr(self.main_window, 'current_frame', 0)
+                if blur_mgr is not None:
+                    self._erase_blur_at(blur_mgr, cur_frame, img_pos)
+                    if hasattr(self.main_window, '_refresh_blur_display'):
+                        self.main_window._refresh_blur_display()
+                    else:
+                        self.update()
             return
 
         # Color pick mode (patch10): if active, pick color and return
