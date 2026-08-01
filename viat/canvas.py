@@ -192,385 +192,347 @@ class VideoCanvas(QWidget):
             self.current_class = class_name
 
     def paintEvent(self, event):
-        """Paint the canvas with the current frame and annotations"""
-        painter = QPainter(self)
-        update_rect = event.rect()
-        painter.setClipRect(update_rect)
+            """Paint the canvas with the current frame and annotations"""
+            painter = QPainter(self)
+            try:
+                update_rect = event.rect()
+                painter.setClipRect(update_rect)
 
-        painter.setRenderHint(QPainter.Antialiasing)
+                painter.setRenderHint(QPainter.Antialiasing)
 
-        # Fill background with dark color
-        painter.fillRect(self.rect(), QColor(40, 40, 40))
-        if not self.pixmap:
-            return
-        
-        # Calculate display rectangle maintaining aspect ratio
-        display_rect = self.get_display_rect()
-        self._last_display_rect = display_rect
-        if not display_rect.intersects(update_rect):
-            return 
-        if update_rect.contains(display_rect):
-            # Full image is visible in update region
-            painter.drawPixmap(display_rect, self.pixmap)
-        else:
-            # Only part of the image needs redrawing - calculate source rectangle
-            intersection = display_rect.intersected(update_rect)
-            source_x = (intersection.x() - display_rect.x()) * self.pixmap.width() / display_rect.width()
-            source_y = (intersection.y() - display_rect.y()) * self.pixmap.height() / display_rect.height()
-            source_w = intersection.width() * self.pixmap.width() / display_rect.width()
-            source_h = intersection.height() * self.pixmap.height() / display_rect.height()
-            
-            source_rect = QRect(int(source_x), int(source_y), int(source_w), int(source_h))
-            painter.drawPixmap(intersection, self.pixmap, source_rect)
-        
-        # Only draw annotations that intersect with the update area
-        for annotation in self.annotations:
-            # Skip if object_filter is set and this annotation doesn't match
-            if getattr(self, 'object_filter', None):
-                _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
-                if _aid != self.object_filter:
-                    continue
-            
-            # Skip annotations that fall below the class threshold
-            if hasattr(annotation, 'score') and annotation.score is not None:
-                threshold = (self.class_thresholds or {}).get(annotation.class_name, 0.0)
-                if annotation.score < threshold:
-                    continue
-                    
-            display_rect = self.image_to_display_rect(annotation.rect)
-            
-            # Skip annotations outside the update area
-            if not display_rect.intersects(update_rect):
-                continue
-        # # Draw the image
-        # painter.drawPixmap(display_rect, self.pixmap)
+                # Fill background with dark color
+                painter.fillRect(self.rect(), QColor(40, 40, 40))
+                if not self.pixmap:
+                    return
 
-        # Draw smart edge indicator if enabled
-        if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
-            painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
-            painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
-
-            # Draw "Smart Edge" text in the top-right corner
-            font = painter.font()
-            font.setPointSize(10)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.setPen(QPen(QColor(0, 255, 0)))
-            painter.drawText(
-                display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
-            )
-        # Draw annotations
-        for annotation in self.annotations:
-            # Skip if object_filter is set and this annotation doesn't match
-            if getattr(self, 'object_filter', None):
-                _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
-                if _aid != self.object_filter:
-                    continue
-            # Convert annotation rectangle to display coordinates
-            display_rect = self.image_to_display_rect(annotation.rect)
-
-            # Skip if the rectangle is invalid or too small
-            if display_rect.width() <= 0 or display_rect.height() <= 0:
-                continue
-
-            # Set pen based on selection status and source
-            if annotation == self.selected_annotation or annotation in self.selected_annotations:
-                pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
-            else:
-                # Get base color for the class
-                base_color = annotation.color
-                
-                # Check if annotation has a track_id and modify color slightly based on it
-                if hasattr(annotation, 'attributes') and 'track_id' in annotation.attributes:
-                    track_id = annotation.attributes['track_id']
-                    if isinstance(track_id, int):
-                        # Use the track_id to create a slight variation of the base color
-                        # This ensures different tracks of the same class have slightly different colors
-                        h, s, v, _ = base_color.getHsvF()
-                        # Modify hue based on track_id, keeping it within the same general color family
-                        h_offset = (track_id * 0.05) % 0.2  # Small offset to keep colors similar but distinct
-                        new_h = (h + h_offset) % 1.0
-                        # Create a new color with the modified hue
-                        modified_color = QColor.fromHsvF(new_h, s, v)
-                        base_color = modified_color
-                # Determine pen style based on source
-                if hasattr(annotation, 'source'):
-                    if annotation.source == "manual":
-                        pen = QPen(base_color, 2, Qt.SolidLine)
-                    elif annotation.source == "interpolated":
-                        pen = QPen(base_color, 2, Qt.DashLine)
-                    elif annotation.source == "tracked":
-                        pen = QPen(base_color, 2, Qt.DotLine)
-                    elif annotation.source == "detected":
-                        pen = QPen(base_color, 2, Qt.DashDotLine)
-                    else:
-                        pen = QPen(base_color, 2)
-                else:
-                    pen = QPen(base_color, 2)
-
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(display_rect)
-
-            # Draw segmentation polygon if enabled and available
-            if getattr(self, 'show_segmentation', False) and getattr(annotation, 'segmentation', None):
-                from PyQt5.QtGui import QPolygonF
-                from PyQt5.QtCore import QPointF
-                poly = QPolygonF()
-                for (px, py) in annotation.segmentation:
-                    dp = self.image_to_display_point(px, py)
-                    poly.append(QPointF(dp.x(), dp.y()))
-                if poly.size() >= 3:
-                    old_pen = painter.pen()
-                    seg_pen = QPen(QColor(0, 255, 0, 200), 1, Qt.DashLine)
-                    painter.setPen(seg_pen)
-                    painter.setBrush(QBrush(QColor(0, 255, 0, 40)))
-                    painter.drawPolygon(poly)
-                    painter.setPen(old_pen)
-                    painter.setBrush(Qt.NoBrush)
-
-            # Highlight hovered annotation
-            if annotation == self.selected_annotation and self.underMouse():
-                painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
-                painter.drawRect(display_rect)
-
-            # Set up font for labels
-            font = painter.font()
-            font.setPointSize(8)
-            painter.setFont(font)
-
-            # Standard text height for all labels
-            text_height = 16
-
-            # Determine if we should draw the class label above or below the box
-            # Check if there's more space above than below
-            space_above = display_rect.top()
-            space_below = self.height() - display_rect.bottom()
-            draw_above = space_above >= space_below
-
-            # Calculate class label width and position
-            text_width = min(
-                max(60, display_rect.width()), 120
-            )  # Min 60px, max 120px
-
-            # Position the class label centered horizontally with the box
-            text_x = display_rect.left() + (display_rect.width() - text_width) / 2
-
-            if draw_above:
-                # Draw above the box with a small gap
-                text_y = max(0, display_rect.top() - text_height - 2)
-            else:
-                # Draw below the box with a small gap
-                text_y = min(self.height() - text_height, display_rect.bottom() + 2)
-
-            text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
-
-            # Draw class label with semi-transparent background
-            # Add visual indicator for verification status
-            bg_color = QColor(
-                annotation.color.red(),
-                annotation.color.green(),
-                annotation.color.blue(),
-                180,
-            )
-            
-            # Add a border to indicate verification status
-            if hasattr(annotation, 'verified') and not annotation.verified:
-                # Draw a warning indicator for unverified annotations
-                painter.fillRect(
-                    text_rect,
-                    QColor(255, 165, 0, 180)  # Orange background for unverified
-                )
-                
-                # Add a small verification indicator
-                verify_rect = QRect(
-                    int(text_rect.right() - 16), 
-                    int(text_rect.top()), 
-                    16, 
-                    16
-                )
-                painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
-                painter.setPen(QPen(QColor(255, 255, 255)))
-                painter.drawText(verify_rect, Qt.AlignCenter, "!")
-            else:
-                painter.fillRect(text_rect, bg_color)
-
-            # Draw source indicator if not manual
-            if hasattr(annotation, 'source') and annotation.source != "manual":
-                source_text = annotation.source[:1].upper()  # First letter of source
-                source_rect = QRect(
-                    int(text_rect.left()), 
-                    int(text_rect.top()), 
-                    16, 
-                    16
-                )
-                painter.fillRect(source_rect, QColor(0, 0, 0, 180))
-                painter.setPen(QPen(QColor(255, 255, 255)))
-                painter.drawText(source_rect, Qt.AlignCenter, source_text)
-                
-                # Adjust text rect to make room for source indicator
-                text_rect.setLeft(text_rect.left() + 16)
-
-            painter.setPen(QPen(QColor(0, 0, 0)))
-            painter.drawText(text_rect, Qt.AlignCenter, annotation.class_name)
-            
-            # DEBUG: Show score if debug flag is enabled and annotation has a score
-            if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
-                score_text = f"{annotation.score:.2f}"
-                score_rect = QRect(
-                    int(display_rect.right() - 40),
-                    int(display_rect.top() - 16),
-                    40,
-                    16
-                )
-                painter.fillRect(score_rect, QColor(0, 0, 0, 180))
-                painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
-                painter.drawText(score_rect, Qt.AlignCenter, score_text)
-
-            # Draw attributes to the right of the box if there's space, otherwise to the left
-            if getattr(self, 'show_attributes', False) and annotation.attributes:
-                # Calculate the total height needed for all attributes
-                attr_count = len(annotation.attributes)
-                attr_total_height = text_height * attr_count
-                
-                # Format each attribute on its own line
-                attr_lines = []
-                for key, value in annotation.attributes.items():
-                    attr_lines.append(f"{key}: {value}")
-                
-                # Calculate width needed for the longest attribute
-                attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
-                
-                # Check if there's enough space to the right
-                space_right = self.width() - display_rect.right()
-                
-                if space_right >= attr_width + 5:
-                    # Draw to the right
-                    attr_x = display_rect.right() + 5
-                else:
-                    # Draw to the left
-                    attr_x = max(0, display_rect.left() - attr_width - 5)
-                
-                # Vertically position attributes centered with the box
-                # If too many attributes, start higher to fit them all
-                if attr_total_height > display_rect.height():
-                    attr_y = max(0, display_rect.top())
-                else:
-                    attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
-                
-                # Draw each attribute on its own line
-                for i, attr_text in enumerate(attr_lines):
-                    attr_rect = QRect(
-                        int(attr_x),
-                        int(attr_y + i * text_height),
-                        attr_width,
-                        text_height,
-                    )
-                    
-                    painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
-                    painter.setPen(QPen(QColor(255, 255, 255)))
-                    painter.drawText(attr_rect, Qt.AlignLeft | Qt.AlignVCenter, f" {attr_text}")
-
-            # Draw resize handles (corners and edges)
-            handle_size = 8
-            for point in self.get_handle_points(display_rect):
-                # Use class color for handle
-                handle_fill = QColor(annotation.color)
-                handle_fill.setAlpha(200)
-                painter.setBrush(handle_fill)
-                painter.setPen(QPen(QColor(0, 0, 0), 1))
-                painter.drawEllipse(point, handle_size // 2, handle_size // 2)
-
-        # Draw the in-progress bounding box (while drawing)
-        if self.is_drawing and self.start_point and self.current_point:
-            color = self.class_colors.get(self.current_class, QColor(255, 0, 0, 180))
-            pen = QPen(color, 2, Qt.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            display_rect = self.image_to_display_rect(QRect(self.start_point, self.current_point).normalized())
-            painter.drawRect(display_rect)
-
-        # For TwoClick mode: show the first point and a crosshair
-        if self.annotation_method == "TwoClick" and self.two_click_first_point:
-            pen = QPen(QColor(0, 255, 0, 180), 2, Qt.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            mouse_pos = self.current_point if self.current_point else self.two_click_first_point
-            display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
-            painter.drawRect(display_rect)
-
-        # Draw SAM Interactive Prompts
-        if getattr(self, "sam_interactive_mode", False):
-            # Draw Points
-            if hasattr(self, "sam_prompt_points") and hasattr(self, "sam_prompt_labels"):
-                for point, label in zip(self.sam_prompt_points, self.sam_prompt_labels):
-                    d_point = self.image_to_display_point(point.x(), point.y())
-                    if not d_point: continue
-                    color = QColor(0, 255, 0) if label == 1 else QColor(255, 0, 0) # Green for pos, Red for neg
-                    painter.setBrush(QBrush(color))
-                    painter.setPen(QPen(Qt.black, 1))
-                    painter.drawEllipse(d_point, 5, 5)
-
-            # Draw Box
-            if getattr(self, "sam_prompt_box", None):
-                d_rect = self.image_to_display_rect(self.sam_prompt_box)
-                pen = QPen(QColor(0, 191, 255), 2, Qt.SolidLine) # DeepSkyBlue
-                painter.setPen(pen)
-                painter.setBrush(Qt.NoBrush)
-                painter.drawRect(d_rect)
-
-        # Draw AI Processing overlay
-        if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
-            overlay_rect = self.rect()
-            painter.fillRect(overlay_rect, QColor(0, 0, 0, 120))
-            
-            painter.setPen(QPen(QColor(255, 255, 0)))
-            font = painter.font()
-            font.setPointSize(24)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(overlay_rect, Qt.AlignCenter, "AI is Processing this Frame...\nPlease Wait.")
-
-        # Draw blur region overlay (semi-transparent red hatched rectangles)
-        blur_mgr = getattr(getattr(self, 'main_window', None), 'blur_manager', None)
-        cur_frame = getattr(getattr(self, 'main_window', None), 'current_frame', -1)
-        if blur_mgr is not None and blur_mgr.has_blur(cur_frame):
-            display_rect = self.get_display_rect()
-            if self.pixmap and display_rect.isValid():
-                img_w = self.pixmap.width()
-                img_h = self.pixmap.height()
-                disp_w = display_rect.width()
-                disp_h = display_rect.height()
-                scale_x = disp_w / img_w if img_w > 0 else 1
-                scale_y = disp_h / img_h if img_h > 0 else 1
-                dx = display_rect.x()
-                dy = display_rect.y()
-                for region in blur_mgr.get_regions(cur_frame):
-                    rx = int(dx + region['x'] * scale_x)
-                    ry = int(dy + region['y'] * scale_y)
-                    rw = max(1, int(region['w'] * scale_x))
-                    rh = max(1, int(region['h'] * scale_y))
-                    r_color = QColor(255, 40, 40, 100) if region['type'] == 'pen' else QColor(255, 140, 0, 120)
-                    painter.fillRect(rx, ry, rw, rh, r_color)
-                    painter.setPen(QPen(QColor(255, 80, 80, 200), 1, Qt.DashLine))
-                    painter.drawRect(rx, ry, rw, rh)
-
-        # Draw blur pen cursor indicator when pen is active
-        if getattr(self, 'blur_pen_active', False) and self.pixmap:
-            cursor_pos = self.mapFromGlobal(self.cursor().pos())
-            if self.rect().contains(cursor_pos):
+                # Calculate display rectangle maintaining aspect ratio
                 display_rect = self.get_display_rect()
-                img_w = self.pixmap.width()
-                img_h = self.pixmap.height()
-                if img_w > 0 and img_h > 0 and display_rect.isValid():
-                    scale_x = display_rect.width() / img_w
-                    scale_y = display_rect.height() / img_h
-                    avg_scale = (scale_x + scale_y) / 2.0
-                    radius_disp = max(4, int(self.blur_pen_size * avg_scale))
-                    painter.setPen(QPen(QColor(255, 60, 60, 220), 2, Qt.DashLine))
-                    painter.setBrush(QBrush(QColor(255, 60, 60, 40)))
-                    painter.drawEllipse(cursor_pos, radius_disp, radius_disp)
+                self._last_display_rect = display_rect
+                if not display_rect.intersects(update_rect):
+                    return
+                if update_rect.contains(display_rect):
+                    # Full image is visible in update region
+                    painter.drawPixmap(display_rect, self.pixmap)
+                else:
+                    # Only part of the image needs redrawing - calculate source rectangle
+                    intersection = display_rect.intersected(update_rect)
+                    source_x = (intersection.x() - display_rect.x()) * self.pixmap.width() / display_rect.width()
+                    source_y = (intersection.y() - display_rect.y()) * self.pixmap.height() / display_rect.height()
+                    source_w = intersection.width() * self.pixmap.width() / display_rect.width()
+                    source_h = intersection.height() * self.pixmap.height() / display_rect.height()
 
+                    source_rect = QRect(int(source_x), int(source_y), int(source_w), int(source_h))
+                    painter.drawPixmap(intersection, self.pixmap, source_rect)
+
+                # Only draw annotations that intersect with the update area
+                for annotation in self.annotations:
+                    # Skip if object_filter is set and this annotation doesn't match
+                    if getattr(self, 'object_filter', None):
+                        _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
+                        if _aid != self.object_filter:
+                            continue
+
+                    # Skip annotations that fall below the class threshold
+                    if hasattr(annotation, 'score') and annotation.score is not None:
+                        threshold = (self.class_thresholds or {}).get(annotation.class_name, 0.0)
+                        if annotation.score < threshold:
+                            continue
+
+                    display_rect = self.image_to_display_rect(annotation.rect)
+
+                    # Skip annotations outside the update area
+                    if not display_rect.intersects(update_rect):
+                        continue
+                # # Draw the image
+                # painter.drawPixmap(display_rect, self.pixmap)
+
+                # Draw smart edge indicator if enabled
+                if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
+                    painter.setPen(QPen(QColor(0, 255, 0, 100), 4))
+                    painter.drawRect(display_rect.adjusted(2, 2, -2, -2))
+
+                    # Draw "Smart Edge" text in the top-right corner
+                    font = painter.font()
+                    font.setPointSize(10)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.setPen(QPen(QColor(0, 255, 0)))
+                    painter.drawText(
+                        display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
+                    )
+                # Draw annotations
+                for annotation in self.annotations:
+                    # Skip if object_filter is set and this annotation doesn't match
+                    if getattr(self, 'object_filter', None):
+                        _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
+                        if _aid != self.object_filter:
+                            continue
+                    # Convert annotation rectangle to display coordinates
+                    display_rect = self.image_to_display_rect(annotation.rect)
+
+                    # Skip if the rectangle is invalid or too small
+                    if display_rect.width() <= 0 or display_rect.height() <= 0:
+                        continue
+
+                    # Set pen based on selection status and source
+                    if annotation == self.selected_annotation or annotation in self.selected_annotations:
+                        pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
+                    else:
+                        # Get base color for the class
+                        base_color = annotation.color
+
+                        # Check if annotation has a track_id and modify color slightly based on it
+                        if hasattr(annotation, 'attributes') and 'track_id' in annotation.attributes:
+                            track_id = annotation.attributes['track_id']
+                            if isinstance(track_id, int):
+                                # Use the track_id to create a slight variation of the base color
+                                # This ensures different tracks of the same class have slightly different colors
+                                h, s, v, _ = base_color.getHsvF()
+                                # Modify hue based on track_id, keeping it within the same general color family
+                                h_offset = (track_id * 0.05) % 0.2  # Small offset to keep colors similar but distinct
+                                new_h = (h + h_offset) % 1.0
+                                # Create a new color with the modified hue
+                                modified_color = QColor.fromHsvF(new_h, s, v)
+                                base_color = modified_color
+                        # Determine pen style based on source
+                        if hasattr(annotation, 'source'):
+                            if annotation.source == "manual":
+                                pen = QPen(base_color, 2, Qt.SolidLine)
+                            elif annotation.source == "interpolated":
+                                pen = QPen(base_color, 2, Qt.DashLine)
+                            elif annotation.source == "tracked":
+                                pen = QPen(base_color, 2, Qt.DotLine)
+                            elif annotation.source == "detected":
+                                pen = QPen(base_color, 2, Qt.DashDotLine)
+                            else:
+                                pen = QPen(base_color, 2)
+                        else:
+                            pen = QPen(base_color, 2)
+
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(display_rect)
+
+                    # Draw segmentation polygon if enabled and available
+                    if getattr(self, 'show_segmentation', False) and getattr(annotation, 'segmentation', None):
+                        from PyQt5.QtGui import QPolygonF
+                        from PyQt5.QtCore import QPointF
+                        poly = QPolygonF()
+                        for (px, py) in annotation.segmentation:
+                            dp = self.image_to_display_point(px, py)
+                            poly.append(QPointF(dp.x(), dp.y()))
+                        if poly.size() >= 3:
+                            old_pen = painter.pen()
+                            seg_pen = QPen(QColor(0, 255, 0, 200), 1, Qt.DashLine)
+                            painter.setPen(seg_pen)
+                            painter.setBrush(QBrush(QColor(0, 255, 0, 40)))
+                            painter.drawPolygon(poly)
+                            painter.setPen(old_pen)
+                            painter.setBrush(Qt.NoBrush)
+
+                    # Highlight hovered annotation
+                    if annotation == self.selected_annotation and self.underMouse():
+                        painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
+                        painter.drawRect(display_rect)
+
+                    # Set up font for labels
+                    font = painter.font()
+                    font.setPointSize(8)
+                    painter.setFont(font)
+
+                    # Standard text height for all labels
+                    text_height = 16
+
+                    # Determine if we should draw the class label above or below the box
+                    # Check if there's more space above than below
+                    space_above = display_rect.top()
+                    space_below = self.height() - display_rect.bottom()
+                    draw_above = space_above >= space_below
+
+                    # Calculate class label width and position
+                    text_width = min(
+                        max(60, display_rect.width()), 120
+                    )  # Min 60px, max 120px
+
+                    # Position the class label centered horizontally with the box
+                    text_x = display_rect.left() + (display_rect.width() - text_width) / 2
+
+                    if draw_above:
+                        # Draw above the box with a small gap
+                        text_y = max(0, display_rect.top() - text_height - 2)
+                    else:
+                        # Draw below the box with a small gap
+                        text_y = min(self.height() - text_height, display_rect.bottom() + 2)
+
+                    text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
+
+                    # Draw class label with semi-transparent background
+                    # Add visual indicator for verification status
+                    bg_color = QColor(
+                        annotation.color.red(),
+                        annotation.color.green(),
+                        annotation.color.blue(),
+                        180,
+                    )
+
+                    # Add a border to indicate verification status
+                    if hasattr(annotation, 'verified') and not annotation.verified:
+                        # Draw a warning indicator for unverified annotations
+                        painter.fillRect(
+                            text_rect,
+                            QColor(255, 165, 0, 180)  # Orange background for unverified
+                        )
+
+                        # Add a small verification indicator
+                        verify_rect = QRect(
+                            int(text_rect.right() - 16),
+                            int(text_rect.top()),
+                            16,
+                            16
+                        )
+                        painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
+                        painter.setPen(QPen(QColor(255, 255, 255)))
+                        painter.drawText(verify_rect, int(Qt.AlignCenter), "!")
+                    else:
+                        painter.fillRect(text_rect, bg_color)
+
+                    # Draw source indicator if not manual
+                    if hasattr(annotation, 'source') and annotation.source != "manual":
+                        source_text = annotation.source[:1].upper()  # First letter of source
+                        source_rect = QRect(
+                            int(text_rect.left()),
+                            int(text_rect.top()),
+                            16,
+                            16
+                        )
+                        painter.fillRect(source_rect, QColor(0, 0, 0, 180))
+                        painter.setPen(QPen(QColor(255, 255, 255)))
+                        painter.drawText(source_rect, int(Qt.AlignCenter), source_text)
+
+                        # Adjust text rect to make room for source indicator
+                        text_rect.setLeft(text_rect.left() + 16)
+
+                    painter.setPen(QPen(QColor(0, 0, 0)))
+                    painter.drawText(text_rect, int(Qt.AlignCenter), annotation.class_name)
+
+                    # DEBUG: Show score if debug flag is enabled and annotation has a score
+                    if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
+                        score_text = f"{annotation.score:.2f}"
+                        score_rect = QRect(
+                            int(display_rect.right() - 40),
+                            int(display_rect.top() - 16),
+                            40,
+                            16
+                        )
+                        painter.fillRect(score_rect, QColor(0, 0, 0, 180))
+                        painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
+                        painter.drawText(score_rect, int(Qt.AlignCenter), score_text)
+
+                    # Draw attributes to the right of the box if there's space, otherwise to the left
+                    if getattr(self, 'show_attributes', True) and annotation.attributes:
+                        # Calculate the total height needed for all attributes
+                        attr_count = len(annotation.attributes)
+                        attr_total_height = text_height * attr_count
+
+                        # Format each attribute on its own line
+                        attr_lines = []
+                        for key, value in annotation.attributes.items():
+                            attr_lines.append(f"{key}: {value}")
+
+                        # Calculate width needed for the longest attribute
+                        attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
+
+                        # Check if there's enough space to the right
+                        space_right = self.width() - display_rect.right()
+
+                        if space_right >= attr_width + 5:
+                            # Draw to the right
+                            attr_x = display_rect.right() + 5
+                        else:
+                            # Draw to the left
+                            attr_x = max(0, display_rect.left() - attr_width - 5)
+
+                        # Vertically position attributes centered with the box
+                        # If too many attributes, start higher to fit them all
+                        if attr_total_height > display_rect.height():
+                            attr_y = max(0, display_rect.top())
+                        else:
+                            attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
+
+                        # Draw each attribute on its own line
+                        for i, attr_text in enumerate(attr_lines):
+                            attr_rect = QRect(
+                                int(attr_x),
+                                int(attr_y + i * text_height),
+                                attr_width,
+                                text_height,
+                            )
+
+                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            painter.drawText(attr_rect, int(Qt.AlignLeft | Qt.AlignVCenter), f" {attr_text}")
+                    # Draw resize handles (corners and edges)
+                    handle_size = 8
+                    for point in self.get_handle_points(display_rect):
+                        # Use class color for handle
+                        handle_fill = QColor(annotation.color)
+                        handle_fill.setAlpha(200)
+                        painter.setBrush(handle_fill)
+                        painter.setPen(QPen(QColor(0, 0, 0), 1))
+                        painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+
+                # Draw the in-progress bounding box (while drawing)
+                if self.is_drawing and self.start_point and self.current_point:
+                    color = self.class_colors.get(self.current_class, QColor(255, 0, 0, 180))
+                    pen = QPen(color, 2, Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    display_rect = self.image_to_display_rect(QRect(self.start_point, self.current_point).normalized())
+                    painter.drawRect(display_rect)
+
+                # For TwoClick mode: show the first point and a crosshair
+                if self.annotation_method == "TwoClick" and self.two_click_first_point:
+                    pen = QPen(QColor(0, 255, 0, 180), 2, Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    mouse_pos = self.current_point if self.current_point else self.two_click_first_point
+                    display_rect = self.image_to_display_rect(QRect(self.two_click_first_point, mouse_pos).normalized())
+                    painter.drawRect(display_rect)
+
+                # Draw SAM Interactive Prompts
+                if getattr(self, "sam_interactive_mode", False):
+                    # Draw Points
+                    if hasattr(self, "sam_prompt_points") and hasattr(self, "sam_prompt_labels"):
+                        for point, label in zip(self.sam_prompt_points, self.sam_prompt_labels):
+                            d_point = self.image_to_display_point(point.x(), point.y())
+                            if not d_point:
+                                continue
+                            color = QColor(0, 255, 0) if label == 1 else QColor(255, 0, 0)  # Green for pos, Red for neg
+                            painter.setBrush(QBrush(color))
+                            painter.setPen(QPen(Qt.black, 1))
+                            painter.drawEllipse(d_point, 5, 5)
+
+                    # Draw Box
+                    if getattr(self, "sam_prompt_box", None):
+                        d_rect = self.image_to_display_rect(self.sam_prompt_box)
+                        pen = QPen(QColor(0, 191, 255), 2, Qt.SolidLine)  # DeepSkyBlue
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(d_rect)
+
+                # Draw AI Processing overlay
+                if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
+                    overlay_rect = self.rect()
+                    painter.fillRect(overlay_rect, QColor(0, 0, 0, 120))
+
+                    painter.setPen(QPen(QColor(255, 255, 0)))
+                    font = painter.font()
+                    font.setPointSize(24)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.drawText(overlay_rect, int(Qt.AlignCenter), "AI is Processing this Frame...\nPlease Wait.")
+            finally:
+                painter.end()
 
     def get_display_rect(self):
         """Calculate the display rectangle maintaining aspect ratio and applying zoom"""
@@ -956,8 +918,9 @@ class VideoCanvas(QWidget):
             self.pan_start_pos = event.pos()
             self.setCursor(Qt.ClosedHandCursor)
             return
-        if event.button() == Qt.LeftButton:
-            if (
+        is_sam_mode = getattr(self, "sam_interactive_mode", False)
+        if event.button() == Qt.LeftButton or (event.button() == Qt.RightButton and is_sam_mode):
+            if event.button() == Qt.LeftButton and (
                 self.main_window
                 and hasattr(self.main_window, "is_playing")
                 and self.main_window.is_playing
@@ -977,7 +940,7 @@ class VideoCanvas(QWidget):
                     skip_selection = True
             elif self.is_auto_bbox_active():
                 skip_selection = True
-            elif getattr(self, "sam_interactive_mode", False):
+            elif is_sam_mode:
                 skip_selection = True
 
             if skip_selection:
@@ -1475,18 +1438,26 @@ class VideoCanvas(QWidget):
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
             return
-        if event.button() == Qt.LeftButton:
-            if getattr(self, "sam_interactive_mode", False) and self.is_drawing:
+        is_sam_mode = getattr(self, "sam_interactive_mode", False)
+        if event.button() == Qt.LeftButton or (event.button() == Qt.RightButton and is_sam_mode):
+            if is_sam_mode and self.is_drawing:
                 self.is_drawing = False
                 if self.start_point and self.current_point:
                     rect = QRect(self.start_point, self.current_point).normalized()
                     if rect.width() <= 5 and rect.height() <= 5:
                         # Treat as a point
                         self.sam_prompt_points.append(self.start_point)
-                        self.sam_prompt_labels.append(1)
+                        self.sam_prompt_labels.append(1 if event.button() == Qt.LeftButton else 0)
                     else:
-                        # Treat as bounding box
-                        self.sam_prompt_box = rect
+                        if event.button() == Qt.LeftButton:
+                            # Treat as bounding box
+                            self.sam_prompt_box = rect
+                        else:
+                            # Negative rectangle: add corners and center
+                            pts = [rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight(), rect.center()]
+                            for p in pts:
+                                self.sam_prompt_points.append(p)
+                                self.sam_prompt_labels.append(0)
                     self.update()
                     if hasattr(self.main_window, "sam_interactive_dock"):
                         num_pos = sum(1 for l in self.sam_prompt_labels if l == 1)
@@ -1496,7 +1467,7 @@ class VideoCanvas(QWidget):
                 self.current_point = None
                 return
 
-            if self.is_auto_bbox_active() and self.is_drawing:
+            if event.button() == Qt.LeftButton and self.is_auto_bbox_active() and self.is_drawing:
                 self.is_drawing = False
                 if self.start_point and self.current_point:
                     rect = QRect(self.start_point, self.current_point).normalized()

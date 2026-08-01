@@ -20,7 +20,11 @@ else:
     sys.path.insert(0, run_dir)
 
 from viat.main import VideoAnnotationTool  
-
+import cv2
+import PyQt5
+os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(
+    os.path.dirname(PyQt5.__file__), "Qt5", "plugins", "platforms"
+)
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 

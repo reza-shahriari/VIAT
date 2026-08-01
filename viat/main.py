@@ -1533,6 +1533,10 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.sam_prompt_points = []
         self.canvas.sam_prompt_labels = []
         self.canvas.sam_prompt_box = None
+        
+        if hasattr(self.canvas, 'annotations'):
+            self.canvas.annotations = [a for a in self.canvas.annotations if getattr(a, 'is_sam_preview', False) == False]
+            
         self.sam_interactive_dock.update_status(0, 0, False)
         
         # Clear sessions in both managers
@@ -2036,6 +2040,8 @@ class VideoAnnotationTool(QMainWindow):
             self.is_image_dataset = False
             self.canvas.annotations = []
             self.frame_annotations = {}
+            self.deleted_frames = set()
+            self.deleted_annotations = {}
             self.current_frame = 0
             self.frame_hashes = {}
             self.duplicate_frames_cache = {}
@@ -2102,6 +2108,8 @@ class VideoAnnotationTool(QMainWindow):
             self.is_image_dataset = False
             self.canvas.annotations = []
             self.frame_annotations = {}
+            self.deleted_frames = set()
+            self.deleted_annotations = {}
             self.current_frame = 0
             self.frame_hashes = {}
             self.duplicate_frames_cache = {}
@@ -2113,6 +2121,8 @@ class VideoAnnotationTool(QMainWindow):
                 self.is_image_dataset = False
                 self.canvas.annotations = []
                 self.frame_annotations = {}
+                self.deleted_frames = set()
+                self.deleted_annotations = {}
                 self.current_frame = 0
                 self.frame_hashes = {}
                 self.duplicate_frames_cache = {}
@@ -2163,6 +2173,8 @@ class VideoAnnotationTool(QMainWindow):
         self.is_image_dataset = False
         self.canvas.annotations = []
         self.frame_annotations = {}
+        self.deleted_frames = set()
+        self.deleted_annotations = {}
         self.current_frame = 0
         self.frame_hashes = {}
         self.duplicate_frames_cache = {}
@@ -2549,6 +2561,8 @@ The file might be corrupted or have an unsupported format."""
             self.canvas.selected_annotation = None
             self.canvas.update()
         self.frame_annotations = {}
+        self.deleted_frames = set()
+        self.deleted_annotations = {}
         self.current_frame = 0
         self.video_path = None
         self.image_dataset_info = None
