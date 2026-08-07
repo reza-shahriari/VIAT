@@ -1,4 +1,4 @@
-﻿"""
+"""
 Frame caching + fast seek for VIAT video playback performance.
 
 Problem: large videos are slow because cv2.VideoCapture.set(POS_FRAMES) is
@@ -77,7 +77,7 @@ class FrameCache:
 # --------------------------------------------------------------------------- #
 
 
-def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = None):
+def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = None, backward_prefetch: int = 15):
     """Seek to target_frame efficiently, returning the decoded frame.
 
     Strategy:
@@ -85,13 +85,17 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
       2. If target is current_frame + 1, just cap.read() (fastest).
       3. If target is within ~30 frames forward, use cap.grab() to skip
          decoding intermediate frames, then cap.read() the target.
-      4. Otherwise, fall back to cap.set(POS_FRAMES) + cap.read().
+      4. If target < current_frame (backward seek) and not in cache,
+         pre-fetch a small contiguous range of frames [target_frame - prefetch .. target_frame]
+         starting from an earlier frame so that subsequent backward steps hit cache.
+      5. Otherwise, fall back to cap.set(POS_FRAMES) + cap.read().
 
     Args:
         cap: cv2.VideoCapture (opened).
         target_frame: frame number to seek to.
         current_frame: the current frame position (for proximity check).
         cache: optional FrameCache.
+        backward_prefetch: number of preceding frames to pre-fetch on backward seek cache miss.
 
     Returns:
         (frame, actual_frame) or (None, target_frame) on failure.
@@ -129,7 +133,23 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
                 cache.put(target_frame, frame)
             return frame, target_frame
 
-    # 4. Fallback: set POS_FRAMES + read
+    # 4. Backward seek: pre-fetch range if target_frame < current_frame
+    if target_frame < current_frame and backward_prefetch > 0:
+        start_frame = max(0, target_frame - backward_prefetch)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        target_img = None
+        for f in range(start_frame, target_frame + 1):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            if cache:
+                cache.put(f, frame)
+            if f == target_frame:
+                target_img = frame
+        if target_img is not None:
+            return target_img, target_frame
+
+    # 5. Fallback: set POS_FRAMES + read
     cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
     ret, frame = cap.read()
     if ret and frame is not None:
@@ -157,9 +177,10 @@ class PerformanceManager:
     - optimize_frame_hashes() is provided as a passthrough
     """
 
-    def __init__(self, app=None, cache_capacity: int = 60):
+    def __init__(self, app=None, cache_capacity: int = 200, backward_prefetch: int = 15):
         self.app = app
         self.cache = FrameCache(cache_capacity)
+        self.backward_prefetch = backward_prefetch
         self._debounce_timer = None
         self._pending_update = False
 
@@ -172,7 +193,7 @@ class PerformanceManager:
             return None
 
         current = getattr(self.app, "current_frame", 0)
-        frame, actual = fast_seek(cap, target_frame, current, self.cache)
+        frame, actual = fast_seek(cap, target_frame, current, self.cache, self.backward_prefetch)
         return frame
 
     def clear_cache(self):

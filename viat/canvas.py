@@ -529,17 +529,45 @@ class VideoCanvas(QWidget):
                         painter.setBrush(Qt.NoBrush)
                         painter.drawRect(d_rect)
 
-                # Draw AI Processing overlay
-                if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
-                    overlay_rect = self.rect()
-                    painter.fillRect(overlay_rect, QColor(0, 0, 0, 120))
+                # Draw REMOVED overlay banner if current frame is marked as deleted/removed
+                if hasattr(self, 'main_window') and self.main_window:
+                    cur_frame = getattr(self.main_window, 'current_frame', -1)
+                    deleted_set = getattr(self.main_window, 'deleted_frames', set())
+                    if cur_frame >= 0 and cur_frame in deleted_set:
+                        display_rect = self.get_display_rect()
+                        if not display_rect.isEmpty():
+                            # Translucent dark red tint over the image area
+                            painter.fillRect(display_rect, QColor(180, 0, 0, 45))
 
-                    painter.setPen(QPen(QColor(255, 255, 0)))
-                    font = painter.font()
-                    font.setPointSize(24)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    painter.drawText(overlay_rect, int(Qt.AlignCenter), "AI is Processing this Frame...\nPlease Wait.")
+                            # Banner card at top-center of the image
+                            banner_w = min(display_rect.width() - 40, 500)
+                            banner_h = 65
+                            banner_x = display_rect.left() + (display_rect.width() - banner_w) // 2
+                            banner_y = display_rect.top() + 20
+                            banner_rect = QRect(int(banner_x), int(banner_y), int(banner_w), int(banner_h))
+
+                            # Dark translucent red background with white border
+                            painter.setBrush(QBrush(QColor(180, 20, 20, 220)))
+                            painter.setPen(QPen(QColor(255, 255, 255, 230), 2))
+                            painter.drawRoundedRect(banner_rect, 10, 10)
+
+                            # Title: FRAME REMOVED
+                            font = painter.font()
+                            font.setPointSize(15)
+                            font.setBold(True)
+                            painter.setFont(font)
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            title_rect = QRect(banner_rect.left(), banner_rect.top() + 8, banner_rect.width(), 26)
+                            painter.drawText(title_rect, int(Qt.AlignCenter), "FRAME REMOVED")
+
+                            # Subtitle: Instructions to restore
+                            sub_font = painter.font()
+                            sub_font.setPointSize(9)
+                            sub_font.setBold(False)
+                            painter.setFont(sub_font)
+                            painter.setPen(QPen(QColor(255, 220, 220)))
+                            sub_rect = QRect(banner_rect.left(), banner_rect.top() + 36, banner_rect.width(), 20)
+                            painter.drawText(sub_rect, int(Qt.AlignCenter), "Press Shift+X to restore frame to dataset")
             finally:
                 painter.end()
 

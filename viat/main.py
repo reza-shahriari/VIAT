@@ -490,10 +490,10 @@ class VideoAnnotationTool(QMainWindow):
         self.annotation_manager = AnnotationManager(self, self.canvas)
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
-        self.performance_manager = PerfomanceManger()
+        self.performance_manager = PerfomanceManger(self, cache_capacity=200)
         from viat.utils.blur_manager import BlurManager
         self.blur_manager = BlurManager()
-        self.viat_perf = _ViatPerformanceManager(self, cache_capacity=60)
+        self.viat_perf = self.performance_manager
         self.tracker_manager = TrackerManager()
         self.sam_manager = SamManager()
         self.sam3_native_manager = Sam3NativeManager()
@@ -2283,6 +2283,9 @@ class VideoAnnotationTool(QMainWindow):
         if self.cap:
             self.cap.release()
             
+        if hasattr(self, 'performance_manager') and self.performance_manager:
+            self.performance_manager.clear_cache()
+            
         if hasattr(self, 'blur_manager') and self.blur_manager is not None:
             self.blur_manager.clear_all()
             
@@ -2622,6 +2625,8 @@ The file might be corrupted or have an unsupported format."""
             self.update_dataset_labels_action.setEnabled(False)
         self.frame_hashes = {}
         self.duplicate_frames_cache = {}
+        if hasattr(self, 'performance_manager') and self.performance_manager:
+            self.performance_manager.clear_cache()
         if hasattr(self, 'blur_manager') and self.blur_manager is not None:
             self.blur_manager.clear_all()
         if hasattr(self, 'annotation_dock'):
@@ -2824,7 +2829,10 @@ Would you like to load it?"""
                     prv -= 1
                 if prv >= 0:
                     frame_number = prv
-        if frame_number == self.current_frame + 1:
+        if hasattr(self, 'performance_manager') and self.performance_manager:
+            frame = self.performance_manager.seek_frame(frame_number)
+            ret = frame is not None
+        elif frame_number == self.current_frame + 1:
             ret, frame = self.cap.read()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -2843,9 +2851,6 @@ Would you like to load it?"""
         return True
 
     def _should_show_frame(self, frame_idx):
-        if hasattr(self, 'deleted_frames') and frame_idx in self.deleted_frames:
-            return False
-            
         if getattr(self, 'only_show_empty_frames', False):
             if self.frame_annotations.get(frame_idx, []):
                 return False
@@ -6364,20 +6369,50 @@ Do you want to scan the entire video now for duplicate frames?
                         ) and self.canvas.selected_annotation:
                         self.delete_selected_annotation()
                         return True
+
+            # SAM Interactive Dock Shortcuts (Z: Preview, X: Clear Prompts, C: Execute)
+            sam_active = (hasattr(self, 'sam_interactive_dock') and self.sam_interactive_dock.isVisible()) or getattr(getattr(self, 'canvas', None), 'sam_interactive_mode', False)
+            if sam_active and not typing:
+                if event.key() == Qt.Key_Z and not (mods & Qt.ControlModifier):
+                    self.sam_interactive_dock.btn_preview.click()
+                    return True
+                if event.key() == Qt.Key_X and not (mods & (Qt.ControlModifier | Qt.ShiftModifier)):
+                    self.sam_interactive_dock.btn_clear.click()
+                    return True
+                if event.key() == Qt.Key_C and not (mods & Qt.ControlModifier):
+                    self.sam_interactive_dock.btn_track.click()
+                    return True
         return super().eventFilter(obj, event)
 
     @log_exceptions
     def delete_current_frame(self):
-        self.deleted_frames.add(self.current_frame)
-        self.statusBar.showMessage(f'Frame {self.current_frame} DELETED.')
-        
-        # Clear annotations if deleting
-        if self.current_frame in self.frame_annotations:
-            del self.frame_annotations[self.current_frame]
-        self.canvas.annotations.clear()
-        
-        # Auto-advance to the next valid frame
-        self.next_frame()
+        """Toggle frame deletion status (mark as REMOVED or RESTORE)."""
+        if not hasattr(self, 'deleted_frames'):
+            self.deleted_frames = set()
+        if not hasattr(self, 'deleted_annotations'):
+            self.deleted_annotations = {}
+
+        if self.current_frame in self.deleted_frames:
+            # UN-DELETE / RESTORE FRAME
+            self.deleted_frames.remove(self.current_frame)
+            if self.current_frame in self.deleted_annotations:
+                self.frame_annotations[self.current_frame] = self.deleted_annotations.pop(self.current_frame)
+                self.canvas.annotations = list(self.frame_annotations[self.current_frame])
+            self.statusBar.showMessage(f'Frame {self.current_frame} RESTORED to dataset.', 4000)
+            self.update_frame_display()
+            self.canvas.update()
+        else:
+            # MARK FRAME AS REMOVED
+            self.deleted_frames.add(self.current_frame)
+            if self.current_frame in self.frame_annotations:
+                self.deleted_annotations[self.current_frame] = self.frame_annotations[self.current_frame]
+                del self.frame_annotations[self.current_frame]
+            self.canvas.annotations.clear()
+            self.statusBar.showMessage(f'Frame {self.current_frame} marked as REMOVED (Press Shift+X to restore).', 4000)
+            self.update_frame_display()
+            self.canvas.update()
+            # Auto-advance to the next frame
+            self.next_frame()
 
     @log_exceptions
     def keyPressEvent(self, event):

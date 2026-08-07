@@ -116,9 +116,12 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.range_widget)
 
         # Action Buttons
-        self.btn_clear = QPushButton("Clear Prompts")
-        self.btn_preview = QPushButton("Preview Mask (Current Frame)")
-        self.btn_track = QPushButton("Execute Tracking")
+        self.btn_clear = QPushButton("Clear Prompts [X]")
+        self.btn_clear.setToolTip("Clear all prompt points and bounding boxes (Shortcut: X)")
+        self.btn_preview = QPushButton("Preview Mask [Z]")
+        self.btn_preview.setToolTip("Preview SAM segmentation mask on current frame (Shortcut: Z)")
+        self.btn_track = QPushButton("Execute Tracking [C]")
+        self.btn_track.setToolTip("Execute SAM tracking / detection (Shortcut: C)")
         
         self.btn_track.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         
@@ -129,6 +132,8 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.btn_clear)
         self.layout.addWidget(self.btn_preview)
         self.layout.addWidget(self.btn_track)
+        
+        self._update_execute_button_label()
         
         self.layout.addStretch()
         self.setWidget(self.widget)
@@ -146,11 +151,11 @@ class SAMInteractiveDock(QDockWidget):
         """Update the execute button label based on current mode."""
         scope = self.cmb_scope.currentIndex()
         if scope == 0:
-            self.btn_track.setText("Execute (Current Frame)")
+            self.btn_track.setText("Execute (Current Frame) [C]")
         elif self.chk_frame_by_frame.isChecked():
-            self.btn_track.setText("Run Frame-by-Frame Detection")
+            self.btn_track.setText("Run Frame-by-Frame Detection [C]")
         else:
-            self.btn_track.setText("Execute Tracking")
+            self.btn_track.setText("Execute Tracking [C]")
 
     def on_model_changed(self, index):
         self.model_changed.emit(self.get_model_type())
