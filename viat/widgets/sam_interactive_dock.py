@@ -95,6 +95,11 @@ class SAMInteractiveDock(QDockWidget):
         self.chk_save_seg.setChecked(False)
         self.layout.addWidget(self.chk_save_seg)
 
+        # Blur Tracked Objects
+        self.chk_blur_tracked = QCheckBox("Automatically Blur Tracked Objects")
+        self.chk_blur_tracked.setChecked(False)
+        self.layout.addWidget(self.chk_blur_tracked)
+
         # Custom Range
         self.range_widget = QWidget()
         range_layout = QHBoxLayout(self.range_widget)
@@ -190,6 +195,9 @@ class SAMInteractiveDock(QDockWidget):
 
     def get_save_segmentation(self):
         return self.chk_save_seg.isChecked()
+
+    def get_blur_tracked_objects(self):
+        return self.chk_blur_tracked.isChecked()
 
     def get_text_prompt(self):
         return self.txt_prompt.text().strip()

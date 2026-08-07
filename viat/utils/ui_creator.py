@@ -117,6 +117,13 @@ class UICreator:
         export_action.triggered.connect(self.main_window.export_annotations)
         file_menu.addAction(export_action)
 
+        # Export Blurred Video action
+        export_blurred_action = QAction("Export Blurred Video", self.main_window)
+        export_blurred_action.triggered.connect(
+            lambda: getattr(self.main_window, 'export_blurred_video', lambda: None)()
+        )
+        file_menu.addAction(export_blurred_action)
+
         # Update Original Dataset Labels action
         update_dataset_labels_action = QAction("Update Original Dataset Labels", self.main_window)
         update_dataset_labels_action.triggered.connect(self.main_window.update_original_dataset_labels)
@@ -408,6 +415,22 @@ class UICreator:
         self.pan_tool_action.triggered.connect(self.main_window.toggle_pan_mode)
         self.main_window.toolbar.addAction(self.pan_tool_action)
         self.main_window.pan_tool_action = self.pan_tool_action
+
+        # Add blur pen tool action
+        self.blur_pen_action = QAction("Blur Pen", self.main_window)
+        self.blur_pen_action.setIcon(self.main_window.icon_provider.get_icon("edit-clear"))  # Using edit-clear as a fallback icon
+        self.blur_pen_action.setCheckable(True)
+        self.blur_pen_action.setChecked(False)
+        self.blur_pen_action.setToolTip("Enable Blur Pen (left-click to draw blur, right-click to erase)")
+        def toggle_blur_pen(checked):
+            self.main_window.canvas.blur_pen_active = checked
+            if checked:
+                self.main_window.canvas.setCursor(Qt.CrossCursor)
+            else:
+                self.main_window.canvas.setCursor(Qt.ArrowCursor)
+        self.blur_pen_action.triggered.connect(toggle_blur_pen)
+        self.main_window.toolbar.addAction(self.blur_pen_action)
+        self.main_window.blur_pen_action = self.blur_pen_action
 
         # Add auto bbox tool action
         self.auto_bbox_action = QAction("Auto BBox", self.main_window)

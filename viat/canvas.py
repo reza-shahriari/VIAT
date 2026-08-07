@@ -129,7 +129,7 @@ class VideoCanvas(QWidget):
         # Blur pen tool state
         self.blur_pen_active = False   # True when Blur Mode + Pen are both on
         self.blur_pen_size = 30        # pen radius in image pixels
-        self.blur_kernel = 51          # Gaussian kernel size
+        self.blur_kernel = 151          # Gaussian kernel size
         self.blur_drawing = False      # True while mouse button is held
         self.blur_last_pos = None      # last image-coordinate QPoint
 
@@ -167,9 +167,18 @@ class VideoCanvas(QWidget):
             
         self.current_frame_array = rgb_frame.copy()
         
+        # Apply blur if blur manager is available
+        if hasattr(self, 'main_window') and self.main_window:
+            blur_mgr = getattr(self.main_window, 'blur_manager', None)
+            cur_frame = getattr(self.main_window, 'current_frame', 0)
+            if blur_mgr is not None and blur_mgr.has_blur(cur_frame):
+                rgb_frame = blur_mgr.apply_blur_to_frame(rgb_frame, cur_frame)
+        
+        self.display_frame_array = rgb_frame  # Keep reference alive
+        
         # Create QImage without copying data when possible
         bytes_per_line = 3 * w
-        q_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        q_img = QImage(self.display_frame_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
         
         # Convert to QPixmap
         old_size = (self.pixmap.width(), self.pixmap.height()) if self.pixmap else None
@@ -853,6 +862,29 @@ class VideoCanvas(QWidget):
         # Otherwise, always return the smallest bounding box under the cursor
         return matching_annotations[0]
 
+    def _erase_blur_at(self, blur_mgr, frame_idx, pos):
+        """Erase any blur region (pen or bbox) containing the given image position."""
+        regions = blur_mgr.get_regions(frame_idx)
+        if not regions:
+            return
+            
+        remaining = []
+        modified = False
+        
+        for r in regions:
+            x, y, w, h = r["x"], r["y"], r["w"], r["h"]
+            rect = QRect(x, y, w, h)
+            if rect.contains(pos):
+                modified = True
+                # Skip this region to "erase" it
+            else:
+                remaining.append(r)
+                
+        if modified:
+            blur_mgr.blur_regions[frame_idx] = remaining
+            if not remaining:
+                del blur_mgr.blur_regions[frame_idx]
+
     def is_auto_bbox_active(self):
         """Return True if auto bbox mode is enabled and Shift key is not pressed."""
         if not getattr(self.main_window, "auto_bbox_mode", False):
@@ -1237,6 +1269,28 @@ class VideoCanvas(QWidget):
         """Handle mouse move events"""
         if not self.pixmap:
             return
+
+        # Blur pen mode — drag to paint/erase
+        if getattr(self, 'blur_pen_active', False) and getattr(self, 'blur_drawing', False):
+            img_pos = self.display_to_image_pos(event.pos())
+            if img_pos and self.main_window:
+                blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                cur_frame = getattr(self.main_window, 'current_frame', 0)
+                if blur_mgr is not None:
+                    if int(event.buttons()) & int(Qt.LeftButton):
+                        blur_mgr.add_pen_stroke(
+                            cur_frame, img_pos.x(), img_pos.y(),
+                            self.blur_pen_size, self.blur_kernel
+                        )
+                    elif int(event.buttons()) & int(Qt.RightButton):
+                        self._erase_blur_at(blur_mgr, cur_frame, img_pos)
+                    
+                    if hasattr(self.main_window, '_refresh_blur_display'):
+                        self.main_window._refresh_blur_display()
+                    else:
+                        self.update()
+            return
+
         # Handle panning
         if self.panning and self.pan_start_pos:
             delta = event.pos() - self.pan_start_pos
@@ -1432,6 +1486,12 @@ class VideoCanvas(QWidget):
         self.setFocus()
         if not self.pixmap:
             return
+
+        # Blur pen mode release
+        if getattr(self, 'blur_pen_active', False) and getattr(self, 'blur_drawing', False):
+            self.blur_drawing = False
+            return
+
         if self.panning and (event.button() == Qt.MiddleButton or 
                 (event.button() == Qt.LeftButton and self.pan_mode_enabled)):
             self.panning = False
@@ -1660,6 +1720,7 @@ class VideoCanvas(QWidget):
             # Add actions
             edit_action = context_menu.addAction("Edit Annotation")
             delete_action = context_menu.addAction("Delete Annotation")
+            blur_action = context_menu.addAction("Blur Region")
             
             # Add verification option for machine-generated annotations
             verify_action = None
@@ -1673,8 +1734,17 @@ class VideoCanvas(QWidget):
                 action = change_class_menu.addAction(class_name)
                 action.setData(class_name)
 
+            # Record current frame
+            start_frame = getattr(self.main_window, 'current_frame', None)
+
             # Show the menu and get the selected action
             action = context_menu.exec_(self.mapToGlobal(position))
+
+            # If the frame has changed while the menu was open, ignore the action
+            current_frame = getattr(self.main_window, 'current_frame', None)
+            if start_frame is not None and current_frame != start_frame:
+                return
+
 
             # Handle the selected action
             if action:
@@ -1682,6 +1752,17 @@ class VideoCanvas(QWidget):
                     # Call the edit annotation method in the main window
                     if self.main_window:
                         self.main_window.edit_annotation(self.selected_annotation)
+                elif action == blur_action:
+                    blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                    cur_frame = getattr(self.main_window, 'current_frame', 0)
+                    if blur_mgr is not None:
+                        blur_mgr.add_bbox_region(cur_frame, self.selected_annotation.rect, self.blur_kernel)
+                        if self.main_window:
+                            self.main_window.delete_selected_annotation()
+                        if hasattr(self.main_window, '_refresh_blur_display'):
+                            self.main_window._refresh_blur_display()
+                        else:
+                            self.update()
                 elif action == delete_action:
                     # Call the delete annotation method in the main window
                     if self.main_window:

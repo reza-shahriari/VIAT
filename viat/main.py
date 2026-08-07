@@ -162,21 +162,30 @@ class AutoLabelWorker(QThread):
                 return iou
 
             def get_frame_generator():
-                for f_idx in range(start_frame, end_frame + 1):
-                    if self.is_cancelled:
-                        break
-                    if self.is_image_dataset:
+                if self.is_image_dataset:
+                    for f_idx in range(start_frame, end_frame + 1):
+                        if self.is_cancelled:
+                            break
                         if f_idx < len(self.image_files):
                             frame = cv2.imread(self.image_files[f_idx])
                             if frame is not None:
                                 yield f_idx, frame
-                    else:
-                        cap = cv2.VideoCapture(self.video_filename)
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                        ret, frame = cap.read()
+                else:
+                    # Open VideoCapture ONCE and read sequentially —
+                    # avoids the massive overhead of open+seek+close per frame.
+                    cap = cv2.VideoCapture(self.video_filename)
+                    try:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                        for f_idx in range(start_frame, end_frame + 1):
+                            if self.is_cancelled:
+                                break
+                            ret, frame = cap.read()
+                            if ret:
+                                yield f_idx, frame
+                            else:
+                                break
+                    finally:
                         cap.release()
-                        if ret:
-                            yield f_idx, frame
             if strategy == 'tracking':
                 pass
             frame_detections = {f_idx: [] for f_idx in range(start_frame, end_frame + 1)}
@@ -187,7 +196,9 @@ class AutoLabelWorker(QThread):
 
             dedup_rules = {}
             for c in classes_config:
-                if c['action'] == 'Detect (Zero-Shot)':
+                if not isinstance(c, dict):
+                    continue
+                if c.get('action') == 'Detect (Zero-Shot)':
                     rule = c.get('dedup_against', '').strip().lower()
                     if rule == '*':
                         dedup_rules[c['name']] = '*'
@@ -284,7 +295,9 @@ class AutoLabelWorker(QThread):
                     success, _ = self.zero_shot_manager.load_model(model_name)
                     if success:
                         self.zero_shot_manager.set_classes(detect_prompts)
-                        model_dets = self.zero_shot_manager.predict(frame)
+                        # Pass min_score so the manager does NOT silently discard
+                        # detections that pass the user-configured threshold.
+                        model_dets = self.zero_shot_manager.predict(frame, score_threshold=min_score)
                         for det in model_dets:
                             det['is_helper'] = False
                         current_detections.extend(model_dets)
@@ -478,6 +491,8 @@ class VideoAnnotationTool(QMainWindow):
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
         self.performance_manager = PerfomanceManger()
+        from viat.utils.blur_manager import BlurManager
+        self.blur_manager = BlurManager()
         self.viat_perf = _ViatPerformanceManager(self, cache_capacity=60)
         self.tracker_manager = TrackerManager()
         self.sam_manager = SamManager()
@@ -1155,6 +1170,7 @@ class VideoAnnotationTool(QMainWindow):
                     
                 progress.setValue(i)
                 progress.setLabelText(f"Detecting '{prompt}' in frame {target_idx}...")
+                self.set_current_frame(target_idx)
                 QApplication.processEvents()
                 
                 # Load frame
@@ -1201,6 +1217,8 @@ class VideoAnnotationTool(QMainWindow):
                         self.frame_annotations[target_idx].append(new_ann)
                         
                     predictions_made += len(detections)
+                    self.load_current_frame_annotations()
+                    self.update_frame_display()
                     
             progress.setValue(len(frame_indices))
             
@@ -1401,6 +1419,7 @@ class VideoAnnotationTool(QMainWindow):
                     break
                     
                 progress.setValue(i)
+                self.set_current_frame(target_idx)
                 QApplication.processEvents()
                 
                 # Check neighbors
@@ -1451,6 +1470,8 @@ class VideoAnnotationTool(QMainWindow):
                                 new_annots.append(new_ann)
                         self.frame_annotations[target_idx] = new_annots
                         predictions_made += 1
+                        self.load_current_frame_annotations()
+                        self.update_frame_display()
                         
             progress.setValue(len(empty_frames))
             
@@ -1720,7 +1741,10 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_tracked',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                self.frame_annotations[start_f].append(ann)
+                if self.sam_interactive_dock.get_blur_tracked_objects():
+                    self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
+                else:
+                    self.frame_annotations[start_f].append(ann)
             else:
                 QMessageBox.warning(self, 'Tracking Error',
                     'No object detected.')
@@ -1779,6 +1803,7 @@ class VideoAnnotationTool(QMainWindow):
                 if progress.wasCanceled():
                     break
                 progress.setValue(f_idx)
+                self.set_current_frame(f_idx)
                 QApplication.processEvents()
                 frame = _read_frame_detect(f_idx)
                 if frame is None:
@@ -1819,8 +1844,13 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_detected',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                self.frame_annotations[f_idx].append(ann)
+                if self.sam_interactive_dock.get_blur_tracked_objects():
+                    self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
+                else:
+                    self.frame_annotations[f_idx].append(ann)
                 detected_count += 1
+                self.load_current_frame_annotations()
+                self.update_frame_display()
             if not (hasattr(self, 'is_image_dataset') and self.is_image_dataset
                 ):
                 _detect_cap.release()
@@ -1848,6 +1878,8 @@ class VideoAnnotationTool(QMainWindow):
         for success, track_res in results_generator:
             if progress.wasCanceled():
                 break
+            self.set_current_frame(current_f)
+            QApplication.processEvents()
             if not success:
                 QMessageBox.warning(self, 'Tracking Error', track_res)
                 break
@@ -1870,7 +1902,12 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_tracked',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                self.frame_annotations[current_f].append(ann)
+                if self.sam_interactive_dock.get_blur_tracked_objects():
+                    self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
+                else:
+                    self.frame_annotations[current_f].append(ann)
+            self.load_current_frame_annotations()
+            self.update_frame_display()
             progress.setValue(current_f)
             current_f += 1
         progress.close()
@@ -2053,10 +2090,16 @@ class VideoAnnotationTool(QMainWindow):
         if not hasattr(self, 'video_filename') or not self.video_filename:
             return
 
+        has_blurs = hasattr(self, 'blur_manager') and bool(self.blur_manager.blur_regions)
+
         # 1. Export Raya with classes
         default_dir = os.path.dirname(self.video_filename)
         default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
-        export_path = os.path.join(default_dir, default_filename + '.txt')
+        
+        if has_blurs:
+            export_path = os.path.join(default_dir, default_filename + '_blurred.txt')
+        else:
+            export_path = os.path.join(default_dir, default_filename + '.txt')
 
         from viat.utils.file_operations import export_raya_with_classes_annotations
         all_annotations = []
@@ -2073,13 +2116,17 @@ class VideoAnnotationTool(QMainWindow):
         classes = list(self.canvas.class_colors.keys())
         try:
             deleted = getattr(self, 'deleted_frames', set())
-            export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted)
+            total_f = getattr(self, 'total_frames', None)
+            export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
             self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to fast export: {str(e)}')
             import traceback
             traceback.print_exc()
             return
+            
+        if has_blurs:
+            self.export_blurred_video(interactive=False)
             
         # 2. Find next video
         video_exts = ['.mp4', '.avi', '.mov', '.mkv']
@@ -2235,6 +2282,10 @@ class VideoAnnotationTool(QMainWindow):
         """Load a video file and display the first frame."""
         if self.cap:
             self.cap.release()
+            
+        if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+            self.blur_manager.clear_all()
+            
         self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
         if not self.cap.isOpened():
             QMessageBox.critical(self, 'Error', 'Could not open video file!')
@@ -2571,6 +2622,8 @@ The file might be corrupted or have an unsupported format."""
             self.update_dataset_labels_action.setEnabled(False)
         self.frame_hashes = {}
         self.duplicate_frames_cache = {}
+        if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+            self.blur_manager.clear_all()
         if hasattr(self, 'annotation_dock'):
             self.annotation_dock.update_annotation_list()
         self.statusBar.showMessage('Ready')
@@ -2739,6 +2792,15 @@ Would you like to load it?"""
             frame_number = int(value)
             if frame_number != self.current_frame:
                 self.set_current_frame(frame_number)
+
+    @log_exceptions
+    def _refresh_blur_display(self):
+        """Refresh the canvas display to show updated blur regions."""
+        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+            self.load_current_image()
+        elif self.cap and self.cap.isOpened():
+            # seek_to_frame re-reads the frame and sets it on canvas
+            self.seek_to_frame(self.current_frame)
 
     @log_exceptions
     def seek_to_frame(self, frame_number):
@@ -3191,6 +3253,9 @@ Would you like to load it?"""
                 after = sum(1 for a in annotations if getattr(a, 'uncertain', False))
                 uncertain_count += (after - before)
 
+            self.set_current_frame(frame_idx)
+            self.load_current_frame_annotations()
+            self.update_frame_display()
             frames_processed += 1
             progress.setValue(frames_processed)
             QApplication.processEvents()
@@ -3472,16 +3537,19 @@ Would you like to load it?"""
         """Delete the currently selected annotation."""
         if hasattr(self.canvas, 'selected_annotation'
             ) and self.canvas.selected_annotation:
-            self.save_undo_state()
-            self.track_deleted_annotation(self.canvas.selected_annotation)
-            self.canvas.annotations.remove(self.canvas.selected_annotation)
-            self.canvas.selected_annotation = None
-            self.canvas.update()
-            self.project_modified = True
-            self.frame_annotations[self.current_frame
-                ] = self.canvas.annotations.copy()
-            if hasattr(self, 'update_annotation_list'):
-                self.update_annotation_list()
+            if self.canvas.selected_annotation in self.canvas.annotations:
+                self.save_undo_state()
+                self.track_deleted_annotation(self.canvas.selected_annotation)
+                self.canvas.annotations.remove(self.canvas.selected_annotation)
+                self.canvas.selected_annotation = None
+                self.canvas.update()
+                self.project_modified = True
+                self.frame_annotations[self.current_frame
+                    ] = self.canvas.annotations.copy()
+                if hasattr(self, 'update_annotation_list'):
+                    self.update_annotation_list()
+            else:
+                self.canvas.selected_annotation = None
 
     @log_exceptions
     def add_empty_annotation(self):
@@ -4266,13 +4334,15 @@ First error: {errors[0]}"""
                         all_annotations = self.canvas.annotations
                     classes = list(self.canvas.class_colors.keys())
                     deleted = getattr(self, 'deleted_frames', set())
+                    total_f = getattr(self, 'total_frames', None)
                     export_raya_with_classes_annotations(filename,
-                        all_annotations, classes, deleted_frames=deleted)
+                        all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
                 else:
                     deleted = getattr(self, 'deleted_frames', set())
+                    total_f = getattr(self, 'total_frames', None)
                     export_standard_annotations(filename, self.
                         frame_annotations, self.canvas.annotations,
-                        export_format, image_width, image_height, deleted_frames=deleted)
+                        export_format, image_width, image_height, deleted_frames=deleted, total_frames=total_f)
                 self.statusBar.showMessage(
                     f'Annotations exported to {os.path.basename(filename)}')
             except Exception as e:
@@ -4280,6 +4350,68 @@ First error: {errors[0]}"""
                     f'Failed to export annotations: {str(e)}')
                 import traceback
                 traceback.print_exc()
+
+    @log_exceptions
+    def export_blurred_video(self, interactive=True):
+        """Export the current video with blurs baked into the frames."""
+        if not hasattr(self, 'video_filename') or not self.video_filename or not getattr(self, 'cap', None):
+            if interactive:
+                QMessageBox.warning(self, 'Export Blurred Video', 'Please open a video file first!')
+            return
+            
+        if not hasattr(self, 'blur_manager') or not self.blur_manager.blur_regions:
+            if interactive:
+                QMessageBox.information(self, 'Export Blurred Video', 'There are no blur regions to export!')
+            return
+
+        base, ext = os.path.splitext(self.video_filename)
+        output_filename = f"{base}_blurred{ext}"
+        
+        if interactive:
+            reply = QMessageBox.question(self, 'Export Blurred Video',
+                f"This will export a new video with all blur regions baked in.\n\nSave to: {output_filename}\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                
+            if reply != QMessageBox.Yes:
+                return
+            
+        progress = QProgressDialog("Exporting blurred video...", "Cancel", 0, self.total_frames, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        # Get video properties
+        orig_cap = cv2.VideoCapture(self.video_filename)
+        fps = orig_cap.get(cv2.CAP_PROP_FPS)
+        width = int(orig_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(orig_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') if ext.lower() == '.mp4' else int(orig_cap.get(cv2.CAP_PROP_FOURCC))
+        
+        writer = cv2.VideoWriter(output_filename, fourcc, fps, (width, height))
+        
+        for i in range(self.total_frames):
+            if progress.wasCanceled():
+                break
+            ret, frame = orig_cap.read()
+            if not ret:
+                break
+                
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if self.blur_manager.has_blur(i):
+                frame_rgb = self.blur_manager.apply_blur_to_frame(frame_rgb, i)
+                
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            writer.write(frame_bgr)
+            
+            if i % 10 == 0:
+                progress.setValue(i)
+                QApplication.processEvents()
+                
+        writer.release()
+        orig_cap.release()
+        progress.close()
+        
+        if not progress.wasCanceled() and interactive:
+            QMessageBox.information(self, 'Success', f'Blurred video successfully exported to:\n{output_filename}')
 
     @log_exceptions
     def export_image_dataset(self):
@@ -5598,11 +5730,15 @@ Do you want to scan the entire video now for duplicate frames?
             QMessageBox.warning(self, 'Auto Annotate',
                 'Please open a video or image first!')
             return
-        dialog = AutoAnnotateDialog(self.current_frame, self.total_frames, self
-            )
+        dialog = AutoAnnotateDialog(self.current_frame, self.total_frames, self)
         if dialog.exec_():
             config = dialog.get_config()
-            print(config)
+            if config is None:
+                return
+            # If the user clicked "Test on Current Frame", force single-frame scope
+            if dialog.is_test_mode():
+                config['start_frame'] = self.current_frame
+                config['end_frame']   = self.current_frame
             self.run_auto_label_dataset(config)
 
     @log_exceptions

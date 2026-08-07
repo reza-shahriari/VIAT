@@ -1311,9 +1311,9 @@ def export_raya_video_dataset(config, image_files, frame_annotations, class_colo
     txt_path = os.path.join(out_dir, "dataset_video.txt")
     if include_classes:
         classes = list(class_colors.keys())
-        export_raya_with_classes_annotations(txt_path, all_annotations, classes)
+        export_raya_with_classes_annotations(txt_path, all_annotations, classes, total_frames=len(image_files))
     else:
-        export_raya_annotations(txt_path, all_annotations)
+        export_raya_annotations(txt_path, all_annotations, total_frames=len(image_files))
         
     yield 100, "Done"
     return f"Exported video and Raya annotations to {out_dir}"

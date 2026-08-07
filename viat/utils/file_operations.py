@@ -451,7 +451,7 @@ def load_last_state():
 
 
 def export_annotations(
-    filename, annotations, image_width, image_height, format_type="coco", deleted_frames=None
+    filename, annotations, image_width, image_height, format_type="coco", deleted_frames=None, total_frames=None
 ):
     """Export annotations to various formats"""
     if format_type == "coco":
@@ -461,7 +461,7 @@ def export_annotations(
     elif format_type == "pascal_voc":
         export_pascal_voc(filename, annotations, image_width, image_height)
     elif format_type == "raya":
-        export_raya_annotations(filename, annotations, deleted_frames=deleted_frames)
+        export_raya_annotations(filename, annotations, deleted_frames=deleted_frames, total_frames=total_frames)
     else:
         raise ValueError(f"Unsupported export format: {format_type}")
 
@@ -668,7 +668,7 @@ def export_pascal_voc(filename, annotations, image_width, image_height):
         f.write(pretty_xml)
 
 
-def export_raya_annotations(filename, annotations, deleted_frames=None):
+def export_raya_annotations(filename, annotations, deleted_frames=None, total_frames=None):
     """
     Export annotations to Raya text format.
 
@@ -694,6 +694,8 @@ def export_raya_annotations(filename, annotations, deleted_frames=None):
         max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
         if deleted_frames:
             max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
+        if total_frames is not None and total_frames > 0:
+            max_frame = max(max_frame, total_frames - 1)
 
         # Create lines for each frame
         lines = ["[]"] * (max_frame + 1)
@@ -745,7 +747,7 @@ def export_raya_annotations(filename, annotations, deleted_frames=None):
     except Exception as e:
         raise Exception(f"Error exporting to Raya format: {str(e)}")
 
-def export_raya_with_classes_annotations(filename, annotations, classes, deleted_frames=None):
+def export_raya_with_classes_annotations(filename, annotations, classes, deleted_frames=None, total_frames=None):
     """
     Export annotations to Raya text format with a class header.
 
@@ -782,6 +784,8 @@ def export_raya_with_classes_annotations(filename, annotations, classes, deleted
         max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
         if deleted_frames:
             max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
+        if total_frames is not None and total_frames > 0:
+            max_frame = max(max_frame, total_frames - 1)
 
         # Create lines for each frame
         lines = ["[]"] * (max_frame + 1)
@@ -1148,6 +1152,7 @@ def export_standard_annotations(
     image_width,
     image_height,
     deleted_frames=None,
+    total_frames=None,
 ):
     """
     Export annotations using the standard export function.
@@ -1174,7 +1179,7 @@ def export_standard_annotations(
         all_annotations = canvas_annotations
 
     export_annotations(
-        filename, all_annotations, image_width, image_height, export_format, deleted_frames=deleted_frames
+        filename, all_annotations, image_width, image_height, export_format, deleted_frames=deleted_frames, total_frames=total_frames
     )
 
 
