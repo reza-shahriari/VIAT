@@ -185,6 +185,13 @@ class UICreator:
         select_all_action.triggered.connect(self.main_window.select_all_annotations)
         edit_menu.addAction(select_all_action)
 
+        # Go to Frame action
+        goto_frame_action = QAction("Go to Frame...", self.main_window)
+        goto_frame_action.setShortcut("Ctrl+G")
+        goto_frame_action.setStatusTip("Jump directly to a specific frame number")
+        goto_frame_action.triggered.connect(self.main_window.go_to_frame_dialog)
+        edit_menu.addAction(goto_frame_action)
+
         edit_menu.addSeparator()
 
         # Batch Edit Annotations action

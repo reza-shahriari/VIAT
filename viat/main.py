@@ -2850,6 +2850,37 @@ Would you like to load it?"""
         self.update_frame_display()
         return True
 
+    @log_exceptions
+    def go_to_frame_dialog(self):
+        """Open a dialog allowing the user to jump directly to a specific frame number (Ctrl+G)."""
+        from PyQt5.QtWidgets import QInputDialog
+        
+        total = 0
+        if hasattr(self, 'is_image_dataset') and self.is_image_dataset and getattr(self, 'image_files', None):
+            total = len(self.image_files)
+        elif self.cap and self.cap.isOpened():
+            total = self.total_frames
+            
+        if total <= 0:
+            if hasattr(self, 'statusBar') and self.statusBar:
+                self.statusBar.showMessage("No active video or image dataset loaded.")
+            return
+
+        current_display = self.current_frame + 1  # 1-indexed for display
+        frame_num, ok = QInputDialog.getInt(
+            self,
+            "Go to Frame",
+            f"Enter frame number (1 - {total}):",
+            value=current_display,
+            min=1,
+            max=total,
+            step=1
+        )
+
+        if ok:
+            target_idx = frame_num - 1
+            self.set_current_frame(target_idx)
+
     def _should_show_frame(self, frame_idx):
         if getattr(self, 'only_show_empty_frames', False):
             if self.frame_annotations.get(frame_idx, []):
@@ -6445,6 +6476,9 @@ Do you want to scan the entire video now for duplicate frames?
             return
         if event.key() == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
             self.select_all_annotations()
+            return
+        if event.key() == Qt.Key_G and event.modifiers() & Qt.ControlModifier:
+            self.go_to_frame_dialog()
             return
         if event.key() == Qt.Key_Z and event.modifiers(
             ) & Qt.ControlModifier and not event.modifiers(
