@@ -1,4 +1,4 @@
-﻿import cv2
+import cv2
 import traceback
 from viat.logger import logger
 
@@ -64,9 +64,55 @@ class TrackerManager:
             "MIL": {"class": OpenCVTracker, "kwargs": {"tracker_type": "MIL"}, "available": True, "message": ""},
         }
         self._load_ettrack()
+        self._load_ostrack()
+
+    def _load_ostrack(self):
+        try:
+            import sys
+            # Clear lib to avoid conflict with E.T.Track
+            for k in list(sys.modules.keys()):
+                if k == 'lib' or k.startswith('lib.'):
+                    del sys.modules[k]
+            from viat.tracking.ostrack_tracker import OSTrackWrapper
+            is_available, msg = OSTrackWrapper.check_availability()
+            self.available_trackers["OSTrack"] = {
+                "class": OSTrackWrapper,
+                "kwargs": {"use_fp16": False},
+                "available": is_available,
+                "message": msg
+            }
+            self.available_trackers["OSTrack TRT"] = {
+                "class": OSTrackWrapper,
+                "kwargs": {"use_fp16": True},
+                "available": is_available,
+                "message": msg
+            }
+        except ImportError as e:
+            logger.warning(f"OSTrack dependencies missing: {e}")
+            for t_name in ["OSTrack", "OSTrack TRT"]:
+                self.available_trackers[t_name] = {
+                    "class": None,
+                    "kwargs": {},
+                    "available": False,
+                    "message": f"Missing library: {e}"
+                }
+        except Exception as e:
+            logger.error(f"Failed to load OSTrack module: {e}\n{traceback.format_exc()}")
+            for t_name in ["OSTrack", "OSTrack TRT"]:
+                self.available_trackers[t_name] = {
+                    "class": None,
+                    "kwargs": {},
+                    "available": False,
+                    "message": f"Error: {e}"
+                }
 
     def _load_ettrack(self):
         try:
+            import sys
+            # Clear lib to avoid conflict with OSTrack
+            for k in list(sys.modules.keys()):
+                if k == 'lib' or k.startswith('lib.'):
+                    del sys.modules[k]
             from viat.tracking.ettrack import ETTracker
             is_available, msg = ETTracker.check_availability()
             self.available_trackers["E.T.Track"] = {

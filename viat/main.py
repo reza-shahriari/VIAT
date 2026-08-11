@@ -32,6 +32,7 @@ from .widgets.tracking_dialog import TrackingDialog
 from .utils.ui_creator import UICreator
 from .utils.sam_manager import SamManager
 from .utils.sam3_native_manager import Sam3NativeManager
+from .utils.sam2_trt_manager import Sam2TrtManager
 import numpy as np
 import json
 from viat.utils import save_project, load_project, export_annotations, get_config_directory, get_recent_projects, get_last_project, save_last_state, load_last_state, export_image_dataset_pascal_voc, export_image_dataset_yolo, export_image_dataset_coco, export_standard_annotations, mse_similarity, calculate_frame_hash, create_thumbnail, import_annotations, UICreator, export_dataset_dialog, export_dataset, import_dataset_dialog, load_dataset, PerfomanceManger, load_project_with_backup, backup_before_save
@@ -465,6 +466,7 @@ class VideoAnnotationTool(QMainWindow):
         self.locate_anything_manager = None
         self.sam_manager = None
         self.sam3_native_manager = None
+        self.sam2_trt_manager = None
         self.init_managers()
         self.ui_creator.create_interpolation_ui()
         QApplication.instance().installEventFilter(self)
@@ -497,6 +499,9 @@ class VideoAnnotationTool(QMainWindow):
         self.tracker_manager = TrackerManager()
         self.sam_manager = SamManager()
         self.sam3_native_manager = Sam3NativeManager()
+        self.sam2_trt_manager = Sam2TrtManager()
+        from viat.utils.fast_tracker_manager import FastTrackerManager
+        self.fast_tracker_manager = FastTrackerManager()
 
     @log_exceptions
     def load_last_project(self):
@@ -1319,6 +1324,9 @@ class VideoAnnotationTool(QMainWindow):
             if 'sam3' in model_type.lower():
                 success, msg = self.sam3_native_manager.load_model(model_type)
                 tracker = self.sam3_native_manager
+            elif 'trt' in model_type.lower():
+                success, msg = self.sam2_trt_manager.load_model(model_type)
+                tracker = self.sam2_trt_manager
             else:
                 success, msg = self.sam_manager.load_model(model_type)
                 tracker = self.sam_manager
@@ -1403,6 +1411,9 @@ class VideoAnnotationTool(QMainWindow):
             if 'sam3' in model_type.lower():
                 success, msg = self.sam3_native_manager.load_model(model_type)
                 tracker = self.sam3_native_manager
+            elif 'trt' in model_type.lower():
+                success, msg = self.sam2_trt_manager.load_model(model_type)
+                tracker = self.sam2_trt_manager
             else:
                 success, msg = self.sam_manager.load_model(model_type)
                 tracker = self.sam_manager
@@ -1498,6 +1509,8 @@ class VideoAnnotationTool(QMainWindow):
         try:
             if 'sam3' in model_type.lower():
                 success, msg = self.sam3_native_manager.load_model(model_type)
+            elif 'trt' in model_type.lower():
+                success, msg = self.sam2_trt_manager.load_model(model_type)
             else:
                 success, msg = self.sam_manager.load_model(model_type)
             if success:
@@ -1533,6 +1546,11 @@ class VideoAnnotationTool(QMainWindow):
                 if not success:
                     from PyQt5.QtWidgets import QMessageBox
                     QMessageBox.warning(self, 'SAM3 Load Error', msg)
+            elif 'trt' in model_type.lower():
+                success, msg = self.sam2_trt_manager.load_model(model_type)
+                if not success:
+                    from PyQt5.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, 'SAM2 TRT Load Error', msg)
             else:
                 success, msg = self.sam_manager.load_model(model_type)
                 if not success:
@@ -1567,11 +1585,22 @@ class VideoAnnotationTool(QMainWindow):
                 self.sam3_native_manager.clear_session()
             except Exception as e:
                 print(f"Failed to clear SAM3 native session: {e}")
+        if hasattr(self, 'sam2_trt_manager') and self.sam2_trt_manager is not None:
+            try:
+                self.sam2_trt_manager.clear_session()
+            except Exception as e:
+                print(f"Failed to clear SAM2 TRT session: {e}")
         if hasattr(self, 'sam_manager') and self.sam_manager is not None:
             try:
                 self.sam_manager.clear_session()
             except Exception as e:
                 print(f"Failed to clear SAM session: {e}")
+                
+        if hasattr(self, 'fast_tracker_manager') and self.fast_tracker_manager is not None:
+            try:
+                self.fast_tracker_manager.clear_session()
+            except Exception as e:
+                print(f"Failed to clear Fast Tracker session: {e}")
                 
         self.canvas.update()
 
@@ -1592,8 +1621,12 @@ class VideoAnnotationTool(QMainWindow):
                 'Please add at least one point, bounding box, or text prompt.')
             return
         model_type = self.sam_interactive_dock.get_model_type()
-        manager = self.sam3_native_manager if 'sam3' in model_type.lower(
-            ) else self.sam_manager
+        if 'sam3' in model_type.lower():
+            manager = self.sam3_native_manager
+        elif 'trt' in model_type.lower():
+            manager = self.sam2_trt_manager
+        else:
+            manager = self.sam_manager
         QApplication.setOverrideCursor(Qt.WaitCursor)
         polygon = manager.predict_mask_from_prompt(self.canvas.
             current_frame_array, points=points, labels=labels, box=box,
@@ -1648,14 +1681,85 @@ class VideoAnnotationTool(QMainWindow):
             (), self.canvas.sam_prompt_box.x() + self.canvas.sam_prompt_box
             .width(), self.canvas.sam_prompt_box.y() + self.canvas.
             sam_prompt_box.height()] if self.canvas.sam_prompt_box else None
+            
+        if not box:
+            for ann in self.canvas.annotations:
+                if getattr(ann, 'is_sam_preview', False):
+                    box = [ann.rect.left(), ann.rect.top(), ann.rect.right(), ann.rect.bottom()]
+                    break
         text_prompt = self.sam_interactive_dock.get_text_prompt()
         if not points and not box and not text_prompt:
             QMessageBox.warning(self, 'No Prompts',
                 'Please add at least one point, bounding box, or text prompt.')
             return
+            
+        tracker_engine = getattr(self.sam_interactive_dock, 'get_tracker_engine', lambda: 'sam')()
         model_type = self.sam_interactive_dock.get_model_type()
-        manager = self.sam3_native_manager if 'sam3' in model_type.lower(
-            ) else self.sam_manager
+        
+        initial_polygon = None
+        if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+            if not box and (points or text_prompt):
+                if 'sam3' in model_type.lower():
+                    sam_mgr = self.sam3_native_manager
+                elif 'trt' in model_type.lower():
+                    sam_mgr = self.sam2_trt_manager
+                else:
+                    sam_mgr = self.sam_manager
+                
+                self.statusBar.showMessage(f'Generating initial bounding box using {model_type}...')
+                QApplication.processEvents()
+                ok_sam, msg_sam = sam_mgr.load_model(model_type)
+                if ok_sam:
+                    frame_start_rgb = None
+                    if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                        if 0 <= start_f < len(self.image_files):
+                            bgr_init = cv2.imread(self.image_files[start_f])
+                            if bgr_init is not None:
+                                frame_start_rgb = cv2.cvtColor(bgr_init, cv2.COLOR_BGR2RGB)
+                    else:
+                        cap_init = cv2.VideoCapture(self.video_filename)
+                        cap_init.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                        ret_init, bgr_init = cap_init.read()
+                        if ret_init:
+                            frame_start_rgb = cv2.cvtColor(bgr_init, cv2.COLOR_BGR2RGB)
+                        cap_init.release()
+                    
+                    if frame_start_rgb is not None:
+                        QApplication.setOverrideCursor(Qt.WaitCursor)
+                        try:
+                            initial_polygon = sam_mgr.predict_mask_from_prompt(
+                                frame_start_rgb, points=points, labels=labels, box=None, text_prompt=text_prompt
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to generate initial mask from SAM: {e}")
+                            initial_polygon = None
+                        finally:
+                            QApplication.restoreOverrideCursor()
+                        
+                        if initial_polygon:
+                            x_coords = [p[0] for p in initial_polygon]
+                            y_coords = [p[1] for p in initial_polygon]
+                            if x_coords and y_coords:
+                                box = [int(min(x_coords)), int(min(y_coords)), int(max(x_coords)), int(max(y_coords))]
+
+            manager = self.fast_tracker_manager
+            if tracker_engine == 'ettrack':
+                model_type = "E.T.Track"
+            elif tracker_engine == 'ostrack_trt':
+                model_type = "OSTrack TRT"
+            else:
+                model_type = "OSTrack"
+            success, msg = manager.load_model(model_type)
+            if not success:
+                QMessageBox.warning(self, "Tracker Error", msg)
+                return
+        else:
+            if 'sam3' in model_type.lower():
+                manager = self.sam3_native_manager
+            elif 'trt' in model_type.lower():
+                manager = self.sam2_trt_manager
+            else:
+                manager = self.sam_manager
         classes = list(self.canvas.class_colors.keys())
         if not classes:
             QMessageBox.warning(self, 'No Classes',
@@ -1698,6 +1802,15 @@ class VideoAnnotationTool(QMainWindow):
                     yield frame_rgb
                 cap.release()
         if start_f == end_f:
+            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+                if tracker_engine == 'ettrack':
+                    tracker_title = "E.T.Track"
+                elif tracker_engine == 'ostrack_trt':
+                    tracker_title = "OSTrack TRT"
+                else:
+                    tracker_title = "OSTrack"
+                QMessageBox.warning(self, 'Invalid Scope', f'{tracker_title} cannot be used for a single frame. Please select a range or Whole Video.')
+                return
             self.statusBar.showMessage('Generating mask for single frame...')
             QApplication.setOverrideCursor(Qt.WaitCursor)
             frame = None
@@ -1754,6 +1867,15 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage('SAM processing completed.', 5000)
             return
         if strategy == 'detect':
+            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+                if tracker_engine == 'ettrack':
+                    tracker_title = "E.T.Track"
+                elif tracker_engine == 'ostrack_trt':
+                    tracker_title = "OSTrack TRT"
+                else:
+                    tracker_title = "OSTrack"
+                QMessageBox.warning(self, 'Invalid Strategy', f'{tracker_title} is a temporal tracker and cannot be used for frame-by-frame detection.')
+                return
             det_model_type = self.sam_interactive_dock.get_det_model_type()
             zero_shot_model = None
             if det_model_type:
@@ -1872,9 +1994,14 @@ class VideoAnnotationTool(QMainWindow):
                 =res_path, start_f=start_f, end_f=end_f, points=points,
                 labels=labels, box=box, text_prompt=text_prompt)
         else:
-            results_generator = manager.track_video_from_prompt(frame_generator
-                (), points=points, labels=labels, box=box, text_prompt=
-                text_prompt, model_type=model_type)
+            if manager == self.fast_tracker_manager:
+                results_generator = manager.track_video_from_prompt(frame_generator
+                    (), points=points, labels=labels, box=box, text_prompt=
+                    text_prompt, model_type=model_type, initial_polygon=initial_polygon)
+            else:
+                results_generator = manager.track_video_from_prompt(frame_generator
+                    (), points=points, labels=labels, box=box, text_prompt=
+                    text_prompt, model_type=model_type)
         current_f = start_f
         for success, track_res in results_generator:
             if progress.wasCanceled():
@@ -5941,6 +6068,8 @@ Do you want to scan the entire video now for duplicate frames?
         if not hasattr(self, 'sam3_native_manager'
             ) or self.sam3_native_manager is None:
             self.sam3_native_manager = Sam3NativeManager()
+        if not hasattr(self, 'sam2_trt_manager') or self.sam2_trt_manager is None:
+            self.sam2_trt_manager = Sam2TrtManager()
         if not self.zero_shot_manager.is_available():
             QMessageBox.warning(self, 'Auto Annotate Error',
                 'Ultralytics package is missing. Please run: pip install ultralytics'
@@ -5990,6 +6119,19 @@ Do you want to scan the entire video now for duplicate frames?
                     QMessageBox.warning(self, 'Auto Annotate Error',
                         f'SAM3 Native Model failed: {s_msg}')
                     config['seg_model'] = None
+                else:
+                    active_sam_manager = self.sam3_native_manager
+            elif 'trt' in seg_model.lower():
+                self.statusBar.showMessage(
+                    f'Loading SAM2 TRT Refiner {seg_model}...')
+                QApplication.processEvents()
+                s_success, s_msg = self.sam2_trt_manager.load_model(seg_model)
+                if not s_success:
+                    QMessageBox.warning(self, 'Auto Annotate Error',
+                        f'SAM2 TRT Model failed: {s_msg}')
+                    config['seg_model'] = None
+                else:
+                    active_sam_manager = self.sam2_trt_manager
             else:
                 self.statusBar.showMessage(
                     f'Loading Segmentation Refiner {seg_model}...')
@@ -5999,12 +6141,17 @@ Do you want to scan the entire video now for duplicate frames?
                     QMessageBox.warning(self, 'Auto Annotate Error',
                         f'SAM Model failed: {s_msg}')
                     config['seg_model'] = None
+                else:
+                    active_sam_manager = self.sam_manager
+        else:
+            active_sam_manager = self.sam_manager
+            
         self.statusBar.showMessage(
             f'Running Background AI Annotator ({total_to_process} frames)...')
         self.auto_label_worker = AutoLabelWorker(self.config if hasattr(
             self, 'config') else config, hasattr(self, 'is_image_dataset') and
             self.is_image_dataset, getattr(self, 'image_files', []), self.
-            video_filename, self.zero_shot_manager, self.sam_manager, self)
+            video_filename, self.zero_shot_manager, active_sam_manager, self)
         self.auto_label_worker.config = config
         self.auto_label_worker.frame_started.connect(self.
             on_auto_label_frame_started)

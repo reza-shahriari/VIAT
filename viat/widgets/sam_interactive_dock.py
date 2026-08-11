@@ -13,7 +13,7 @@ class SAMInteractiveDock(QDockWidget):
     model_changed = pyqtSignal(str)
     
     def __init__(self, parent=None):
-        super().__init__("SAM Interactive Tracker", parent)
+        super().__init__("Interactive Tracking Menu", parent)
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.total_frames = 1
         self.current_frame = 0
@@ -47,10 +47,22 @@ class SAMInteractiveDock(QDockWidget):
             "SAM2 Fast (sam2.1_s.pt)",
             "SAM2 Huge (sam2.1_l.pt)",
             "SAM3.1 Huge (sam3.1_l.pt)",
-            "SAM3.1 Fast (sam3.1_s.pt)"
+            "SAM3.1 Fast (sam3.1_s.pt)",
+            "SAM2 TRT C++ (TensorRT)"
         ])
         self.cmb_model.currentIndexChanged.connect(self.on_model_changed)
         self.layout.addWidget(self.cmb_model)
+
+        # Tracker Engine
+        self.layout.addWidget(QLabel("Tracker Engine:"))
+        self.cmb_tracker = QComboBox()
+        self.cmb_tracker.addItems([
+            "SAM (High Accuracy, Mask + Box)",
+            "E.T.Track (Fast, Box Only)",
+            "OSTrack (Fast, Box Only)",
+            "OSTrack TRT (FP16 Accelerated, Box Only)"
+        ])
+        self.layout.addWidget(self.cmb_tracker)
 
         # Zero-Shot Detection Model
         self.layout.addWidget(QLabel("Zero-Shot Detection (Optional):"))
@@ -213,7 +225,18 @@ class SAMInteractiveDock(QDockWidget):
         if "sam2.1_l.pt" in text: return "sam2.1_l.pt"
         if "sam3.1_l.pt" in text: return "sam3.1_l.pt"
         if "sam3.1_s.pt" in text: return "sam3.1_s.pt"
+        if "TensorRT" in text: return "sam2_trt_cpp"
         return "sam2.1_s.pt"
+
+    def get_tracker_engine(self):
+        text = self.cmb_tracker.currentText()
+        if "E.T.Track" in text:
+            return "ettrack"
+        if "OSTrack TRT" in text:
+            return "ostrack_trt"
+        if "OSTrack" in text:
+            return "ostrack"
+        return "sam"
 
     def get_det_model_type(self):
         text = self.cmb_det_model.currentText()
