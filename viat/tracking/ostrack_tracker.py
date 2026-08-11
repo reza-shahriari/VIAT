@@ -41,11 +41,24 @@ class OSTrackWrapper(BaseTracker):
                 return c
         return candidates[0]
 
-    def __init__(self, use_fp16=False, **kwargs):
+    def __init__(self, use_fp16=False, use_engine=False, **kwargs):
         super().__init__(**kwargs)
         self.tracker = None
         self.use_fp16 = use_fp16
+        self.use_engine = use_engine
         self._load_model()
+
+    @classmethod
+    def get_engine_path(cls):
+        candidates = [
+            os.path.abspath(os.path.join(current_dir, '..', 'checkpoints', 'ostrack.engine')),
+            os.path.abspath(os.path.join("checkpoints", "ostrack.engine")),
+            os.path.abspath(os.path.join(current_dir, 'checkpoints', 'ostrack.engine'))
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return candidates[0]
 
     @classmethod
     def check_availability(cls):
@@ -81,7 +94,14 @@ class OSTrackWrapper(BaseTracker):
         params.save_all_boxes = False
         params.debug = 0
 
-        logger.info(f"Loading OSTrack (use_fp16={self.use_fp16}) from {ckpt_path}")
+        if self.use_engine:
+            engine_path = self.get_engine_path()
+            logger.info(f"Loading OSTrack Native TensorRT Engine from {engine_path}")
+        elif self.use_fp16:
+            logger.info(f"Loading OSTrack (FP16 Accelerated) from {ckpt_path}")
+        else:
+            logger.info(f"Loading OSTrack (FP32 Standard) from {ckpt_path}")
+            
         self.tracker = OSTrackNative(params, 'dummy')
         logger.info("OSTrack loaded successfully")
 

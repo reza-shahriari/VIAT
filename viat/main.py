@@ -1541,21 +1541,30 @@ class VideoAnnotationTool(QMainWindow):
             self.sam_interactive_dock.show()
             self.sam_interactive_dock.raise_()
             model_type = self.sam_interactive_dock.get_model_type()
-            if 'sam3' in model_type.lower():
-                success, msg = self.sam3_native_manager.load_model(model_type)
-                if not success:
-                    from PyQt5.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, 'SAM3 Load Error', msg)
-            elif 'trt' in model_type.lower():
-                success, msg = self.sam2_trt_manager.load_model(model_type)
-                if not success:
-                    from PyQt5.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, 'SAM2 TRT Load Error', msg)
-            else:
-                success, msg = self.sam_manager.load_model(model_type)
-                if not success:
-                    from PyQt5.QtWidgets import QMessageBox
-                    QMessageBox.warning(self, 'SAM2 Load Error', msg)
+            
+            self.statusBar.showMessage(f'Loading {model_type}...')
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+            
+            try:
+                if 'sam3' in model_type.lower():
+                    success, msg = self.sam3_native_manager.load_model(model_type)
+                    if not success:
+                        from PyQt5.QtWidgets import QMessageBox
+                        QMessageBox.warning(self, 'SAM3 Load Error', msg)
+                elif 'trt' in model_type.lower():
+                    success, msg = self.sam2_trt_manager.load_model(model_type)
+                    if not success:
+                        from PyQt5.QtWidgets import QMessageBox
+                        QMessageBox.warning(self, 'SAM2 TRT Load Error', msg)
+                else:
+                    success, msg = self.sam_manager.load_model(model_type)
+                    if not success:
+                        from PyQt5.QtWidgets import QMessageBox
+                        QMessageBox.warning(self, 'SAM2 Load Error', msg)
+            finally:
+                QApplication.restoreOverrideCursor()
+                
             self.canvas.sam_prompt_points = []
             self.canvas.sam_prompt_labels = []
             self.canvas.sam_prompt_box = None
@@ -1697,7 +1706,7 @@ class VideoAnnotationTool(QMainWindow):
         model_type = self.sam_interactive_dock.get_model_type()
         
         initial_polygon = None
-        if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+        if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
             if not box and (points or text_prompt):
                 if 'sam3' in model_type.lower():
                     sam_mgr = self.sam3_native_manager
@@ -1745,6 +1754,8 @@ class VideoAnnotationTool(QMainWindow):
             manager = self.fast_tracker_manager
             if tracker_engine == 'ettrack':
                 model_type = "E.T.Track"
+            elif tracker_engine == 'ostrack_engine':
+                model_type = "OSTrack Native TRT"
             elif tracker_engine == 'ostrack_trt':
                 model_type = "OSTrack TRT"
             else:
@@ -1802,9 +1813,11 @@ class VideoAnnotationTool(QMainWindow):
                     yield frame_rgb
                 cap.release()
         if start_f == end_f:
-            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
                 if tracker_engine == 'ettrack':
                     tracker_title = "E.T.Track"
+                elif tracker_engine == 'ostrack_engine':
+                    tracker_title = "OSTrack Native TRT"
                 elif tracker_engine == 'ostrack_trt':
                     tracker_title = "OSTrack TRT"
                 else:
@@ -1867,9 +1880,11 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage('SAM processing completed.', 5000)
             return
         if strategy == 'detect':
-            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt']:
+            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
                 if tracker_engine == 'ettrack':
                     tracker_title = "E.T.Track"
+                elif tracker_engine == 'ostrack_engine':
+                    tracker_title = "OSTrack Native TRT"
                 elif tracker_engine == 'ostrack_trt':
                     tracker_title = "OSTrack TRT"
                 else:

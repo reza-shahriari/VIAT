@@ -1,3 +1,4 @@
+import os
 import cv2
 import traceback
 from viat.logger import logger
@@ -87,9 +88,19 @@ class TrackerManager:
                 "available": is_available,
                 "message": msg
             }
+            
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            engine_path = os.path.abspath(os.path.join(current_dir, '..', 'checkpoints', 'ostrack.engine'))
+            engine_avail = os.path.exists(engine_path)
+            self.available_trackers["OSTrack Native TRT"] = {
+                "class": OSTrackWrapper,
+                "kwargs": {"use_engine": True},
+                "available": engine_avail,
+                "message": "Engine file found" if engine_avail else f"Engine file missing at '{engine_path}'. Run setup_ostrack_trt.sh first."
+            }
         except ImportError as e:
             logger.warning(f"OSTrack dependencies missing: {e}")
-            for t_name in ["OSTrack", "OSTrack TRT"]:
+            for t_name in ["OSTrack", "OSTrack TRT", "OSTrack Native TRT"]:
                 self.available_trackers[t_name] = {
                     "class": None,
                     "kwargs": {},
@@ -98,7 +109,7 @@ class TrackerManager:
                 }
         except Exception as e:
             logger.error(f"Failed to load OSTrack module: {e}\n{traceback.format_exc()}")
-            for t_name in ["OSTrack", "OSTrack TRT"]:
+            for t_name in ["OSTrack", "OSTrack TRT", "OSTrack Native TRT"]:
                 self.available_trackers[t_name] = {
                     "class": None,
                     "kwargs": {},

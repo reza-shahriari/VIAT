@@ -1,9 +1,0 @@
-[submodule "viat/tracking/ostrack_repo"]
-	path = viat/tracking/ostrack_repo
-	url = https://github.com/botaoye/OSTrack.git
-[submodule "viat/tracking/ettrack_repo"]
-	path = viat/tracking/ettrack_repo
-	url = https://github.com/pblatter/ettrack.git
-[submodule "viat/tracking/track_trt"]
-	path = viat/tracking/track_trt
-	url = https://github.com/l-sf/Track-trt.git

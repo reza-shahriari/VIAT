@@ -48,7 +48,8 @@ class SAMInteractiveDock(QDockWidget):
             "SAM2 Huge (sam2.1_l.pt)",
             "SAM3.1 Huge (sam3.1_l.pt)",
             "SAM3.1 Fast (sam3.1_s.pt)",
-            "SAM2 TRT C++ (TensorRT)"
+            "SAM2 TRT C++ (TensorRT)",
+            "SAM2 TRT C++ Tiny (TensorRT)"
         ])
         self.cmb_model.currentIndexChanged.connect(self.on_model_changed)
         self.layout.addWidget(self.cmb_model)
@@ -60,7 +61,8 @@ class SAMInteractiveDock(QDockWidget):
             "SAM (High Accuracy, Mask + Box)",
             "E.T.Track (Fast, Box Only)",
             "OSTrack (Fast, Box Only)",
-            "OSTrack TRT (FP16 Accelerated, Box Only)"
+            "OSTrack TRT (FP16 Accelerated, Box Only)",
+            "OSTrack Native TRT (Engine, Box Only)"
         ])
         self.layout.addWidget(self.cmb_tracker)
 
@@ -225,6 +227,7 @@ class SAMInteractiveDock(QDockWidget):
         if "sam2.1_l.pt" in text: return "sam2.1_l.pt"
         if "sam3.1_l.pt" in text: return "sam3.1_l.pt"
         if "sam3.1_s.pt" in text: return "sam3.1_s.pt"
+        if "Tiny" in text and "TensorRT" in text: return "sam2_trt_cpp_tiny"
         if "TensorRT" in text: return "sam2_trt_cpp"
         return "sam2.1_s.pt"
 
@@ -232,6 +235,8 @@ class SAMInteractiveDock(QDockWidget):
         text = self.cmb_tracker.currentText()
         if "E.T.Track" in text:
             return "ettrack"
+        if "Native TRT" in text:
+            return "ostrack_engine"
         if "OSTrack TRT" in text:
             return "ostrack_trt"
         if "OSTrack" in text:

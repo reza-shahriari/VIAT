@@ -455,7 +455,9 @@ class UICreator:
             "SAM2 Fast (sam2.1_s.pt)", 
             "SAM2 Huge (sam2.1_l.pt)",
             "SAM3 Fast (sam3.1_s.pt)", 
-            "SAM3 Huge (sam3.1_l.pt)"
+            "SAM3 Huge (sam3.1_l.pt)",
+            "SAM2 TRT C++ (TensorRT)",
+            "SAM2 TRT C++ Tiny (TensorRT)"
         ])
         self.main_window.sam_model_selector.setToolTip("Select the model to use for Auto BBox")
         self.main_window.sam_model_selector.currentTextChanged.connect(self.main_window.change_sam_model)
