@@ -9,3 +9,8 @@ qtawsome
 scikit-learn
 loguru
 filterpy
+easydict
+timm
+jpeg4py
+visdom
+tensorboardX

@@ -1119,29 +1119,41 @@ class VideoCanvas(QWidget):
                         rect, self.current_class, default_attributes, color
                     )
 
-                    # Add to annotations list
-                    self.annotations.append(bbox)
-                    self.selected_annotation = bbox
-                    if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
-                        self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
-          
-                    # Show attribute dialog if enabled
-                    if (
-                        self.main_window
-                        and hasattr(self.main_window, "auto_show_attribute_dialog")
-                        and self.main_window.auto_show_attribute_dialog
-                    ):
-                        self.main_window.edit_annotation(bbox, focus_first_field=True)
+                    if getattr(self.main_window, 'auto_blur_labels', False):
+                        blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                        if blur_mgr is not None:
+                            cur_f = getattr(self.main_window, 'current_frame', 0)
+                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(self.main_window, '_refresh_blur_display'):
+                                self.main_window._refresh_blur_display()
+                            else:
+                                self.update()
+                            if hasattr(self.main_window, 'statusBar') and self.main_window.statusBar:
+                                self.main_window.statusBar.showMessage("Label blurred by default.", 2000)
+                    else:
+                        # Add to annotations list
+                        self.annotations.append(bbox)
+                        self.selected_annotation = bbox
+                        if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                            self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+              
+                        # Show attribute dialog if enabled
+                        if (
+                            self.main_window
+                            and hasattr(self.main_window, "auto_show_attribute_dialog")
+                            and self.main_window.auto_show_attribute_dialog
+                        ):
+                            self.main_window.edit_annotation(bbox, focus_first_field=True)
 
-                    # Update the annotation list in the main window
-                    if self.main_window:
-                        self.main_window.update_annotation_list()
-                        # Save annotations to current frame
-                        if hasattr(self.main_window, "frame_annotations"):
-                            self.main_window.frame_annotations[
-                                self.main_window.current_frame
-                            ] = self.annotations.copy()
+                        # Update the annotation list in the main window
+                        if self.main_window:
                             self.main_window.update_annotation_list()
+                            # Save annotations to current frame
+                            if hasattr(self.main_window, "frame_annotations"):
+                                self.main_window.frame_annotations[
+                                    self.main_window.current_frame
+                                ] = self.annotations.copy()
+                                self.main_window.update_annotation_list()
 
                 # Reset drawing state
                 self.is_drawing = False
@@ -1258,24 +1270,37 @@ class VideoCanvas(QWidget):
                         source="magic_wand"
                     )
                     
-                    if hasattr(self.main_window, 'labeler_analytics'):
-                        self.main_window.labeler_analytics['tool_usage']['magic_wand'] += 1
-                    if self.main_window:
-                        self.main_window.save_undo_state()
-                    self.annotations.append(annotation)
-                    if hasattr(self.main_window, "annotation_dock"):
-                        self.main_window.annotation_dock.update_annotation_list()
+                    if getattr(self.main_window, 'auto_blur_labels', False):
+                        blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                        if blur_mgr is not None:
+                            cur_f = getattr(self.main_window, 'current_frame', 0)
+                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(self.main_window, '_refresh_blur_display'):
+                                self.main_window._refresh_blur_display()
+                            else:
+                                self.update()
+                            if hasattr(self.main_window, 'statusBar') and self.main_window.statusBar:
+                                self.main_window.statusBar.showMessage("Auto BBox added as blur region.", 3000)
+                        annotation_to_edit = None
+                    else:
+                        if hasattr(self.main_window, 'labeler_analytics'):
+                            self.main_window.labeler_analytics['tool_usage']['magic_wand'] += 1
+                        if self.main_window:
+                            self.main_window.save_undo_state()
+                        self.annotations.append(annotation)
+                        if hasattr(self.main_window, "annotation_dock"):
+                            self.main_window.annotation_dock.update_annotation_list()
+                            
+                        self.selected_annotation = annotation
+                        self.selected_annotations = [annotation]
                         
-                    self.selected_annotation = annotation
-                    self.selected_annotations = [annotation]
-                    
-                    if hasattr(self.main_window, "annotation_dock"):
-                        self.main_window.annotation_dock.select_annotation_in_list(annotation)
+                        if hasattr(self.main_window, "annotation_dock"):
+                            self.main_window.annotation_dock.select_annotation_in_list(annotation)
+                            
+                        self.update()
+                        self.main_window.statusBar.showMessage("Bounding box created automatically.", 3000)
                         
-                    self.update()
-                    self.main_window.statusBar.showMessage("Bounding box created automatically.", 3000)
-                    
-                    annotation_to_edit = annotation
+                        annotation_to_edit = annotation
                 else:
                     self.main_window.statusBar.showMessage("Could not generate valid bounding box.", 3000)
             else:
@@ -1692,28 +1717,41 @@ class VideoCanvas(QWidget):
                     if hasattr(bbox, 'verify'):
                         bbox.verify()  # Ensure it's marked as verified
 
-                    # Add to annotations list
-                    self.annotations.append(bbox)
-                    self.selected_annotation = bbox
-                    if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
-                        self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
-        
-                    # Show attribute dialog if enabled
-                    if (
-                        self.main_window
-                        and hasattr(self.main_window, "auto_show_attribute_dialog")
-                        and self.main_window.auto_show_attribute_dialog
-                    ):
-                        self.main_window.edit_annotation(bbox, focus_first_field=True)
+                    if getattr(self.main_window, 'auto_blur_labels', False):
+                        blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                        if blur_mgr is not None:
+                            cur_f = getattr(self.main_window, 'current_frame', 0)
+                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(self.main_window, '_refresh_blur_display'):
+                                self.main_window._refresh_blur_display()
+                            else:
+                                self.update()
+                            if hasattr(self.main_window, 'statusBar') and self.main_window.statusBar:
+                                self.main_window.statusBar.showMessage("Label blurred by default.", 2000)
+                    else:
+                        # Add to annotations list
+                        self.annotations.append(bbox)
+                        self.selected_annotation = bbox
+                        if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
+                            self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
+            
+                        # Show attribute dialog if enabled
+                        if (
+                            self.main_window
+                            and hasattr(self.main_window, "auto_show_attribute_dialog")
+                            and self.main_window.auto_show_attribute_dialog
+                        ):
+                            self.main_window.edit_annotation(bbox, focus_first_field=True)
 
-                    # Update the annotation list in the main window
-                    if self.main_window:
-                        self.main_window.update_annotation_list()
-                        # Save annotations to current frame
-                        if hasattr(self.main_window, "frame_annotations"):
-                            self.main_window.frame_annotations[
-                                self.main_window.current_frame
-                            ] = self.annotations.copy()
+                        # Update the annotation list in the main window
+                        if self.main_window:
+                            self.main_window.update_annotation_list()
+                            # Save annotations to current frame
+                            if hasattr(self.main_window, "frame_annotations"):
+                                self.main_window.frame_annotations[
+                                    self.main_window.current_frame
+                                ] = self.annotations.copy()
+                                self.main_window.update_annotation_list()
                             self.main_window.update_annotation_list()
 
                 # Reset drawing state

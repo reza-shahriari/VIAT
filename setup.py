@@ -17,6 +17,15 @@ setup(
         "tqdm>=4.60.0",
         "matplotlib>=3.5.0",
     ],
+    extras_require={
+        "track": [
+            "easydict>=1.10",
+            "timm>=0.4.12",
+            "jpeg4py>=0.1.4",
+            "visdom>=0.1.8",
+            "tensorboardX>=2.0"
+        ]
+    },
     entry_points={
         "console_scripts": [
             "vat=vat.run:main",

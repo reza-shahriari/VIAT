@@ -28,7 +28,7 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 
-
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "sam2_trt"))
 
 
 def main():

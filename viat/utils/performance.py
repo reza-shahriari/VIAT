@@ -109,8 +109,11 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
         if cached is not None:
             return cached, target_frame
 
-    # 2. Forward by 1: just read
-    if target_frame == current_frame + 1:
+    # The actual position of the cv2.VideoCapture object
+    cap_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+    # 2. Exact next frame (most common for playback): just read
+    if target_frame == cap_pos:
         ret, frame = cap.read()
         if ret and frame is not None:
             if cache:
@@ -119,22 +122,20 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
         return None, target_frame
 
     # 3. Forward by a small amount: grab + read
-    delta = target_frame - current_frame
-    if 0 < delta <= 30 and current_frame >= 0:
+    delta = target_frame - cap_pos
+    if 0 < delta <= 30 and cap_pos >= 0:
         # grab (skip decode) for intermediate frames
-        for _ in range(delta - 1):
+        for _ in range(delta):
             if not cap.grab():
                 break
-        ret, frame = cap.retrieve()
-        if not ret or frame is None:
-            ret, frame = cap.read()
+        ret, frame = cap.read()
         if ret and frame is not None:
             if cache:
                 cache.put(target_frame, frame)
             return frame, target_frame
 
-    # 4. Backward seek: pre-fetch range if target_frame < current_frame
-    if target_frame < current_frame and backward_prefetch > 0:
+    # 4. Backward seek: pre-fetch range if target_frame < cap_pos
+    if target_frame < cap_pos and backward_prefetch > 0:
         start_frame = max(0, target_frame - backward_prefetch)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         target_img = None

@@ -64,6 +64,11 @@ class BlurManager:
         """Remove all blur regions from a single frame."""
         self.blur_regions.pop(frame_idx, None)
 
+    def clear_range(self, start_frame: int, end_frame: int):
+        """Remove all blur regions from frames in range [start_frame, end_frame]."""
+        for f in range(start_frame, end_frame + 1):
+            self.blur_regions.pop(f, None)
+
     def clear_all(self):
         """Remove all blur regions from every frame."""
         self.blur_regions.clear()

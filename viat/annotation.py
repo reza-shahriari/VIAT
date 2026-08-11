@@ -683,16 +683,28 @@ class AnnotationManager:
                 self.main_window.last_used_attributes = {}
             self.main_window.last_used_attributes[class_name] = attributes.copy()
 
-            # Add to annotations
-            self.canvas.annotations.append(bbox)
+            # Add to annotations or blur
+            if getattr(self.main_window, 'auto_blur_labels', False):
+                blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                if blur_mgr is not None:
+                    cur_f = getattr(self.main_window, 'current_frame', 0)
+                    blur_mgr.add_bbox_region(cur_f, bbox.rect, getattr(self.canvas, 'blur_kernel', 151))
+                    if hasattr(self.main_window, '_refresh_blur_display'):
+                        self.main_window._refresh_blur_display()
+                    else:
+                        self.canvas.update()
+                    if hasattr(self.main_window, 'statusBar') and self.main_window.statusBar:
+                        self.main_window.statusBar.showMessage("Label blurred by default.", 2000)
+            else:
+                self.canvas.annotations.append(bbox)
 
-            # Save to frame annotations
-            self.main_window.frame_annotations[self.main_window.current_frame] = (
-                self.canvas.annotations
-            )
+                # Save to frame annotations
+                self.main_window.frame_annotations[self.main_window.current_frame] = (
+                    self.canvas.annotations
+                )
 
-            self.update_annotation_list()
-            self.canvas.update()
+                self.update_annotation_list()
+                self.canvas.update()
 
     def create_annotation_dialog(self):
         """Create a dialog for adding or editing annotations."""

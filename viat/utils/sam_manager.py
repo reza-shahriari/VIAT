@@ -246,11 +246,24 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024, save=False)
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, quantize=16, verbose=False, imgsz=1024, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:
                     self.video_predictor = SAM2VideoPredictor(overrides=overrides)
+                
+                # Pre-load and compile the model for massive speedups
+                try:
+                    import torch
+                    print(f"Loading and compiling PyTorch model: {model_type}...")
+                    self.video_predictor.setup_model(model=None, verbose=False)
+                    if hasattr(self.video_predictor, 'model'):
+                        # Using default compilation mode for faster JIT warmup
+                        self.video_predictor.model = torch.compile(self.video_predictor.model)
+                        print("SAM Video model successfully compiled with torch.compile!")
+                except Exception as comp_err:
+                    print(f"Warning: torch.compile failed or skipped: {comp_err}")
+                    
                 self.video_predictor_type = model_type
                 
             predictor = self.video_predictor
@@ -334,11 +347,24 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, half=True, verbose=False, imgsz=1024, save=False)
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, quantize=16, verbose=False, imgsz=1024, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:
                     self.video_predictor = SAM2VideoPredictor(overrides=overrides)
+                
+                # Pre-load and compile the model for massive speedups
+                try:
+                    import torch
+                    print(f"Loading and compiling PyTorch model: {model_type}...")
+                    self.video_predictor.setup_model(model=None, verbose=False)
+                    if hasattr(self.video_predictor, 'model'):
+                        # Using default compilation mode for faster JIT warmup
+                        self.video_predictor.model = torch.compile(self.video_predictor.model)
+                        print("SAM Video model successfully compiled with torch.compile!")
+                except Exception as comp_err:
+                    print(f"Warning: torch.compile failed or skipped: {comp_err}")
+                    
                 self.video_predictor_type = model_type
                 
             predictor = self.video_predictor

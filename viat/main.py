@@ -510,6 +510,7 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def init_properties(self):
         """Initialize the application properties and state variables."""
+        self.auto_blur_labels = False
         self.duplicate_frames_enabled = True
         self.duplicate_frames_cache = {}
         self.frame_hashes = {}
@@ -1741,7 +1742,7 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_tracked',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                if self.sam_interactive_dock.get_blur_tracked_objects():
+                if self.sam_interactive_dock.get_blur_tracked_objects() or getattr(self, 'auto_blur_labels', False):
                     self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
                 else:
                     self.frame_annotations[start_f].append(ann)
@@ -1844,7 +1845,7 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_detected',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                if self.sam_interactive_dock.get_blur_tracked_objects():
+                if self.sam_interactive_dock.get_blur_tracked_objects() or getattr(self, 'auto_blur_labels', False):
                     self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
                 else:
                     self.frame_annotations[f_idx].append(ann)
@@ -1902,7 +1903,7 @@ class VideoAnnotationTool(QMainWindow):
                     target_class, QColor(0, 255, 0)), source='sam_tracked',
                     segmentation=polygon if self.sam_interactive_dock.
                     get_save_segmentation() else None)
-                if self.sam_interactive_dock.get_blur_tracked_objects():
+                if self.sam_interactive_dock.get_blur_tracked_objects() or getattr(self, 'auto_blur_labels', False):
                     self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
                 else:
                     self.frame_annotations[current_f].append(ann)
@@ -4778,6 +4779,13 @@ Would you like to load it?"""
             self.save_undo_state()
             new_annotation = self.clipboard_annotation.copy()
             current_frame = self.current_frame
+            if getattr(self, 'auto_blur_labels', False):
+                if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+                    self.blur_manager.add_bbox_region(current_frame, new_annotation.rect, getattr(self.canvas, 'blur_kernel', 151))
+                    if hasattr(self, '_refresh_blur_display'):
+                        self._refresh_blur_display()
+                    self.statusBar.showMessage('Annotation pasted as blur region', 2000)
+                    return
             if current_frame not in self.frame_annotations:
                 self.frame_annotations[current_frame] = []
             self.frame_annotations[current_frame].append(new_annotation)
@@ -4788,6 +4796,98 @@ Would you like to load it?"""
             if hasattr(self, 'annotation_dock'):
                 self.annotation_dock.update_annotation_list()
             self.statusBar.showMessage('Annotation pasted', 2000)
+
+    @log_exceptions
+    def toggle_auto_blur_labels(self, checked=None):
+        """Toggle automatic blurring of newly added labels."""
+        if checked is None:
+            self.auto_blur_labels = not getattr(self, 'auto_blur_labels', False)
+        else:
+            self.auto_blur_labels = bool(checked)
+
+        if hasattr(self, 'auto_blur_action') and self.auto_blur_action.isChecked() != self.auto_blur_labels:
+            self.auto_blur_action.blockSignals(True)
+            self.auto_blur_action.setChecked(self.auto_blur_labels)
+            self.auto_blur_action.blockSignals(False)
+
+        if hasattr(self, 'auto_blur_menu_action') and self.auto_blur_menu_action.isChecked() != self.auto_blur_labels:
+            self.auto_blur_menu_action.blockSignals(True)
+            self.auto_blur_menu_action.setChecked(self.auto_blur_labels)
+            self.auto_blur_menu_action.blockSignals(False)
+
+        state_str = "enabled" if self.auto_blur_labels else "disabled"
+        self.statusBar.showMessage(f"Auto-blur new labels {state_str}", 3000)
+
+    @log_exceptions
+    def clear_current_frame_blur(self):
+        """Remove all blur regions from the current frame."""
+        if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+            self.save_undo_state()
+            self.blur_manager.clear_frame(self.current_frame)
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            self.statusBar.showMessage(f"Cleared blur for frame {self.current_frame}", 3000)
+
+    @log_exceptions
+    def clear_blur_range(self):
+        """Open dialog to remove blur regions from a range of frames."""
+        if not hasattr(self, 'blur_manager') or self.blur_manager is None:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Clear Blur in Range")
+        layout = QVBoxLayout(dialog)
+
+        form_layout = QFormLayout()
+        total_f = getattr(self, 'total_frames', 1)
+        max_f = max(0, total_f - 1)
+
+        start_spin = QSpinBox()
+        start_spin.setRange(0, max_f)
+        start_spin.setValue(self.current_frame)
+
+        end_spin = QSpinBox()
+        end_spin.setRange(0, max_f)
+        end_spin.setValue(min(self.current_frame + 10, max_f))
+
+        form_layout.addRow("Start Frame:", start_spin)
+        form_layout.addRow("End Frame:", end_spin)
+        layout.addLayout(form_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() == QDialog.Accepted:
+            start_f = start_spin.value()
+            end_f = end_spin.value()
+            if start_f > end_f:
+                start_f, end_f = end_f, start_f
+
+            self.save_undo_state(range(start_f, end_f + 1))
+            self.blur_manager.clear_range(start_f, end_f)
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            self.statusBar.showMessage(f"Cleared blur for frames {start_f} to {end_f}", 4000)
+
+    @log_exceptions
+    def clear_all_blurs(self):
+        """Remove all blur regions across the entire dataset."""
+        if not hasattr(self, 'blur_manager') or self.blur_manager is None:
+            return
+
+        reply = QMessageBox.question(
+            self, "Clear All Blurs",
+            "Are you sure you want to remove all blur regions from all frames?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.save_undo_state('all')
+            self.blur_manager.clear_all()
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            self.statusBar.showMessage("Cleared all blur regions across video", 4000)
 
     @log_exceptions
     def cut_selected_annotation(self):
@@ -5063,11 +5163,18 @@ Do you want to scan the entire video now for duplicate frames?
                     if frame_hash in processed_hashes:
                         continue
                     processed_hashes.add(frame_hash)
-                self.frame_annotations[frame_num] = [self.clone_annotation(
-                    ann) for ann in current_annotations]
+                if getattr(self, 'auto_blur_labels', False):
+                    for ann in current_annotations:
+                        self.blur_manager.add_bbox_region(frame_num, ann.rect, getattr(self.canvas, 'blur_kernel', 151))
+                else:
+                    self.frame_annotations[frame_num] = [self.clone_annotation(
+                        ann) for ann in current_annotations]
             progress.close()
             if start_frame <= self.current_frame <= end_frame:
-                self.load_current_frame_annotations()
+                if getattr(self, 'auto_blur_labels', False) and hasattr(self, '_refresh_blur_display'):
+                    self._refresh_blur_display()
+                else:
+                    self.load_current_frame_annotations()
             self.statusBar.showMessage(
                 f'Annotations propagated to frames {start_frame}-{end_frame}',
                 5000)
@@ -5936,6 +6043,11 @@ Do you want to scan the entire video now for duplicate frames?
             box = ann_dict['box']
             rect = QRect(int(box[0]), int(box[1]), int(box[2] - box[0]),
                 int(box[3] - box[1]))
+            if getattr(self, 'auto_blur_labels', False):
+                if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+                    self.blur_manager.add_bbox_region(f_idx, rect, getattr(self.canvas, 'blur_kernel', 151))
+                continue
+
             color = self.canvas.class_colors.get(ann_dict['class_name'],
                 QColor(0, 255, 0))
             original_ann_idx = ann_dict.get('original_ann_idx')
@@ -6031,7 +6143,10 @@ Do you want to scan the entire video now for duplicate frames?
                     save_seg else None)
                 self.frame_annotations[f_idx].append(annotation)
         if self.current_frame == f_idx:
-            self.canvas.update()
+            if getattr(self, 'auto_blur_labels', False) and hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            else:
+                self.canvas.update()
 
     def on_auto_label_finished(self):
         self.ai_processing_frame = -1
@@ -6210,13 +6325,14 @@ Do you want to scan the entire video now for duplicate frames?
         class_attributes = None
         if hasattr(self.canvas, 'class_attributes'):
             class_attributes = deepcopy(self.canvas.class_attributes)
+        blur_regions = self.blur_manager.to_dict() if hasattr(self, 'blur_manager') and self.blur_manager else None
         undo_state = {'frame': self.current_frame, 'all_annotations':
             all_frame_annotations, 'current_annotations': [self.
             clone_annotation(ann) for ann in self.canvas.annotations] if
             self.canvas.annotations else [], 'class_colors': class_colors,
             'class_attributes': class_attributes, 'current_class': self.
             canvas.current_class if hasattr(self.canvas, 'current_class') else
-            None}
+            None, 'blur_regions': blur_regions}
         self.undo_stack.append(undo_state)
         self.redo_stack.clear()
         if len(self.undo_stack) > self.max_undo_steps:
@@ -6232,13 +6348,14 @@ Do you want to scan the entire video now for duplicate frames?
         class_attributes = None
         if hasattr(self.canvas, 'class_attributes'):
             class_attributes = deepcopy(self.canvas.class_attributes)
+        blur_regions = self.blur_manager.to_dict() if hasattr(self, 'blur_manager') and self.blur_manager else None
         undo_state = {'frame': self.current_frame, 'all_annotations':
             all_frame_annotations, 'current_annotations': [self.
             clone_annotation(ann) for ann in self.canvas.annotations] if
             self.canvas.annotations else [], 'class_colors': class_colors,
             'class_attributes': class_attributes, 'current_class': self.
             canvas.current_class if hasattr(self.canvas, 'current_class') else
-            None}
+            None, 'blur_regions': blur_regions}
         self.undo_stack.append(undo_state)
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
@@ -6249,6 +6366,7 @@ Do you want to scan the entire video now for duplicate frames?
         if not self.undo_stack:
             self.statusBar.showMessage('Nothing to undo', 3000)
             return
+        blur_regions = self.blur_manager.to_dict() if hasattr(self, 'blur_manager') and self.blur_manager else None
         current_state = {'frame': self.current_frame, 'all_annotations':
             self._copy_annotations_state(), 'current_annotations': [self.
             clone_annotation(ann) for ann in self.canvas.annotations] if
@@ -6257,12 +6375,16 @@ Do you want to scan the entire video now for duplicate frames?
             .items()}, 'class_attributes': deepcopy(self.canvas.
             class_attributes) if hasattr(self.canvas, 'class_attributes') else
             None, 'current_class': self.canvas.current_class if hasattr(
-            self.canvas, 'current_class') else None}
+            self.canvas, 'current_class') else None, 'blur_regions': blur_regions}
         self.redo_stack.append(current_state)
         if len(self.redo_stack) > self.max_redo_steps:
             self.redo_stack.pop(0)
         last_state = self.undo_stack.pop()
         frame = last_state['frame']
+        if 'blur_regions' in last_state and hasattr(self, 'blur_manager') and self.blur_manager:
+            self.blur_manager.from_dict(last_state['blur_regions'])
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
         if 'class_colors' in last_state and last_state['class_colors']:
             self.canvas.class_colors = last_state['class_colors']
         if 'class_attributes' in last_state and last_state['class_attributes']:
@@ -6315,6 +6437,10 @@ Do you want to scan the entire video now for duplicate frames?
         self.save_undo_state_without_clearing_redo()
         redo_state = self.redo_stack.pop()
         frame = redo_state['frame']
+        if 'blur_regions' in redo_state and hasattr(self, 'blur_manager') and self.blur_manager:
+            self.blur_manager.from_dict(redo_state['blur_regions'])
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
         if 'class_colors' in redo_state and redo_state['class_colors']:
             self.canvas.class_colors = redo_state['class_colors']
         if 'class_attributes' in redo_state and redo_state['class_attributes']:
