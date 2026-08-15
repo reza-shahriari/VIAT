@@ -140,13 +140,10 @@ class Sam2TrtManager:
             
             for i, frame in enumerate(source_frames):
                 if is_first_frame:
-                    if b:
-                        res = self.video_predictor.click_box(frame_index=0, frame=frame, box=b)
-                        obj_id = res.object_id
-                        mask = res.mask
-                    elif pts:
-                        # click supports one point. To support multiple, add_prompt
-                        res = self.video_predictor.add_prompt(frame_index=0, frame=frame, points=pts)
+                    pts_arg = pts if pts else None
+                    b_arg = b if b else None
+                    if b_arg or pts_arg:
+                        res = self.video_predictor.add_prompt(frame_index=0, frame=frame, points=pts_arg, box=b_arg)
                         obj_id = res.object_id
                         mask = res.mask
                     else:

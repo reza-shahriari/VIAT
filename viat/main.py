@@ -3646,10 +3646,28 @@ Would you like to load it?"""
             self._in_auto_erase = False
         self.canvas.selected_annotation = None
         if self.current_frame in self.frame_annotations:
-            self.canvas.annotations = self.frame_annotations[self.current_frame
-                ]
+            self.canvas.annotations = self.frame_annotations[self.current_frame]
         else:
             self.canvas.annotations = []
+            
+        # Update crop box if tracking is enabled
+        if hasattr(self, 'crop_settings_dock') and self.crop_settings_dock.track_object_cb.isChecked():
+            if self.canvas.crop_rect is not None and self.canvas.selected_annotation is not None:
+                # Get the tracked object's center
+                tracked_ann = self.canvas.selected_annotation
+                
+                # Check if it's the same object (by ID) or just keep tracking the selected one
+                # Usually selected_annotation points to the object in the current frame
+                # if the tracking engine updated it.
+                if tracked_ann in self.canvas.annotations:
+                    center = tracked_ann.rect.center()
+                    self.canvas.crop_rect.moveCenter(center)
+                    # Keep crop box inside frame bounds
+                    if self.canvas.pixmap:
+                        if self.canvas.crop_rect.left() < 0: self.canvas.crop_rect.moveLeft(0)
+                        if self.canvas.crop_rect.top() < 0: self.canvas.crop_rect.moveTop(0)
+                        if self.canvas.crop_rect.right() > self.canvas.pixmap.width(): self.canvas.crop_rect.moveRight(self.canvas.pixmap.width())
+                        if self.canvas.crop_rect.bottom() > self.canvas.pixmap.height(): self.canvas.crop_rect.moveBottom(self.canvas.pixmap.height())
         if hasattr(self, 'annotation_dock'):
             self.annotation_dock.update_annotation_list()
         self.canvas.update()
@@ -4741,14 +4759,37 @@ First error: {errors[0]}"""
                     for idx, cls in enumerate(imported_classes):
                         class_mapping[idx] = cls
                         self.add_class(cls)
-            format_type, annotations, imported_frame_annotations = (
-                import_annotations_func(filename, BoundingBox, image_width,
-                image_height, self.canvas.class_colors, class_mapping=
-                class_mapping))
+            elif format_type == 'CSV_XYWH_NO_CLASS':
+                from PyQt5.QtWidgets import QInputDialog
+                text, ok = QInputDialog.getText(self, 'Input Class', 'Enter class name for imported labels:')
+                if ok and text:
+                    class_name = text.strip()
+                    if not class_name:
+                        class_name = "Object"
+                else:
+                    return
+                
+                existing_classes = list(self.canvas.class_colors.keys())
+                if class_name not in existing_classes:
+                    self.add_class(class_name)
+                    
+                class_mapping = {0: class_name}
+            res = import_annotations_func(
+                filename, BoundingBox, image_width,
+                image_height, self.canvas.class_colors, class_mapping=class_mapping
+            )
+            format_type, annotations, imported_frame_annotations = res[0], res[1], res[2]
+            imported_deleted_frames = res[3] if len(res) > 3 else set()
+
             for frame_num, anns in imported_frame_annotations.items():
                 if frame_num not in self.frame_annotations:
                     self.frame_annotations[frame_num] = []
                 self.frame_annotations[frame_num].extend(anns)
+                
+            if imported_deleted_frames:
+                if not hasattr(self, 'deleted_frames'):
+                    self.deleted_frames = set()
+                self.deleted_frames.update(imported_deleted_frames)
                 
             # Store base annotations in labeler_analytics
             if hasattr(self, 'labeler_analytics'):
@@ -4779,7 +4820,7 @@ First error: {errors[0]}"""
         Args:
             video_filename (str): Path to the video file
         """
-        extensions = ['.txt', '.json', '.xml']
+        extensions = ['.txt', '.json', '.xml', '.csv']
         file_basename, _ = os.path.splitext(video_filename)
         for vid in self._annotations_imported:
             for ext in extensions:
@@ -5846,6 +5887,28 @@ Do you want to scan the entire video now for duplicate frames?
         else:
             self.statusBar.showMessage('Auto BBox disabled.', 3000)
             self.canvas.setCursor(Qt.ArrowCursor)
+
+    @log_exceptions
+    def toggle_crop_mode(self):
+        """Toggle Crop Mode."""
+        if not hasattr(self, 'crop_mode_action'):
+            return
+            
+        is_cropping = self.crop_mode_action.isChecked()
+        self.canvas.is_cropping_mode = is_cropping
+        
+        if is_cropping:
+            self.statusBar.showMessage('Crop Mode enabled. Draw a box to define the crop region.', 3000)
+            self.canvas.setCursor(Qt.CrossCursor)
+            if hasattr(self, 'crop_settings_dock'):
+                self.crop_settings_dock.show()
+                self.crop_settings_dock.raise_()
+        else:
+            self.statusBar.showMessage('Crop Mode disabled.', 3000)
+            self.canvas.setCursor(Qt.ArrowCursor)
+            if hasattr(self, 'crop_settings_dock'):
+                self.crop_settings_dock.hide()
+        self.canvas.update()
 
     @log_exceptions
     def change_sam_model(self, model_display_name):
@@ -8635,9 +8698,10 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
                                 image_width = 640
                                 image_height = 480
                                 
-                            _, _, base_frames_parsed = import_annotations_func(
+                            res_parsed = import_annotations_func(
                                 base_raya_file, BoundingBox, image_width, image_height, data.get('class_colors', {})
                             )
+                            base_frames_parsed = res_parsed[2]
                             
                             loaded_base = {}
                             for f_num, objs in base_frames_parsed.items():

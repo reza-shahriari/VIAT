@@ -747,7 +747,7 @@ def export_raya_annotations(filename, annotations, deleted_frames=None, total_fr
     except Exception as e:
         raise Exception(f"Error exporting to Raya format: {str(e)}")
 
-def export_raya_with_classes_annotations(filename, annotations, classes, deleted_frames=None, total_frames=None):
+def export_raya_with_classes_annotations(filename, annotations, classes=None, deleted_frames=None, total_frames=None):
     """
     Export annotations to Raya text format with a class header.
 
@@ -762,14 +762,32 @@ def export_raya_with_classes_annotations(filename, annotations, classes, deleted
     [class,x,y,width,height,size,quality,Difficult(optional)];
     """
     try:
+        # Determine present classes from annotations
+        present_classes = []
+        seen = set()
+        for annotation in annotations:
+            cls_name = getattr(annotation, "class_name", None)
+            if cls_name and cls_name not in seen:
+                seen.add(cls_name)
+                present_classes.append(cls_name)
+
+        # Build list of used classes preserving order from `classes`
+        if classes:
+            used_classes = [c for c in classes if c in seen]
+            for c in present_classes:
+                if c not in used_classes:
+                    used_classes.append(c)
+        else:
+            used_classes = present_classes
+
         # Write header
         with open(filename, "w") as f:
             f.write("###\n")
             f.write("clasess:\n")
             f.write("names:\n")
-            for cls in classes:
+            for cls in used_classes:
                 f.write(f"- {cls}\n")
-            f.write(f"-nc:{len(classes)}\n")
+            f.write(f"-nc:{len(used_classes)}\n")
             f.write("###\n")
 
         # Group annotations by frame
@@ -811,18 +829,18 @@ def export_raya_with_classes_annotations(filename, annotations, classes, deleted
                 # Get annotation properties
                 rect = annotation.rect
                 
-                # Get mapped class ID
+                # Get mapped class ID from used_classes
                 class_id = 0
-                if hasattr(annotation, 'class_name') and annotation.class_name in classes:
-                    class_id = classes.index(annotation.class_name)
+                if hasattr(annotation, 'class_name') and annotation.class_name in used_classes:
+                    class_id = used_classes.index(annotation.class_name)
                     
                 x = rect.x()
                 y = rect.y()
                 width = rect.width()
                 height = rect.height()
-                size = annotation.attributes.get("Size", -1)
-                quality = annotation.attributes.get("Quality", -1)
-                Difficult = annotation.attributes.get("Difficult", -1)
+                size = annotation.attributes.get("Size", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
+                quality = annotation.attributes.get("Quality", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
+                Difficult = annotation.attributes.get("Difficult", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
 
                 # Format the annotation with a semicolon after each one
                 if Difficult == -1:
@@ -1259,7 +1277,7 @@ def detect_annotation_format(filename):
     elif ext == ".xml":
         if "<annotation>" in content and "<object>" in content:
             return "Pascal VOC"
-    elif ext == ".txt":
+    elif ext in [".txt", ".csv"]:
         lines = content.strip().split("\n")
 
         # Check for Raya with classes format
@@ -1281,13 +1299,38 @@ def detect_annotation_format(filename):
         ):
             return "RayaYOLO"
 
-        # YOLO format typically has space-separated numbers (class x y w h)
+        # Check for YOLO format typically has space-separated numbers (class x y w h)
         if lines and all(
             len(line.split()) == 5 and line.split()[0].isdigit()
             for line in lines
             if line.strip()
         ):
             return "YOLO"
+
+        # Check for single-object per frame x y w h format (no class)
+        if lines:
+            import re
+            valid_xywh = True
+            valid_lines = 0
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in re.split(r'[,\s;]+', line) if p.strip()]
+                if len(parts) == 4:
+                    try:
+                        float(parts[0])
+                        float(parts[1])
+                        float(parts[2])
+                        float(parts[3])
+                        valid_lines += 1
+                        continue
+                    except ValueError:
+                        pass
+                valid_xywh = False
+                break
+            if valid_xywh and valid_lines > 0:
+                return "CSV_XYWH_NO_CLASS"
 
         # Check for generic Delimited format (CSV, TSV, semi-colon, etc.)
         if lines:
@@ -1415,6 +1458,60 @@ def import_delimited_annotations(filename, image_width, image_height, bbox_class
             
     return frame_annotations
 
+
+def import_csv_xywh_no_class_annotations(filename, image_width, image_height, bbox_class, class_mapping, class_colors=None):
+    """
+    Import annotations from CSV_XYWH_NO_CLASS format.
+    Line n corresponds to frame n (0-indexed).
+    Line format: x y w h (absolute coordinates).
+    If line is '0 0 1 1', it means no label for this frame.
+    """
+    if class_colors is None:
+        class_colors = {}
+        
+    frame_annotations = {}
+    class_name = class_mapping.get(0, "Object") if class_mapping else "Object"
+    
+    if class_name not in class_colors:
+        import random
+        class_colors[class_name] = QColor(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        
+    color = class_colors[class_name]
+
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+        
+    for frame_num, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+            
+        import re
+        parts = [p.strip() for p in re.split(r'[,\s;]+', line) if p.strip()]
+        if len(parts) >= 4:
+            try:
+                x = float(parts[0])
+                y = float(parts[1])
+                w = float(parts[2])
+                h = float(parts[3])
+                
+                # Check for 0 0 1 1 (no label) or 0 0 0 0 or invalid w/h
+                if w <= 0 or h <= 0 or (abs(x) < 1e-6 and abs(y) < 1e-6 and abs(w - 1) < 1e-6 and abs(h - 1) < 1e-6):
+                    continue
+                    
+                rect = QRect(int(x), int(y), int(w), int(h))
+                
+                attributes = {"Size": -1, "Quality": -1}
+                ann = bbox_class(rect, class_name, attributes, color, source="imported")
+                ann.frame = frame_num
+                
+                if frame_num not in frame_annotations:
+                    frame_annotations[frame_num] = []
+                frame_annotations[frame_num].append(ann)
+            except ValueError:
+                pass
+                
+    return frame_annotations
 
 def import_yolo_annotations(
     filename, image_width, image_height, bbox_class, class_colors=None
@@ -1631,12 +1728,13 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
         class_mapping (dict): Dictionary mapping file class index or names to project class names
         
     Returns:
-        dict: Dictionary mapping frame numbers to lists of annotation objects
+        tuple: (frame_annotations, deleted_frames)
     """
     from PyQt5.QtCore import QRect
     from PyQt5.QtGui import QColor
 
     frame_annotations = {}
+    deleted_frames = set()
 
     try:
         with open(filename, "r") as f:
@@ -1655,6 +1753,10 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
 
         # Parse data lines
         for frame_num, line in enumerate(data_lines):
+            line = line.strip()
+            if line.rstrip(";").strip() in ("DELETED", "DELETE"):
+                deleted_frames.add(frame_num)
+                continue
             # Skip empty frames or frames with no detections
             if not line or line == "[]":
                 continue
@@ -1671,7 +1773,7 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
 
             for annotation_str in annotation_strs:
                 annotation_str = annotation_str.strip()
-                if not annotation_str or annotation_str == "[]":
+                if not annotation_str or annotation_str == "[]" or annotation_str.rstrip(";").strip() in ("DELETED", "DELETE"):
                     continue
 
                 # Remove brackets
@@ -1711,7 +1813,7 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
         print(f"Error parsing Raya with classes text file: {str(e)}")
         raise Exception(f"Error parsing Raya with classes text file: {str(e)}")
 
-    return frame_annotations
+    return frame_annotations, deleted_frames
 
 def import_raya_annotations(filename, bbox_class, class_colors=None):
     """
@@ -1726,7 +1828,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
         class_colors (dict, optional): Dictionary mapping class names to colors
 
     Returns:
-        dict: Dictionary mapping frame numbers to lists of annotation objects
+        tuple: (frame_annotations, deleted_frames)
     """
     from PyQt5.QtCore import QRect
     from PyQt5.QtGui import QColor
@@ -1740,6 +1842,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
         class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
 
     frame_annotations = {}
+    deleted_frames = set()
 
     # Track unique class numbers to determine if we have a single class
     unique_class_nums = set()
@@ -1751,6 +1854,8 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
 
         for line in lines:
             line = line.strip()
+            if line.rstrip(";").strip() in ("DELETED", "DELETE"):
+                continue
             # Skip empty frames or frames with no detections
             if not line or line == "[]":
                 continue
@@ -1788,6 +1893,9 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
         for frame_num, line in enumerate(lines):
             frame_annots = []
             line = line.strip()
+            if line.rstrip(";").strip() in ("DELETED", "DELETE"):
+                deleted_frames.add(frame_num)
+                continue
             # Skip empty frames or frames with no detections
             if not line or line == "[]":
                 continue
@@ -1858,7 +1966,7 @@ def import_raya_annotations(filename, bbox_class, class_colors=None):
             if frame_annots:
                 frame_annotations[frame_num] = frame_annots
 
-        return frame_annotations
+        return frame_annotations, deleted_frames
 
     except Exception as e:
         print(f"Error parsing Raya text file: {str(e)}")
@@ -1889,7 +1997,7 @@ def import_raya_yolo_annotations(
         class_colors (dict, optional): Dictionary mapping class names to colors
 
     Returns:
-        dict: Dictionary mapping frame numbers to lists of annotation objects
+        tuple: (frame_annotations, deleted_frames)
     """
     if class_colors is None:
         class_colors = {}
@@ -1899,6 +2007,7 @@ def import_raya_yolo_annotations(
         class_colors["Quad"] = QColor(255, 0, 0)  # Red color for Quad class
 
     frame_annotations = {}
+    deleted_frames = set()
 
     try:
         with open(filename, "r") as f:
@@ -1907,6 +2016,10 @@ def import_raya_yolo_annotations(
         # Process each line (each line represents a frame)
         for frame_num, line in enumerate(lines):
             line = line.strip()
+
+            if line.rstrip(";").strip() in ("DELETED", "DELETE"):
+                deleted_frames.add(frame_num)
+                continue
 
             # Skip empty frames or frames with no detections
             if not line or line == "[]":
@@ -1990,7 +2103,7 @@ def import_raya_yolo_annotations(
     except Exception as e:
         raise Exception(f"Error parsing Raya YOLO text file: {str(e)}")
 
-    return frame_annotations
+    return frame_annotations, deleted_frames
 
 
 
@@ -2240,6 +2353,7 @@ def import_annotations(
     # Initialize return values
     annotations = []
     frame_annotations = {}
+    deleted_frames = set()
 
     # Import annotations based on format
     if format_type == "COCO":
@@ -2274,7 +2388,7 @@ def import_annotations(
         frame_annotations[0] = annotations  # Assume frame 0 for Pascal VOC
 
     elif format_type == "Raya":
-        frame_annotations = import_raya_annotations(filename, bbox_class, class_colors)
+        frame_annotations, deleted_frames = import_raya_annotations(filename, bbox_class, class_colors)
         # Raya format already uses "Quad" class by default
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
@@ -2282,18 +2396,25 @@ def import_annotations(
     elif format_type == "Raya with classes":
         if class_mapping is None:
             class_mapping = {}
-        frame_annotations = import_raya_with_classes_annotations(filename, bbox_class, class_mapping)
+        frame_annotations, deleted_frames = import_raya_with_classes_annotations(filename, bbox_class, class_mapping)
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
 
     elif format_type == "RayaYOLO":
-        frame_annotations = import_raya_yolo_annotations(
+        frame_annotations, deleted_frames = import_raya_yolo_annotations(
             filename, image_width, image_height, bbox_class, class_colors
         )
         # Set all annotations to "Quad" class
         for frame_num, frame_anns in frame_annotations.items():
             for ann in frame_anns:
                 ann.class_name = "Quad"
+        if 0 in frame_annotations:
+            annotations = frame_annotations[0]
+
+    elif format_type == "CSV_XYWH_NO_CLASS":
+        frame_annotations = import_csv_xywh_no_class_annotations(
+            filename, image_width, image_height, bbox_class, class_mapping, class_colors
+        )
         if 0 in frame_annotations:
             annotations = frame_annotations[0]
 
@@ -2321,7 +2442,7 @@ def import_annotations(
     if 0 in frame_annotations:
         annotations = frame_annotations[0]
 
-    return format_type, annotations, frame_annotations
+    return format_type, annotations, frame_annotations, deleted_frames
 
 def _filter_against_existing_annotations(new_annotations, existing_annotations, iou_threshold=0.8):
     """

@@ -132,6 +132,15 @@ class VideoCanvas(QWidget):
         self.blur_kernel = 151          # Gaussian kernel size
         self.blur_drawing = False      # True while mouse button is held
         self.blur_last_pos = None      # last image-coordinate QPoint
+        
+        # Crop Mode State
+        self.is_cropping_mode = False
+        self.crop_rect = None          # QRect in image coordinates
+        self.resizing_crop_handle = None
+        self.moving_crop = False
+        self.is_drawing_crop = False
+        self.crop_start_pos = None
+        self.original_crop_rect = None
 
 
     def set_pan_mode(self, enabled):
@@ -233,27 +242,38 @@ class VideoCanvas(QWidget):
                     source_rect = QRect(int(source_x), int(source_y), int(source_w), int(source_h))
                     painter.drawPixmap(intersection, self.pixmap, source_rect)
 
-                # Only draw annotations that intersect with the update area
-                for annotation in self.annotations:
-                    # Skip if object_filter is set and this annotation doesn't match
-                    if getattr(self, 'object_filter', None):
-                        _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
-                        if _aid != self.object_filter:
-                            continue
-
-                    # Skip annotations that fall below the class threshold
-                    if hasattr(annotation, 'score') and annotation.score is not None:
-                        threshold = (self.class_thresholds or {}).get(annotation.class_name, 0.0)
-                        if annotation.score < threshold:
-                            continue
-
-                    display_rect = self.image_to_display_rect(annotation.rect)
-
-                    # Skip annotations outside the update area
-                    if not display_rect.intersects(update_rect):
-                        continue
-                # # Draw the image
-                # painter.drawPixmap(display_rect, self.pixmap)
+                # Draw crop overlay if in cropping mode
+                if getattr(self, "is_cropping_mode", False):
+                    # Dim the whole image
+                    painter.fillRect(display_rect, QColor(0, 0, 0, 150))
+                    
+                    if getattr(self, "crop_rect", None):
+                        d_crop = self.image_to_display_rect(self.crop_rect)
+                        if d_crop.intersects(update_rect):
+                            # Draw the un-dimmed region (punch a hole by redrawing the pixmap)
+                            intersection = d_crop.intersected(update_rect)
+                            source_x = (intersection.x() - display_rect.x()) * self.pixmap.width() / display_rect.width()
+                            source_y = (intersection.y() - display_rect.y()) * self.pixmap.height() / display_rect.height()
+                            source_w = intersection.width() * self.pixmap.width() / display_rect.width()
+                            source_h = intersection.height() * self.pixmap.height() / display_rect.height()
+                            source_rect = QRect(int(source_x), int(source_y), int(source_w), int(source_h))
+                            painter.drawPixmap(intersection, self.pixmap, source_rect)
+                            
+                            # Draw a bright border
+                            painter.setPen(QPen(QColor(255, 255, 255), 2, Qt.DashLine))
+                            painter.setBrush(Qt.NoBrush)
+                            painter.drawRect(d_crop)
+                            
+                            # Draw resize handles
+                            handle_size = 10
+                            handle_color = QColor(255, 255, 255, 200)
+                            painter.setBrush(handle_color)
+                            painter.setPen(QPen(Qt.black, 1))
+                            for point in self.get_handle_points(d_crop):
+                                painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+                                
+                    # When in crop mode, we skip drawing other annotations to avoid clutter,
+                    # or we can draw them with low opacity. Let's draw them normally for context.
 
                 # Draw smart edge indicator if enabled
                 if hasattr(self, "smart_edge_enabled") and self.smart_edge_enabled:
@@ -1002,6 +1022,8 @@ class VideoCanvas(QWidget):
                 skip_selection = True
             elif is_sam_mode:
                 skip_selection = True
+            elif getattr(self, "is_cropping_mode", False):
+                skip_selection = True
 
             if skip_selection:
                 annotation = None
@@ -1060,6 +1082,28 @@ class VideoCanvas(QWidget):
                 
                 # Reset two-click state if we're selecting an annotation
                 self.two_click_first_point = None
+                self.update()
+                return
+
+            if getattr(self, "is_cropping_mode", False):
+                if getattr(self, "crop_rect", None):
+                    display_crop = self.image_to_display_rect(self.crop_rect)
+                    handle_idx = self.handle_at_pos(display_crop, event.pos())
+                    if handle_idx is not None:
+                        self.resizing_crop_handle = handle_idx
+                        self.crop_start_pos = event.pos()
+                        self.original_crop_rect = copy_qrect(self.crop_rect)
+                        return
+                    elif display_crop.contains(event.pos()):
+                        self.moving_crop = True
+                        self.crop_start_pos = img_pos
+                        self.original_crop_rect = copy_qrect(self.crop_rect)
+                        return
+                        
+                # Start drawing a new crop box
+                self.is_drawing_crop = True
+                self.crop_start_pos = img_pos
+                self.current_point = img_pos
                 self.update()
                 return
 
@@ -1354,6 +1398,52 @@ class VideoCanvas(QWidget):
                 self._display_rect_cache.clear()
             self.update()
             return
+            
+        # Handle crop mode drawing and moving
+        if getattr(self, "is_cropping_mode", False):
+            if getattr(self, "is_drawing_crop", False) and getattr(self, "crop_start_pos", None):
+                img_pos = self.display_to_image_pos(event.pos())
+                if img_pos:
+                    self.crop_rect = QRect(self.crop_start_pos, img_pos).normalized()
+                    self.update()
+                return
+                
+            if getattr(self, "moving_crop", False) and getattr(self, "crop_start_pos", None) and getattr(self, "original_crop_rect", None):
+                img_pos = self.display_to_image_pos(event.pos())
+                if img_pos:
+                    delta_x = img_pos.x() - self.crop_start_pos.x()
+                    delta_y = img_pos.y() - self.crop_start_pos.y()
+                    self.crop_rect = QRect(
+                        self.original_crop_rect.x() + delta_x,
+                        self.original_crop_rect.y() + delta_y,
+                        self.original_crop_rect.width(),
+                        self.original_crop_rect.height()
+                    )
+                    self.update()
+                return
+                
+            if getattr(self, "resizing_crop_handle", None) is not None and getattr(self, "original_crop_rect", None):
+                display_crop = self.image_to_display_rect(self.original_crop_rect)
+                delta_x = event.pos().x() - self.crop_start_pos.x()
+                delta_y = event.pos().y() - self.crop_start_pos.y()
+                
+                new_rect = copy_qrect(display_crop)
+                handle_idx = self.resizing_crop_handle
+                if handle_idx == 0:  new_rect.setTopLeft(display_crop.topLeft() + QPoint(delta_x, delta_y))
+                elif handle_idx == 1: new_rect.setTopRight(display_crop.topRight() + QPoint(delta_x, delta_y))
+                elif handle_idx == 2: new_rect.setBottomLeft(display_crop.bottomLeft() + QPoint(delta_x, delta_y))
+                elif handle_idx == 3: new_rect.setBottomRight(display_crop.bottomRight() + QPoint(delta_x, delta_y))
+                elif handle_idx == 4: new_rect.setTop(display_crop.top() + delta_y)
+                elif handle_idx == 5: new_rect.setBottom(display_crop.bottom() + delta_y)
+                elif handle_idx == 6: new_rect.setLeft(display_crop.left() + delta_x)
+                elif handle_idx == 7: new_rect.setRight(display_crop.right() + delta_x)
+                
+                new_img_rect = self.display_to_image_rect(new_rect.normalized())
+                if new_img_rect:
+                    self.crop_rect = new_img_rect
+                    self.update()
+                return
+
         # If we're moving an edge
         if self.edge_moving and self.selected_annotation:
             # Get the current display rect
@@ -1551,6 +1641,23 @@ class VideoCanvas(QWidget):
             self.pan_start_pos = None
             self.setCursor(Qt.ArrowCursor)
             return
+            
+        if getattr(self, "is_cropping_mode", False):
+            if getattr(self, "is_drawing_crop", False):
+                self.is_drawing_crop = False
+                self.crop_start_pos = None
+                self.current_point = None
+            if getattr(self, "moving_crop", False):
+                self.moving_crop = False
+                self.crop_start_pos = None
+                self.original_crop_rect = None
+            if getattr(self, "resizing_crop_handle", None) is not None:
+                self.resizing_crop_handle = None
+                self.crop_start_pos = None
+                self.original_crop_rect = None
+            self.update()
+            return
+            
         is_sam_mode = getattr(self, "sam_interactive_mode", False)
         if event.button() == Qt.LeftButton or (event.button() == Qt.RightButton and is_sam_mode):
             if is_sam_mode and self.is_drawing:

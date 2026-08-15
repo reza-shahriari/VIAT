@@ -30,6 +30,7 @@ from viat.widgets.empty_frames_dock import EmptyFramesManagerDock
 from viat.widgets.uncertain_frames_dock import UncertainFramesManagerDock
 from viat.widgets.class_frames_dock import ClassFramesManagerDock
 from viat.widgets.video_manager_dock import VideoManagerDock
+from viat.widgets.crop_settings_dock import CropSettingsDock
 
 
 class UICreator:
@@ -449,6 +450,16 @@ class UICreator:
         self.main_window.toolbar.addAction(self.auto_bbox_action)
         self.main_window.auto_bbox_action = self.auto_bbox_action
 
+        # Add Crop Mode tool action
+        self.crop_mode_action = QAction("Crop Mode", self.main_window)
+        self.crop_mode_action.setIcon(self.main_window.icon_provider.get_icon("transform-crop")) # Using generic crop icon name
+        self.crop_mode_action.setCheckable(True)
+        self.crop_mode_action.setChecked(False)
+        self.crop_mode_action.setToolTip("Enable Crop Mode (define a crop region to extract dataset)")
+        self.crop_mode_action.triggered.connect(self.main_window.toggle_crop_mode)
+        self.main_window.toolbar.addAction(self.crop_mode_action)
+        self.main_window.crop_mode_action = self.crop_mode_action
+
         # Add model selector for Auto BBox
         self.main_window.sam_model_selector = QComboBox()
         self.main_window.sam_model_selector.addItems([
@@ -576,6 +587,13 @@ class UICreator:
             Qt.LeftDockWidgetArea, self.main_window.video_manager_dock
         )
         self.main_window.video_manager_dock.hide() # Hidden by default
+
+        # Crop Settings dock
+        self.main_window.crop_settings_dock = CropSettingsDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.crop_settings_dock
+        )
+        self.main_window.crop_settings_dock.hide() # Hidden by default
 
 
         # Tabify them to create a collapsible side panel

@@ -246,7 +246,7 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, quantize=16, verbose=False, imgsz=1024, save=False)
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=1024, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:
@@ -347,7 +347,7 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, quantize=16, verbose=False, imgsz=1024, save=False)
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=1024, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:
