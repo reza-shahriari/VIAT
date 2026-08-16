@@ -18,7 +18,7 @@ Key features:
 
 import cv2
 from PyQt5.QtWidgets import QWidget, QMenu, QApplication
-from PyQt5.QtCore import Qt, QRect, QPoint,QTimer
+from PyQt5.QtCore import Qt, QRect, QPoint, QTimer, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
 import sys
 import os
@@ -43,6 +43,7 @@ EDGE_LEFT = 4
 
 
 class VideoCanvas(QWidget):
+    cropRectChanged = pyqtSignal(QRect)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1406,6 +1407,7 @@ class VideoCanvas(QWidget):
                 if img_pos:
                     self.crop_rect = QRect(self.crop_start_pos, img_pos).normalized()
                     self.update()
+                    self.cropRectChanged.emit(self.crop_rect)
                 return
                 
             if getattr(self, "moving_crop", False) and getattr(self, "crop_start_pos", None) and getattr(self, "original_crop_rect", None):
@@ -1420,6 +1422,7 @@ class VideoCanvas(QWidget):
                         self.original_crop_rect.height()
                     )
                     self.update()
+                    self.cropRectChanged.emit(self.crop_rect)
                 return
                 
             if getattr(self, "resizing_crop_handle", None) is not None and getattr(self, "original_crop_rect", None):
@@ -1442,6 +1445,7 @@ class VideoCanvas(QWidget):
                 if new_img_rect:
                     self.crop_rect = new_img_rect
                     self.update()
+                    self.cropRectChanged.emit(self.crop_rect)
                 return
 
         # If we're moving an edge

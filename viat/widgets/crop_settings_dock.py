@@ -162,6 +162,7 @@ class CropSettingsDock(QDockWidget):
             video_path=self.main_window.video_filename,
             frame_annotations=self.main_window.frame_annotations,
             base_crop_rect=self.main_window.canvas.crop_rect,
+            frame_crops=getattr(self.main_window, 'frame_crops', {}),
             track_id=track_id,
             class_colors=self.main_window.canvas.class_colors
         )

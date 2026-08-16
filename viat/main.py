@@ -554,6 +554,7 @@ class VideoAnnotationTool(QMainWindow):
         self.use_previous_attributes = True
         self.last_used_attributes = {}
         self.frame_annotations = {}
+        self.frame_crops = {}
         self.canvas_class_attributes = {'Quad': {'Size': {'type': 'int',
             'default': -1, 'min': 0, 'max': 100}, 'Quality': {'type': 'int',
             'default': -1, 'min': 0, 'max': 100}}}
@@ -624,6 +625,8 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.annotationMoved.connect(self.save_undo_state)
         if hasattr(self.canvas, 'annotationResized'):
             self.canvas.annotationResized.connect(self.save_undo_state)
+        if hasattr(self.canvas, 'cropRectChanged'):
+            self.canvas.cropRectChanged.connect(self.handle_crop_rect_changed)
         playback_controls = self.ui_creator.create_playback_controls()
         layout.addWidget(playback_controls)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -636,6 +639,20 @@ class VideoAnnotationTool(QMainWindow):
         self.setWindowTitle('VIAT - Video Image Annotation Tool')
         self.setWindowIcon(self.icon_provider.get_icon('app-icon'))
         self.viat_setup_extra_menus()
+
+    @log_exceptions
+    def handle_crop_rect_changed(self, rect):
+        """Handle changes to the crop rectangle from the canvas."""
+        if rect:
+            self.frame_crops[self.current_frame] = rect
+            if hasattr(self, 'crop_settings_dock'):
+                # Block signals to avoid infinite loops if spinboxes are connected
+                self.crop_settings_dock.width_spin.blockSignals(True)
+                self.crop_settings_dock.height_spin.blockSignals(True)
+                self.crop_settings_dock.width_spin.setValue(rect.width())
+                self.crop_settings_dock.height_spin.setValue(rect.height())
+                self.crop_settings_dock.width_spin.blockSignals(False)
+                self.crop_settings_dock.height_spin.blockSignals(False)
 
     @log_exceptions
     def viat_setup_extra_menus(self):
@@ -3650,6 +3667,26 @@ Would you like to load it?"""
         else:
             self.canvas.annotations = []
             
+        # Load the latest crop box for this frame or earlier
+        if hasattr(self, 'frame_crops') and self.frame_crops:
+            closest_frame = -1
+            for f in self.frame_crops:
+                if f <= self.current_frame and f > closest_frame:
+                    closest_frame = f
+            if closest_frame >= 0:
+                # Use a copy of the rect to prevent modifying the past frame's rect unintentionally
+                from PyQt5.QtCore import QRect
+                self.canvas.crop_rect = QRect(self.frame_crops[closest_frame])
+                
+                # Update dock spinboxes without emitting signals to avoid infinite loops
+                if hasattr(self, 'crop_settings_dock'):
+                    self.crop_settings_dock.width_spin.blockSignals(True)
+                    self.crop_settings_dock.height_spin.blockSignals(True)
+                    self.crop_settings_dock.width_spin.setValue(self.canvas.crop_rect.width())
+                    self.crop_settings_dock.height_spin.setValue(self.canvas.crop_rect.height())
+                    self.crop_settings_dock.width_spin.blockSignals(False)
+                    self.crop_settings_dock.height_spin.blockSignals(False)
+                    
         # Update crop box if tracking is enabled
         if hasattr(self, 'crop_settings_dock') and self.crop_settings_dock.track_object_cb.isChecked():
             if self.canvas.crop_rect is not None and self.canvas.selected_annotation is not None:
@@ -3668,6 +3705,9 @@ Would you like to load it?"""
                         if self.canvas.crop_rect.top() < 0: self.canvas.crop_rect.moveTop(0)
                         if self.canvas.crop_rect.right() > self.canvas.pixmap.width(): self.canvas.crop_rect.moveRight(self.canvas.pixmap.width())
                         if self.canvas.crop_rect.bottom() > self.canvas.pixmap.height(): self.canvas.crop_rect.moveBottom(self.canvas.pixmap.height())
+                    # Since tracking changed the rect, save it to the current frame
+                    from PyQt5.QtCore import QRect
+                    self.frame_crops[self.current_frame] = QRect(self.canvas.crop_rect)
         if hasattr(self, 'annotation_dock'):
             self.annotation_dock.update_annotation_list()
         self.canvas.update()

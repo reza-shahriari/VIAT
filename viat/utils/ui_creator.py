@@ -350,6 +350,43 @@ class UICreator:
         similar_action.triggered.connect(self.main_window.propagate_to_similar_frames)
         tools_menu.addAction(similar_action)
 
+        # Blur & Privacy Tools submenu
+        tools_menu.addSeparator()
+        privacy_menu = tools_menu.addMenu("Privacy & Blur Tools")
+
+        auto_blur_menu_action = QAction("Auto-Blur New Labels", self.main_window, checkable=True)
+        auto_blur_menu_action.setIcon(self.main_window.icon_provider.get_icon("auto-blur"))
+        auto_blur_menu_action.setToolTip("Automatically blur all newly added labels (manual, pasted, tracked, detected)")
+        auto_blur_menu_action.setChecked(getattr(self.main_window, 'auto_blur_labels', False))
+        auto_blur_menu_action.triggered.connect(
+            lambda checked: getattr(self.main_window, 'toggle_auto_blur_labels', lambda c: None)(checked)
+        )
+        privacy_menu.addAction(auto_blur_menu_action)
+        self.main_window.auto_blur_menu_action = auto_blur_menu_action
+
+        privacy_menu.addSeparator()
+
+        clear_frame_blur_action = QAction("Clear Current Frame Blur", self.main_window)
+        clear_frame_blur_action.setToolTip("Remove all blur regions from the current frame")
+        clear_frame_blur_action.triggered.connect(
+            lambda: getattr(self.main_window, 'clear_current_frame_blur', lambda: None)()
+        )
+        privacy_menu.addAction(clear_frame_blur_action)
+
+        clear_range_blur_action = QAction("Clear Blur in Range...", self.main_window)
+        clear_range_blur_action.setToolTip("Remove blur regions from a range of frames")
+        clear_range_blur_action.triggered.connect(
+            lambda: getattr(self.main_window, 'clear_blur_range', lambda: None)()
+        )
+        privacy_menu.addAction(clear_range_blur_action)
+
+        clear_all_blur_action = QAction("Clear All Blurs Across Video", self.main_window)
+        clear_all_blur_action.setToolTip("Remove all blur regions from every frame")
+        clear_all_blur_action.triggered.connect(
+            lambda: getattr(self.main_window, 'clear_all_blurs', lambda: None)()
+        )
+        privacy_menu.addAction(clear_all_blur_action)
+
         # Store reference to keep menu and toolbar in sync
         self.main_window.smart_edge_action = smart_edge_action
 
@@ -426,7 +463,7 @@ class UICreator:
 
         # Add blur pen tool action
         self.blur_pen_action = QAction("Blur Pen", self.main_window)
-        self.blur_pen_action.setIcon(self.main_window.icon_provider.get_icon("edit-clear"))  # Using edit-clear as a fallback icon
+        self.blur_pen_action.setIcon(self.main_window.icon_provider.get_icon("blur-pen"))
         self.blur_pen_action.setCheckable(True)
         self.blur_pen_action.setChecked(False)
         self.blur_pen_action.setToolTip("Enable Blur Pen (left-click to draw blur, right-click to erase)")
@@ -439,6 +476,18 @@ class UICreator:
         self.blur_pen_action.triggered.connect(toggle_blur_pen)
         self.main_window.toolbar.addAction(self.blur_pen_action)
         self.main_window.blur_pen_action = self.blur_pen_action
+
+        # Add auto blur toggle action
+        self.auto_blur_action = QAction("Auto Blur", self.main_window)
+        self.auto_blur_action.setIcon(self.main_window.icon_provider.get_icon("auto-blur"))
+        self.auto_blur_action.setCheckable(True)
+        self.auto_blur_action.setChecked(getattr(self.main_window, 'auto_blur_labels', False))
+        self.auto_blur_action.setToolTip("Auto-blur all new labels (manual, pasted, tracked, detected)")
+        self.auto_blur_action.triggered.connect(
+            lambda checked: getattr(self.main_window, 'toggle_auto_blur_labels', lambda c: None)(checked)
+        )
+        self.main_window.toolbar.addAction(self.auto_blur_action)
+        self.main_window.auto_blur_action = self.auto_blur_action
 
         # Add auto bbox tool action
         self.auto_bbox_action = QAction("Auto BBox", self.main_window)

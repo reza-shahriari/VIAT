@@ -1,4 +1,4 @@
-﻿from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon
 import os
 import sys
 import qtawesome as qta
@@ -24,7 +24,9 @@ class IconProvider:
             "zoom-original": "fa5s.expand",
             "pan-tool": "fa5s.hand-paper",
             "magic": "fa5s.magic",
-            # Add more mappings as needed
+            "blur-pen": "fa5s.paint-brush",
+            "auto-blur": "fa5s.user-shield",
+            "eye-slash": "fa5s.eye-slash",
         }
 
         # Map standard icon names to custom icon files

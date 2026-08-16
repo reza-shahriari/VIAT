@@ -9,11 +9,12 @@ from PyQt5.QtCore import Qt
 class CropExporter:
     """Engine for exporting cropped datasets (images or video) and transforming annotations."""
     
-    def __init__(self, main_window, video_path, frame_annotations, base_crop_rect, track_id=None, class_colors=None):
+    def __init__(self, main_window, video_path, frame_annotations, base_crop_rect, frame_crops=None, track_id=None, class_colors=None):
         self.main_window = main_window
         self.video_path = video_path
         self.frame_annotations = frame_annotations
         self.base_crop_rect = base_crop_rect
+        self.frame_crops = frame_crops or {}
         self.track_id = track_id
         self.class_colors = class_colors or {}
         
@@ -41,24 +42,26 @@ class CropExporter:
         
         # Build class mapping
         class_names = list(self.class_colors.keys())
-        class_to_id = {name: i for i, name in enumerate(class_names)}
         
-        with open(os.path.join(output_dir, "classes.txt"), "w") as f:
-            for name in class_names:
-                f.write(f"{name}\n")
-                
         # Setup Video Writer if mp4
         writer = None
         images_dir = None
+        
+        # Determine output basename
+        video_basename = os.path.splitext(os.path.basename(self.video_path))[0]
+        
         if format_type == "mp4":
-            mp4_path = os.path.join(output_dir, "cropped_video.mp4")
+            mp4_path = os.path.join(output_dir, f"{video_basename}_cropped.mp4")
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(mp4_path, fourcc, fps, (crop_w, crop_h))
         else:
-            images_dir = os.path.join(output_dir, "images")
+            images_dir = os.path.join(output_dir, f"{video_basename}_cropped_images")
             os.makedirs(images_dir, exist_ok=True)
             
-        current_crop = QRect(self.base_crop_rect)
+        current_crop = QRect(self.base_crop_rect) if self.base_crop_rect else None
+        
+        # Keep track of all transformed annotations for Raya export
+        all_transformed_annotations = []
         
         for frame_idx in range(total_frames):
             if progress.wasCanceled():
@@ -72,6 +75,18 @@ class CropExporter:
             
             anns = self.frame_annotations.get(frame_idx, [])
             
+            # Find the best crop rect for this frame from self.frame_crops
+            if self.frame_crops:
+                closest_frame = -1
+                for f in self.frame_crops:
+                    if f <= frame_idx and f > closest_frame:
+                        closest_frame = f
+                if closest_frame >= 0:
+                    current_crop = QRect(self.frame_crops[closest_frame])
+                    
+            if current_crop is None:
+                continue
+                
             # Update tracking crop box
             if self.track_id is not None:
                 # Find the tracked object in this frame
@@ -122,7 +137,7 @@ class CropExporter:
                 cv2.imwrite(os.path.join(images_dir, f"frame_{frame_idx:06d}.jpg"), cropped_img)
                 
             # Transform Annotations
-            yolo_lines = []
+            import copy
             for ann in anns:
                 # Apply transformation: new_x = old_x - crop_x
                 new_x = ann.rect.x() - current_crop.x()
@@ -139,41 +154,44 @@ class CropExporter:
                 if right <= left or bottom <= top:
                     continue # Out of bounds
                     
-                # Convert to YOLO (normalized)
-                cx = (left + right) / 2.0 / crop_w
-                cy = (top + bottom) / 2.0 / crop_h
-                w = (right - left) / float(crop_w)
-                h = (bottom - top) / float(crop_h)
-                
-                c_id = class_to_id.get(ann.class_name, 0)
+                # Create a transformed annotation
+                trans_ann = copy.copy(ann)
+                trans_ann.frame = frame_idx
+                trans_ann.rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
                 
                 if hasattr(ann, 'polygon') and ann.polygon and len(ann.polygon) > 0:
                     # Transform polygon
-                    poly_str = f"{c_id}"
                     valid_poly = False
+                    new_poly = []
                     for pt in ann.polygon:
                         px = pt.x() - current_crop.x()
                         py = pt.y() - current_crop.y()
                         # Clip polygon points (simple clamp)
                         px = max(0, min(crop_w, px))
                         py = max(0, min(crop_h, py))
-                        norm_x = px / crop_w
-                        norm_y = py / crop_h
-                        poly_str += f" {norm_x:.6f} {norm_y:.6f}"
-                        if 0 < norm_x < 1 and 0 < norm_y < 1:
+                        new_poly.append(QPoint(int(px), int(py)))
+                        
+                        if 0 < px < crop_w and 0 < py < crop_h:
                             valid_poly = True
                     
                     if valid_poly:
-                        yolo_lines.append(poly_str)
+                        trans_ann.polygon = new_poly
+                        all_transformed_annotations.append(trans_ann)
                     else:
-                        yolo_lines.append(f"{c_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+                        trans_ann.polygon = []
+                        all_transformed_annotations.append(trans_ann)
                 else:
-                    yolo_lines.append(f"{c_id} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}")
+                    all_transformed_annotations.append(trans_ann)
                     
-            if yolo_lines:
-                label_path = os.path.join(labels_dir, f"frame_{frame_idx:06d}.txt")
-                with open(label_path, "w") as f:
-                    f.write("\n".join(yolo_lines))
+        # Export all transformed annotations using Raya format
+        from viat.utils.file_operations import export_raya_with_classes_annotations
+        raya_filename = os.path.join(output_dir, f"{video_basename}_cropped.txt")
+        export_raya_with_classes_annotations(
+            filename=raya_filename,
+            annotations=all_transformed_annotations,
+            classes=class_names,
+            total_frames=total_frames
+        )
                     
         if writer:
             writer.release()
