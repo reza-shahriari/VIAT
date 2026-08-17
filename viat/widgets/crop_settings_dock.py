@@ -72,6 +72,30 @@ class CropSettingsDock(QDockWidget):
         settings_group.setLayout(settings_layout)
         layout.addWidget(settings_group)
         
+        # Scope Group
+        scope_group = QGroupBox("Crop Box Scope")
+        scope_layout = QVBoxLayout()
+        
+        self.btn_all_frames = QPushButton("Apply to All Frames")
+        self.btn_all_frames.clicked.connect(self.apply_to_all_frames)
+        
+        self.btn_this_frame = QPushButton("Apply to This Frame Only")
+        self.btn_this_frame.clicked.connect(self.apply_to_this_frame_only)
+        
+        self.btn_start_to_here = QPushButton("Apply from Start to Here")
+        self.btn_start_to_here.clicked.connect(self.apply_from_start_to_here)
+        
+        self.btn_here_to_end = QPushButton("Apply from Here to End")
+        self.btn_here_to_end.clicked.connect(self.apply_from_here_to_end)
+        
+        scope_layout.addWidget(self.btn_all_frames)
+        scope_layout.addWidget(self.btn_this_frame)
+        scope_layout.addWidget(self.btn_start_to_here)
+        scope_layout.addWidget(self.btn_here_to_end)
+        scope_group.setLayout(scope_layout)
+        
+        layout.addWidget(scope_group)
+        
         # Export Group
         export_group = QGroupBox("Export")
         export_layout = QVBoxLayout()
@@ -118,6 +142,7 @@ class CropSettingsDock(QDockWidget):
                 if canvas.crop_rect.bottom() > canvas.pixmap.height(): canvas.crop_rect.moveBottom(canvas.pixmap.height())
                 
             canvas.update()
+            canvas.cropRectChanged.emit(canvas.crop_rect)
         else:
             QMessageBox.information(self, "Crop Mode", "Please draw a crop box first.")
 
@@ -133,8 +158,69 @@ class CropSettingsDock(QDockWidget):
             from PyQt5.QtCore import QPoint
             canvas.crop_rect.moveCenter(QPoint(cx, cy))
             canvas.update()
+            
+            # Since the signal isn't emitted automatically from direct attribute changes, emit it here
+            canvas.cropRectChanged.emit(canvas.crop_rect)
         else:
             QMessageBox.information(self, "Crop Mode", "Please draw a crop box first.")
+            
+    def apply_to_all_frames(self):
+        if not hasattr(self.main_window, "canvas") or self.main_window.canvas.crop_rect is None:
+            return
+        rect = self.main_window.canvas.crop_rect
+        self.main_window.frame_crops.clear()
+        from PyQt5.QtCore import QRect
+        self.main_window.frame_crops[0] = QRect(rect)
+        QMessageBox.information(self, "Crop Scope", "Crop box applied to all frames.")
+        
+    def apply_to_this_frame_only(self):
+        if not hasattr(self.main_window, "canvas") or self.main_window.canvas.crop_rect is None:
+            return
+        rect = self.main_window.canvas.crop_rect
+        cur_frame = self.main_window.current_frame
+        
+        prev_rect = None
+        closest_frame = -1
+        for f in self.main_window.frame_crops:
+            if f < cur_frame and f > closest_frame:
+                closest_frame = f
+        if closest_frame >= 0:
+            prev_rect = self.main_window.frame_crops[closest_frame]
+            
+        from PyQt5.QtCore import QRect
+        self.main_window.frame_crops[cur_frame] = QRect(rect)
+        if prev_rect and (cur_frame + 1) not in self.main_window.frame_crops:
+            self.main_window.frame_crops[cur_frame + 1] = QRect(prev_rect)
+            
+        QMessageBox.information(self, "Crop Scope", "Crop box applied to this frame only.")
+        
+    def apply_from_start_to_here(self):
+        if not hasattr(self.main_window, "canvas") or self.main_window.canvas.crop_rect is None:
+            return
+        rect = self.main_window.canvas.crop_rect
+        cur_frame = self.main_window.current_frame
+        
+        keys_to_remove = [k for k in self.main_window.frame_crops if k < cur_frame]
+        for k in keys_to_remove:
+            del self.main_window.frame_crops[k]
+            
+        from PyQt5.QtCore import QRect
+        self.main_window.frame_crops[0] = QRect(rect)
+        QMessageBox.information(self, "Crop Scope", "Crop box applied from start to this frame.")
+        
+    def apply_from_here_to_end(self):
+        if not hasattr(self.main_window, "canvas") or self.main_window.canvas.crop_rect is None:
+            return
+        rect = self.main_window.canvas.crop_rect
+        cur_frame = self.main_window.current_frame
+        
+        keys_to_remove = [k for k in self.main_window.frame_crops if k > cur_frame]
+        for k in keys_to_remove:
+            del self.main_window.frame_crops[k]
+            
+        from PyQt5.QtCore import QRect
+        self.main_window.frame_crops[cur_frame] = QRect(rect)
+        QMessageBox.information(self, "Crop Scope", "Crop box applied from this frame to the end.")
 
     def export_crop(self, format_type="mp4"):
         """Trigger the export process."""

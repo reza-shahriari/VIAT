@@ -2285,6 +2285,10 @@ class VideoAnnotationTool(QMainWindow):
             traceback.print_exc()
             return
             
+        if hasattr(self, 'clip_cuts_dock'):
+            self.export_clip_cuts(auto_export_dir=default_dir)
+            self.clip_cuts_dock.clear_all()
+            
         if has_blurs:
             self.export_blurred_video(interactive=False)
             
@@ -4412,6 +4416,120 @@ First error: {errors[0]}"""
             QMessageBox.information(self, 'Update Labels',
                 f'Successfully updated {updated} label files.')
         self.statusBar.showMessage(f'Updated {updated} dataset labels.')
+
+    @log_exceptions
+    def export_clip_cuts(self, auto_export_dir=None):
+        """Export defined clip cuts to separate videos and annotation files."""
+        if not hasattr(self, 'clip_cuts_dock'):
+            return
+            
+        cuts = self.clip_cuts_dock.get_cuts()
+        if not cuts:
+            if not auto_export_dir:
+                QMessageBox.warning(self, "Export Clip Cuts", "No cuts defined to export.")
+            return
+            
+        if not self.video_filename or not self.cap:
+            if not auto_export_dir:
+                QMessageBox.warning(self, "Export Clip Cuts", "Please load a video first.")
+            return
+
+        total_frames = self.total_frames
+        
+        # Validate cuts
+        for cut in cuts:
+            if cut['start'] < 0 or cut['end'] >= total_frames or cut['start'] >= cut['end']:
+                QMessageBox.warning(self, "Invalid Cut", f"Cut '{cut['name']}' has invalid start/end frames.")
+                return
+
+        default_dir = os.path.dirname(self.video_filename)
+        base_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
+        
+        if auto_export_dir:
+            export_dir = auto_export_dir
+        else:
+            export_dir = QFileDialog.getExistingDirectory(self, "Select Directory for Clip Cuts", default_dir, QFileDialog.ShowDirsOnly)
+            if not export_dir:
+                return
+
+        progress = QProgressDialog("Exporting Clip Cuts...", "Cancel", 0, len(cuts), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        try:
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0: fps = 30
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            for i, cut in enumerate(cuts):
+                if progress.wasCanceled():
+                    break
+                    
+                progress.setLabelText(f"Exporting cut: {cut['name']}")
+                
+                cut_name = cut['name']
+                start_f = cut['start']
+                end_f = cut['end']
+                
+                out_vid_path = os.path.join(export_dir, f"{base_filename}_{cut_name}.mp4")
+                out_ann_path = os.path.join(export_dir, f"{base_filename}_{cut_name}.txt")
+                
+                # Setup VideoWriter
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out_writer = cv2.VideoWriter(out_vid_path, fourcc, fps, (width, height))
+                
+                # Temporarily open a new cap to avoid messing up main player state
+                cap = cv2.VideoCapture(self.video_filename)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                
+                frames_to_read = end_f - start_f + 1
+                for _ in range(frames_to_read):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    out_writer.write(frame)
+                    
+                cap.release()
+                out_writer.release()
+                
+                # Process annotations
+                cut_annotations = {}
+                for f_idx in range(start_f, end_f + 1):
+                    if f_idx in self.frame_annotations and self.frame_annotations[f_idx]:
+                        # create copies and adjust frame idx
+                        import copy
+                        new_anns = []
+                        for ann in self.frame_annotations[f_idx]:
+                            new_ann = copy.copy(ann)
+                            new_ann.frame = f_idx - start_f
+                            new_anns.append(new_ann)
+                        cut_annotations[f_idx - start_f] = new_anns
+                        
+                from viat.utils.file_operations import export_standard_annotations
+                export_standard_annotations(
+                    out_ann_path,
+                    cut_annotations,
+                    [],
+                    'raya_with_classes',
+                    width,
+                    height,
+                    deleted_frames=None,
+                    total_frames=frames_to_read
+                )
+                
+                progress.setValue(i + 1)
+                QApplication.processEvents()
+                
+            if not auto_export_dir:
+                QMessageBox.information(self, "Export Complete", "Successfully exported all clip cuts.")
+        except Exception as e:
+            logger.error(f"Error exporting clip cuts: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Export Error", f"An error occurred: {str(e)}")
+        finally:
+            progress.close()
 
     @log_exceptions
     def export_annotations(self):

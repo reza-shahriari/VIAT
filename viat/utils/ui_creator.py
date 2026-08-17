@@ -31,6 +31,7 @@ from viat.widgets.uncertain_frames_dock import UncertainFramesManagerDock
 from viat.widgets.class_frames_dock import ClassFramesManagerDock
 from viat.widgets.video_manager_dock import VideoManagerDock
 from viat.widgets.crop_settings_dock import CropSettingsDock
+from viat.widgets.clip_cuts_dock import ClipCutsDock
 
 
 class UICreator:
@@ -117,6 +118,13 @@ class UICreator:
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self.main_window.export_annotations)
         file_menu.addAction(export_action)
+
+        # Export Clip Cuts action
+        export_clip_cuts_action = QAction("Export Clip Cuts", self.main_window)
+        export_clip_cuts_action.triggered.connect(
+            lambda: getattr(self.main_window, 'export_clip_cuts', lambda: None)()
+        )
+        file_menu.addAction(export_clip_cuts_action)
 
         # Export Blurred Video action
         export_blurred_action = QAction("Export Blurred Video", self.main_window)
@@ -271,6 +279,15 @@ class UICreator:
                 self.main_window.video_manager_dock.setVisible(checked)
         toggle_video_manager_action.triggered.connect(toggle_video_manager)
         view_menu.addAction(toggle_video_manager_action)
+        
+        # Toggle Clip Cuts Manager
+        toggle_clip_cuts_action = QAction("Clip Cuts Manager", self.main_window, checkable=True)
+        toggle_clip_cuts_action.setChecked(False)
+        def toggle_clip_cuts(checked):
+            if hasattr(self.main_window, 'clip_cuts_dock'):
+                self.main_window.clip_cuts_dock.setVisible(checked)
+        toggle_clip_cuts_action.triggered.connect(toggle_clip_cuts)
+        view_menu.addAction(toggle_clip_cuts_action)
 
         view_menu.addSeparator()
 
@@ -643,6 +660,13 @@ class UICreator:
             Qt.RightDockWidgetArea, self.main_window.crop_settings_dock
         )
         self.main_window.crop_settings_dock.hide() # Hidden by default
+        
+        # Clip Cuts dock
+        self.main_window.clip_cuts_dock = ClipCutsDock("Clip Cuts", self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.clip_cuts_dock
+        )
+        self.main_window.clip_cuts_dock.hide() # Hidden by default
 
 
         # Tabify them to create a collapsible side panel
