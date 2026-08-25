@@ -102,7 +102,26 @@ class Sam2TrtManager:
             traceback.print_exc()
             return None
 
-    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type=None):
+    def _get_frames_stream(self, source_input, start_f=0):
+        if isinstance(source_input, str):
+            cap = cv2.VideoCapture(source_input)
+            try:
+                if start_f > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            finally:
+                cap.release()
+        elif hasattr(source_input, '__iter__'):
+            for frame in source_input:
+                yield frame
+        else:
+            yield source_input
+
+    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type=None, start_f=0, end_f=None):
         """
         Video tracking using TRT Memory bank.
         """
@@ -122,23 +141,13 @@ class Sam2TrtManager:
             if box:
                 b = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
 
-            source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
-            
-            if isinstance(source_frames, str):
-                cap = cv2.VideoCapture(source_frames)
-                frames = []
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                cap.release()
-                source_frames = frames
-
             is_first_frame = True
             obj_id = None
             
-            for i, frame in enumerate(source_frames):
+            for i, frame in enumerate(self._get_frames_stream(frame_generator, start_f=start_f)):
+                if end_f is not None and (start_f + i) > end_f:
+                    break
+
                 if is_first_frame:
                     pts_arg = pts if pts else None
                     b_arg = b if b else None
@@ -187,7 +196,7 @@ class Sam2TrtManager:
             traceback.print_exc()
             yield False, f"TRT Tracking failed: {str(e)}"
 
-    def track_video_from_boxes(self, frame_generator, bboxes, model_type=None):
+    def track_video_from_boxes(self, frame_generator, bboxes, model_type=None, start_f=0, end_f=None):
         if not self.video_predictor:
             yield False, "TRT Tracker not initialized."
             return
@@ -195,23 +204,12 @@ class Sam2TrtManager:
         try:
             self.video_predictor.init_state()
 
-            source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
-            
-            if isinstance(source_frames, str):
-                cap = cv2.VideoCapture(source_frames)
-                frames = []
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                cap.release()
-                source_frames = frames
-
             is_first_frame = True
             obj_ids = []
             
-            for i, frame in enumerate(source_frames):
+            for i, frame in enumerate(self._get_frames_stream(frame_generator, start_f=start_f)):
+                if end_f is not None and (start_f + i) > end_f:
+                    break
                 frame_polygons = []
                 frame_boxes = []
                 if is_first_frame:

@@ -1,4 +1,4 @@
-﻿from PyQt5.QtWidgets import (
+from PyQt5.QtWidgets import (
     QDockWidget,
     QWidget,
     QVBoxLayout,
@@ -647,14 +647,14 @@ class AnnotationDock(QDockWidget):
 
             menu = QMenu()
             delete_action = menu.addAction("Delete")
-            delete_range_action = menu.addAction("Delete across frames...")
+            edit_range_action = menu.addAction("Edit Object over Frame Range...")
 
             action = menu.exec_(self.annotations_list.mapToGlobal(position))
 
             if action == delete_action:
                 self.delete_selected_annotation()
-            elif action == delete_range_action:
-                self.delete_object_across_frames(annotation)
+            elif action == edit_range_action:
+                self.edit_object_across_frames(annotation)
 
     def batch_edit_annotations(self):
         """Open dialog to batch edit annotations across multiple frames."""
@@ -895,7 +895,7 @@ class AnnotationDock(QDockWidget):
                         "Select an annotation on the canvas or in the list first.",
                     )
                     return
-                self.apply_batch_delete_object(start_frame, end_frame, reference)
+                self.apply_batch_edit_object(start_frame, end_frame, reference, "Delete", {})
 
             elif modify_attr_radio.isChecked():
                 # Modify attributes of a class
@@ -1515,11 +1515,60 @@ class AnnotationDock(QDockWidget):
                 return widget.annotation
         return None
 
-    def delete_object_across_frames(self, reference_annotation):
-        """Open dialog to delete a specific object across a frame range."""
+    def detect_next_cut(self, start_frame):
+        """Read frames forward to find a scene cut based on simple threshold."""
+        if not hasattr(self.main_window, 'cap') or not self.main_window.cap:
+            return self.main_window.total_frames - 1
+            
+        progress = QDialog(self.main_window)
+        progress.setWindowTitle("Detecting Cut")
+        progress.setFixedSize(300, 100)
+        progress_layout = QVBoxLayout(progress)
+        progress_layout.addWidget(QLabel("Scanning for next scene cut..."))
+        progress.setModal(False)
+        progress.show()
+        QApplication.processEvents()
+        
+        cap = self.main_window.cap
+        orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        ret, prev_frame = cap.read()
+        if not ret:
+            progress.close()
+            return start_frame
+            
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+        cut_frame = self.main_window.total_frames - 1
+        
+        for f in range(start_frame + 1, self.main_window.total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                cut_frame = f - 1
+                break
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(gray, prev_gray)
+            mean_diff = diff.mean()
+            
+            if mean_diff > 30.0:  # Threshold for scene cut
+                cut_frame = f - 1
+                break
+                
+            prev_gray = gray
+            
+            if f % 10 == 0:
+                QApplication.processEvents()
+                
+        cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
+        progress.close()
+        return cut_frame
+
+    def edit_object_across_frames(self, reference_annotation):
+        """Open dialog to edit a specific object across a frame range."""
         dialog = QDialog(self.main_window)
-        dialog.setWindowTitle("Delete Object Across Frames")
-        dialog.setMinimumWidth(350)
+        dialog.setWindowTitle("Edit Object Across Frames")
+        dialog.setMinimumWidth(400)
 
         layout = QVBoxLayout(dialog)
 
@@ -1532,26 +1581,64 @@ class AnnotationDock(QDockWidget):
         if track_id is not None:
             info += f" (track_id={track_id})"
         layout.addWidget(QLabel(info))
-        layout.addWidget(
-            QLabel(
-                "Deletes only this object in the frame range, not other objects "
-                "of the same class."
-            )
-        )
+        layout.addWidget(QLabel("Applies an action to this specific object over a frame range."))
 
         form = QFormLayout()
         start_spin = QSpinBox()
         start_spin.setRange(0, self.main_window.total_frames - 1)
         start_spin.setValue(self.main_window.current_frame)
 
+        end_layout = QHBoxLayout()
         end_spin = QSpinBox()
         end_spin.setRange(0, self.main_window.total_frames - 1)
-        end_spin.setValue(
-            min(self.main_window.current_frame + 10, self.main_window.total_frames - 1)
-        )
+        end_spin.setValue(min(self.main_window.current_frame + 10, self.main_window.total_frames - 1))
+        
+        detect_cut_btn = QPushButton("Detect Next Cut")
+        def on_detect_cut():
+            cut_f = self.detect_next_cut(start_spin.value())
+            end_spin.setValue(cut_f)
+            if hasattr(self.main_window, 'statusBar'):
+                self.main_window.statusBar.showMessage(f"Cut detected at frame {cut_f}", 3000)
+            
+        detect_cut_btn.clicked.connect(on_detect_cut)
+        end_layout.addWidget(end_spin)
+        end_layout.addWidget(detect_cut_btn)
+        
+        # Avoid margin issues in form layout
+        end_widget = QWidget()
+        end_layout.setContentsMargins(0, 0, 0, 0)
+        end_widget.setLayout(end_layout)
 
         form.addRow("Start Frame:", start_spin)
-        form.addRow("End Frame:", end_spin)
+        form.addRow("End Frame:", end_widget)
+        
+        action_combo = QComboBox()
+        action_combo.addItems(["Delete", "Blur", "Shift Position", "Sync Attributes & Class"])
+        form.addRow("Action:", action_combo)
+        
+        shift_layout = QHBoxLayout()
+        shift_layout.setContentsMargins(0, 0, 0, 0)
+        dx_spin = QSpinBox()
+        dx_spin.setRange(-5000, 5000)
+        dx_spin.setValue(0)
+        dy_spin = QSpinBox()
+        dy_spin.setRange(-5000, 5000)
+        dy_spin.setValue(0)
+        shift_layout.addWidget(QLabel("X:"))
+        shift_layout.addWidget(dx_spin)
+        shift_layout.addWidget(QLabel("Y:"))
+        shift_layout.addWidget(dy_spin)
+        
+        shift_widget = QWidget()
+        shift_widget.setLayout(shift_layout)
+        shift_widget.setVisible(False)
+        form.addRow("Shift (Pixels):", shift_widget)
+        
+        def on_action_changed(text):
+            shift_widget.setVisible(text == "Shift Position")
+            
+        action_combo.currentTextChanged.connect(on_action_changed)
+
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1564,17 +1651,18 @@ class AnnotationDock(QDockWidget):
             end_frame = end_spin.value()
             low_f = min(start_frame, end_frame)
             high_f = max(start_frame, end_frame)
+            action = action_combo.currentText()
+            
+            action_params = {}
+            if action == "Shift Position":
+                action_params = {"dx": dx_spin.value(), "dy": dy_spin.value()}
+                
             self.main_window.save_undo_state(range(low_f, high_f + 1))
-            self.apply_batch_delete_object(start_frame, end_frame, reference_annotation)
+            self.apply_batch_edit_object(start_frame, end_frame, reference_annotation, action, action_params)
 
-    def apply_batch_delete_object(self, start_frame, end_frame, reference_annotation):
+    def apply_batch_edit_object(self, start_frame, end_frame, reference_annotation, action, action_params):
         """
-        Delete a specific object across frames using track_id or IoU tracking.
-
-        Args:
-            start_frame (int): Start frame number
-            end_frame (int): End frame number
-            reference_annotation: The annotation identifying the object to remove
+        Apply a specific action to an object across frames. Uses visual tracking if track_id is absent.
         """
         if start_frame > end_frame:
             start_frame, end_frame = end_frame, start_frame
@@ -1585,11 +1673,11 @@ class AnnotationDock(QDockWidget):
             ref_track_id = reference_annotation.attributes.get("track_id")
 
         progress = QDialog(self)
-        progress.setWindowTitle("Deleting Object")
+        progress.setWindowTitle(f"Applying Action: {action}")
         progress.setFixedSize(300, 100)
         progress_layout = QVBoxLayout(progress)
         progress_layout.addWidget(
-            QLabel(f"Deleting object in frames {start_frame}-{end_frame}...")
+            QLabel(f"Editing object in frames {start_frame}-{end_frame}...")
         )
         progress_bar = QProgressBar()
         progress_bar.setRange(start_frame, end_frame)
@@ -1598,9 +1686,25 @@ class AnnotationDock(QDockWidget):
         progress.show()
         QApplication.processEvents()
 
-        delete_count = 0
+        edit_count = 0
         last_matched_rect = reference_annotation.rect
         iou_threshold = 0.2
+        
+        # Setup visual tracker if no track_id
+        tracker = None
+        cap = getattr(self.main_window, 'cap', None)
+        orig_pos = None
+        if ref_track_id is None and cap is not None:
+            try:
+                tracker = cv2.TrackerMIL_create()
+                orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                ret, frame = cap.read()
+                if ret:
+                    rect = (last_matched_rect.x(), last_matched_rect.y(), last_matched_rect.width(), last_matched_rect.height())
+                    tracker.init(frame, rect)
+            except Exception:
+                tracker = None
 
         for frame_num in range(start_frame, end_frame + 1):
             progress_bar.setValue(frame_num)
@@ -1611,7 +1715,17 @@ class AnnotationDock(QDockWidget):
                 continue
 
             anns = self.main_window.frame_annotations[frame_num]
-            to_delete = []
+            to_edit = []
+            
+            # Predict next rect using tracker
+            predicted_rect = last_matched_rect
+            if tracker is not None and frame_num > start_frame:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if ret:
+                    success, box = tracker.update(frame)
+                    if success:
+                        predicted_rect = QRect(int(box[0]), int(box[1]), int(box[2]), int(box[3]))
 
             if ref_track_id is not None:
                 for ann in anns:
@@ -1621,44 +1735,63 @@ class AnnotationDock(QDockWidget):
                         else None
                     )
                     if ann.class_name == class_name and tid == ref_track_id:
-                        to_delete.append(ann)
+                        to_edit.append(ann)
             else:
                 best_ann = None
                 best_iou = 0.0
                 for ann in anns:
                     if ann.class_name != class_name:
                         continue
-                    iou = self.main_window.canvas.iou(last_matched_rect, ann.rect)
+                    iou = self.main_window.canvas.iou(predicted_rect, ann.rect)
                     if iou > best_iou:
                         best_iou = iou
                         best_ann = ann
                 if best_ann and best_iou >= iou_threshold:
-                    to_delete.append(best_ann)
+                    to_edit.append(best_ann)
                     last_matched_rect = best_ann.rect
 
-            if to_delete:
-                delete_count += len(to_delete)
-                self.main_window.frame_annotations[frame_num] = [
-                    a for a in anns if a not in to_delete
-                ]
+            if to_edit:
+                edit_count += len(to_edit)
+                
+                # Apply action
+                for ann in to_edit:
+                    if action == "Delete":
+                        anns.remove(ann)
+                    elif action == "Blur":
+                        blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                        if blur_mgr is not None:
+                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
+                    elif action == "Shift Position":
+                        ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
+                    elif action == "Sync Attributes & Class":
+                        ann.class_name = reference_annotation.class_name
+                        ann.color = reference_annotation.color
+                        if not hasattr(ann, "attributes"):
+                            ann.attributes = {}
+                        if hasattr(reference_annotation, "attributes"):
+                            for k, v in reference_annotation.attributes.items():
+                                ann.attributes[k] = v
 
             if frame_num == self.main_window.current_frame:
-                self.main_window.frame_annotations[frame_num] = (
-                    self.main_window.frame_annotations.get(frame_num, [])
-                )
                 self.main_window.canvas.annotations = (
                     self.main_window.frame_annotations[frame_num].copy()
                 )
-                self.main_window.canvas.selected_annotation = None
-                if hasattr(self.main_window.canvas, "selected_annotations"):
-                    self.main_window.canvas.selected_annotations = []
+                if action == "Delete" and self.main_window.canvas.selected_annotation in to_edit:
+                    self.main_window.canvas.selected_annotation = None
+                    if hasattr(self.main_window.canvas, "selected_annotations"):
+                        self.main_window.canvas.selected_annotations = []
                 self.main_window.canvas.update()
                 self.update_annotation_list()
+                if action == "Blur" and hasattr(self.main_window, '_refresh_blur_display'):
+                    self.main_window._refresh_blur_display()
+
+        if tracker is not None and cap is not None and orig_pos is not None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
 
         progress.close()
 
         self.main_window.statusBar.showMessage(
-            f"Deleted {delete_count} annotations for '{class_name}' "
+            f"Action '{action}' applied to {edit_count} annotations for '{class_name}' "
             f"across frames {start_frame}-{end_frame}",
             5000,
         )

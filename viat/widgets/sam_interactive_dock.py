@@ -10,6 +10,7 @@ class SAMInteractiveDock(QDockWidget):
     preview_requested = pyqtSignal()
     track_requested = pyqtSignal(str, int, int) # strategy, start_frame, end_frame
     clear_requested = pyqtSignal()
+    undo_requested = pyqtSignal()
     model_changed = pyqtSignal(str)
     
     def __init__(self, parent=None):
@@ -130,6 +131,8 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.range_widget)
 
         # Action Buttons
+        self.btn_undo = QPushButton("Undo Last Track [Ctrl+Z]")
+        self.btn_undo.setToolTip("Undo the last tracking action or annotation modification (Shortcut: Ctrl+Z)")
         self.btn_clear = QPushButton("Clear Prompts [X]")
         self.btn_clear.setToolTip("Clear all prompt points and bounding boxes (Shortcut: X)")
         self.btn_preview = QPushButton("Preview Mask [Z]")
@@ -139,10 +142,12 @@ class SAMInteractiveDock(QDockWidget):
         
         self.btn_track.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         
+        self.btn_undo.clicked.connect(self.undo_requested.emit)
         self.btn_clear.clicked.connect(self.clear_requested.emit)
         self.btn_preview.clicked.connect(self.preview_requested.emit)
         self.btn_track.clicked.connect(self.on_track_clicked)
         
+        self.layout.addWidget(self.btn_undo)
         self.layout.addWidget(self.btn_clear)
         self.layout.addWidget(self.btn_preview)
         self.layout.addWidget(self.btn_track)
@@ -209,6 +214,22 @@ class SAMInteractiveDock(QDockWidget):
             if start_f > end_f:
                 QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
                 return
+                
+            if start_f != self.current_frame:
+                reply = QMessageBox.question(self, "Start Frame Mismatch", 
+                    f"Your current frame is {self.current_frame + 1}, but tracking range starts at {start_f + 1}.\n\n"
+                    f"Do you want to update the start frame to {self.current_frame + 1} and start tracking from here?",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+                
+                if reply == QMessageBox.Yes:
+                    start_f = self.current_frame
+                    self.spin_start.setValue(self.current_frame + 1)
+                    if start_f > end_f:
+                        self.spin_end.setValue(start_f + 1)
+                        end_f = start_f
+                elif reply == QMessageBox.Cancel:
+                    return
+                # If No, continue with original start_f
                 
         self.track_requested.emit(strategy, start_f, end_f)
 

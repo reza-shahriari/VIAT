@@ -218,9 +218,9 @@ class SamManager:
             return None
 
 
-    def track_video_from_boxes(self, frame_generator, bboxes, model_type="sam3.1_s.pt"):
+    def track_video_from_boxes(self, frame_generator, bboxes, model_type="sam3.1_s.pt", start_f=0, end_f=None):
         """
-        frame_generator: a Python generator that yields numpy arrays (frames).
+        frame_generator: a Python generator yielding numpy arrays (frames), or a string video file path.
         bboxes: list of bounding boxes [[x1, y1, x2, y2], ...] corresponding to objects in the FIRST frame yielded.
         Returns a generator yielding lists of polygons corresponding to the bboxes for each frame.
         """
@@ -270,28 +270,38 @@ class SamManager:
             # Force reset inference state to prevent prompt accumulation and crossover
             predictor.inference_state = {}
                 
-            # Predictor requires list or path, not generator
-            source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
-            
             import tempfile
             import uuid
             temp_video_path = None
             
             try:
-                if isinstance(source_frames, list) and len(source_frames) > 0 and isinstance(source_frames[0], np.ndarray):
-                    temp_video_path = os.path.join(tempfile.gettempdir(), f"sam2_temp_{uuid.uuid4().hex}.mp4")
-                    h, w = source_frames[0].shape[:2]
-                    out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
-                    for frame in source_frames:
-                        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    out.release()
-                    source_to_predict = temp_video_path
+                if isinstance(frame_generator, str):
+                    source_to_predict = frame_generator
+                elif isinstance(frame_generator, list) and len(frame_generator) > 0 and isinstance(frame_generator[0], str):
+                    source_to_predict = frame_generator
                 else:
-                    source_to_predict = source_frames
+                    # Stream frame_generator into VideoWriter to avoid list() memory bloat
+                    temp_video_path = os.path.join(tempfile.gettempdir(), f"sam2_temp_{uuid.uuid4().hex}.mp4")
+                    out = None
+                    for frame in frame_generator:
+                        if isinstance(frame, np.ndarray):
+                            if out is None:
+                                h, w = frame.shape[:2]
+                                out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
+                            out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    if out is not None:
+                        out.release()
+                    source_to_predict = temp_video_path
 
                 results_stream = predictor(source=source_to_predict, bboxes=bboxes, stream=True)
                 
-                for result in results_stream:
+                for idx, result in enumerate(results_stream):
+                    if start_f is not None and isinstance(source_to_predict, str) and not temp_video_path:
+                        if idx < start_f:
+                            continue
+                        if end_f is not None and idx > end_f:
+                            break
+
                     frame_polygons = []
                     if result.masks is not None:
                         masks_xy = result.masks.xy
@@ -320,9 +330,9 @@ class SamManager:
         except Exception as e:
             yield False, f"Tracking failed: {str(e)}"
 
-    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type="sam3.1_l.pt"):
+    def track_video_from_prompt(self, frame_generator, points=None, labels=None, box=None, text_prompt=None, model_type="sam3.1_l.pt", start_f=0, end_f=None):
         """
-        frame_generator: a Python generator that yields numpy arrays (frames).
+        frame_generator: a Python generator yielding numpy arrays (frames), or a string video file path.
         Returns a generator yielding lists of polygons corresponding to the prompts for each frame.
         """
         if not check_ultralytics():
@@ -380,30 +390,38 @@ class SamManager:
             if text_prompt and ("fastsam" in model_type.lower() or "sam3" in model_type.lower()):
                 kwargs['texts'] = text_prompt
 
-            source_frames = list(frame_generator) if hasattr(frame_generator, '__iter__') and not isinstance(frame_generator, (list, str)) else frame_generator
-            
-            # Ultralytics SAM2VideoPredictor strictly requires a video file path (dataset.mode == "video").
-            # If we received a list of numpy arrays, we must write them to a temporary video file.
             import tempfile
             import uuid
             temp_video_path = None
             
             try:
-                if isinstance(source_frames, list) and len(source_frames) > 0 and isinstance(source_frames[0], np.ndarray):
-                    temp_video_path = os.path.join(tempfile.gettempdir(), f"sam2_temp_{uuid.uuid4().hex}.mp4")
-                    h, w = source_frames[0].shape[:2]
-                    out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
-                    for frame in source_frames:
-                        # frames from main.py generator are RGB, so convert to BGR for cv2
-                        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                    out.release()
-                    source_to_predict = temp_video_path
+                if isinstance(frame_generator, str):
+                    source_to_predict = frame_generator
+                elif isinstance(frame_generator, list) and len(frame_generator) > 0 and isinstance(frame_generator[0], str):
+                    source_to_predict = frame_generator
                 else:
-                    source_to_predict = source_frames
+                    # Stream frame_generator into VideoWriter to avoid list() memory bloat
+                    temp_video_path = os.path.join(tempfile.gettempdir(), f"sam2_temp_{uuid.uuid4().hex}.mp4")
+                    out = None
+                    for frame in frame_generator:
+                        if isinstance(frame, np.ndarray):
+                            if out is None:
+                                h, w = frame.shape[:2]
+                                out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
+                            out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    if out is not None:
+                        out.release()
+                    source_to_predict = temp_video_path
 
                 results_stream = predictor(source=source_to_predict, **kwargs)
                 
-                for result in results_stream:
+                for idx, result in enumerate(results_stream):
+                    if start_f is not None and isinstance(source_to_predict, str) and not temp_video_path:
+                        if idx < start_f:
+                            continue
+                        if end_f is not None and idx > end_f:
+                            break
+
                     frame_polygons = []
                     if result.masks is not None:
                         masks_xy = result.masks.xy

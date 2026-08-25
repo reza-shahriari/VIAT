@@ -46,6 +46,32 @@ class BlurManager:
             kernel
         )
 
+    def add_polygon_region(self, frame_idx: int, polygon, kernel: int):
+        """Add a blur region defined by a polygon."""
+        if not polygon:
+            return
+            
+        pts = np.array(polygon, dtype=np.int32)
+        x, y, w, h = cv2.boundingRect(pts)
+        
+        # Simplify the polygon to drastically reduce the number of points for JSON saving
+        # An epsilon of 2.0 pixels is a good balance for blur mask boundaries without losing shape
+        epsilon = 2.0
+        approx_pts = cv2.approxPolyDP(pts, epsilon, True)
+        
+        if frame_idx not in self.blur_regions:
+            self.blur_regions[frame_idx] = []
+        kernel = max(3, kernel | 1)
+        
+        # Store as lists for JSON serialization (approx_pts has shape (M, 1, 2))
+        poly_list = [[float(pt[0][0]), float(pt[0][1])] for pt in approx_pts]
+        
+        self.blur_regions[frame_idx].append({
+            "type": "polygon", "x": x, "y": y,
+            "w": w, "h": h, "kernel": kernel,
+            "points": poly_list
+        })
+
     def _add_region(self, frame_idx, rtype, x, y, w, h, kernel):
         if frame_idx not in self.blur_regions:
             self.blur_regions[frame_idx] = []
@@ -118,9 +144,20 @@ class BlurManager:
             if x2 <= x1 or y2 <= y1:
                 continue
             kernel = max(3, region["kernel"] | 1)  # must be odd
-            patch = result[y1:y2, x1:x2]
+            
+            patch = result[y1:y2, x1:x2].copy()
             blurred = cv2.GaussianBlur(patch, (kernel, kernel), 0)
-            result[y1:y2, x1:x2] = blurred
+            
+            if region.get("type") == "polygon" and "points" in region:
+                points = np.array(region["points"], dtype=np.int32)
+                mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+                shifted_points = points - [x1, y1]
+                cv2.fillPoly(mask, [shifted_points], 255)
+                
+                mask_bool = mask == 255
+                result[y1:y2, x1:x2][mask_bool] = blurred[mask_bool]
+            else:
+                result[y1:y2, x1:x2] = blurred
 
         return result
 

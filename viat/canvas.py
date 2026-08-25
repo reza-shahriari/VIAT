@@ -1168,7 +1168,14 @@ class VideoCanvas(QWidget):
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
-                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(bbox, 'segmentation') and bbox.segmentation:
+                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel)
+                            else:
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                
+                            if hasattr(self.main_window, 'remove_annotations_under_blur'):
+                                self.main_window.remove_annotations_under_blur(cur_f)
+                                
                             if hasattr(self.main_window, '_refresh_blur_display'):
                                 self.main_window._refresh_blur_display()
                             else:
@@ -1319,7 +1326,14 @@ class VideoCanvas(QWidget):
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
-                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(annotation, 'segmentation') and annotation.segmentation:
+                                blur_mgr.add_polygon_region(cur_f, annotation.segmentation, self.blur_kernel)
+                            else:
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                
+                            if hasattr(self.main_window, 'remove_annotations_under_blur'):
+                                self.main_window.remove_annotations_under_blur(cur_f)
+                                
                             if hasattr(self.main_window, '_refresh_blur_display'):
                                 self.main_window._refresh_blur_display()
                             else:
@@ -1637,6 +1651,10 @@ class VideoCanvas(QWidget):
         # Blur pen mode release
         if getattr(self, 'blur_pen_active', False) and getattr(self, 'blur_drawing', False):
             self.blur_drawing = False
+            
+            if getattr(self.main_window, 'auto_remove_under_blur', False) and hasattr(self.main_window, 'remove_annotations_under_blur'):
+                cur_f = getattr(self.main_window, 'current_frame', 0)
+                self.main_window.remove_annotations_under_blur(cur_f)
             return
 
         if self.panning and (event.button() == Qt.MiddleButton or 
@@ -1832,7 +1850,14 @@ class VideoCanvas(QWidget):
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
-                            blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                            if hasattr(bbox, 'segmentation') and bbox.segmentation:
+                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel)
+                            else:
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                
+                            if hasattr(self.main_window, 'remove_annotations_under_blur'):
+                                self.main_window.remove_annotations_under_blur(cur_f)
+                                
                             if hasattr(self.main_window, '_refresh_blur_display'):
                                 self.main_window._refresh_blur_display()
                             else:
@@ -1898,6 +1923,8 @@ class VideoCanvas(QWidget):
             edit_action = context_menu.addAction("Edit Annotation")
             delete_action = context_menu.addAction("Delete Annotation")
             blur_action = context_menu.addAction("Blur Region")
+            edit_range_action = context_menu.addAction("Edit Object over Frame Range...")
+            blur_range_action = context_menu.addAction("Blur Region over Frame Range...")
             
             # Add verification option for machine-generated annotations
             verify_action = None
@@ -1933,13 +1960,26 @@ class VideoCanvas(QWidget):
                     blur_mgr = getattr(self.main_window, 'blur_manager', None)
                     cur_frame = getattr(self.main_window, 'current_frame', 0)
                     if blur_mgr is not None:
-                        blur_mgr.add_bbox_region(cur_frame, self.selected_annotation.rect, self.blur_kernel)
+                        if hasattr(self.selected_annotation, 'segmentation') and self.selected_annotation.segmentation:
+                            blur_mgr.add_polygon_region(cur_frame, self.selected_annotation.segmentation, self.blur_kernel)
+                        else:
+                            blur_mgr.add_bbox_region(cur_frame, self.selected_annotation.rect, self.blur_kernel)
+                            
+                        if getattr(self.main_window, 'auto_remove_under_blur', False) and hasattr(self.main_window, 'remove_annotations_under_blur'):
+                            self.main_window.remove_annotations_under_blur(cur_frame)
+                            
                         if self.main_window:
                             self.main_window.delete_selected_annotation()
                         if hasattr(self.main_window, '_refresh_blur_display'):
                             self.main_window._refresh_blur_display()
                         else:
                             self.update()
+                elif action == edit_range_action:
+                    if self.main_window and hasattr(self.main_window, "annotation_dock"):
+                        self.main_window.annotation_dock.edit_object_across_frames(self.selected_annotation)
+                elif action == blur_range_action:
+                    if self.main_window and hasattr(self.main_window, "apply_blur_to_annotation_range"):
+                        self.main_window.apply_blur_to_annotation_range(self.selected_annotation)
                 elif action == delete_action:
                     # Call the delete annotation method in the main window
                     if self.main_window:

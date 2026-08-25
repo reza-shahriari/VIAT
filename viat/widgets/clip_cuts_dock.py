@@ -107,7 +107,7 @@ class ClipCutsDock(QDockWidget):
             self.table.item(current_row, 2).setText(str(self.main_window.current_frame))
             
     def get_cuts(self):
-        \"\"\"Return a list of cuts in format: [{'name': 'cut1', 'start': 0, 'end': 100}, ...]\"\"\"
+        """Return a list of cuts in format: [{'name': 'cut1', 'start': 0, 'end': 100}, ...]"""
         cuts = []
         for row in range(self.table.rowCount()):
             name = self.table.item(row, 0).text()

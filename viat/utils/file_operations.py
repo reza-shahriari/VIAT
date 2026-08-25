@@ -125,7 +125,8 @@ def save_project_generator(
     class_thresholds=None,
     deleted_frames=None,
     labeler_analytics=None,
-    deleted_annotations=None
+    deleted_annotations=None,
+    blur_regions=None
 ):
     yield 10, "Serializing annotations..."
     
@@ -180,7 +181,8 @@ def save_project_generator(
             "prompts": labeler_analytics.get("prompts", []) if labeler_analytics else [],
             "tool_usage": labeler_analytics.get("tool_usage", {}) if labeler_analytics else {},
             "base_annotations": labeler_analytics.get("base_annotations", {}) if labeler_analytics else {}
-        } if labeler_analytics else {}
+        } if labeler_analytics else {},
+        "blur_regions": blur_regions if blur_regions else {}
     }
 
     # Add frame hashes if available
@@ -294,6 +296,9 @@ def load_project(filename, bbox_class):
     # Load class thresholds
     class_thresholds = project_data.get("class_thresholds") or {}
 
+    # Load blur regions
+    blur_regions = project_data.get("blur_regions", {})
+
     # Update recent projects list
     update_recent_projects(filename)
 
@@ -316,7 +321,8 @@ def load_project(filename, bbox_class):
         verification_mode_enabled,
         annotations_imported_list,
         class_thresholds,
-        deleted_annotations
+        deleted_annotations,
+        blur_regions
     )
 
 def get_recent_projects():

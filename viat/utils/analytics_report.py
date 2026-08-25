@@ -17,6 +17,16 @@ def generate_analytics_report(project_json, output_md, base_raya_file=None):
         tool_usage = analytics.get('tool_usage', {}) if analytics else {}
         deleted_frames = set(data.get('deleted_frames', []))
         
+        blur_regions = data.get('blur_regions') or {}
+        total_blurred_frames = len([f for f, regions in blur_regions.items() if regions])
+        total_blur_regions = sum(len(regions) for regions in blur_regions.values())
+        
+        blur_types = {}
+        for regions in blur_regions.values():
+            for region in regions:
+                rtype = region.get("type", "unknown")
+                blur_types[rtype] = blur_types.get(rtype, 0) + 1
+        
         source_counts = {}
         frame_anns = data.get('frame_annotations', {})
         for frame_num, anns in frame_anns.items():
@@ -33,7 +43,17 @@ def generate_analytics_report(project_json, output_md, base_raya_file=None):
         report += "## High-Level Frame Metrics\n\n"
         report += "| Metric | Count |\n"
         report += "|--------|-------|\n"
-        report += f"| Frames Removed (`Ctrl+X`) | {len(deleted_frames)} |\n\n"
+        report += f"| Frames Removed (`Ctrl+X`) | {len(deleted_frames)} |\n"
+        report += f"| Frames with Privacy Blur | {total_blurred_frames} |\n"
+        report += f"| Total Blur Regions | {total_blur_regions} |\n\n"
+        
+        if blur_types:
+            report += "### Privacy Blur Breakdown\n\n"
+            report += "| Blur Type | Count |\n"
+            report += "|-----------|-------|\n"
+            for btype, bcount in sorted(blur_types.items()):
+                report += f"| {btype} | {bcount} |\n"
+            report += "\n"
         
         report += "## Tool Usage Summary\n\n"
         report += "| Tool | Times Activated |\n"

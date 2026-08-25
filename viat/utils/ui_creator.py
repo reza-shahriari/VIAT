@@ -381,6 +381,14 @@ class UICreator:
         privacy_menu.addAction(auto_blur_menu_action)
         self.main_window.auto_blur_menu_action = auto_blur_menu_action
 
+        auto_remove_blur_action = QAction("Auto-Remove BBoxes Under Blur (>70%)", self.main_window, checkable=True)
+        auto_remove_blur_action.setToolTip("Automatically remove bounding boxes that are more than 70% covered by a blur region")
+        auto_remove_blur_action.setChecked(getattr(self.main_window, 'auto_remove_under_blur', False))
+        auto_remove_blur_action.triggered.connect(
+            lambda checked: setattr(self.main_window, 'auto_remove_under_blur', checked)
+        )
+        privacy_menu.addAction(auto_remove_blur_action)
+
         privacy_menu.addSeparator()
 
         clear_frame_blur_action = QAction("Clear Current Frame Blur", self.main_window)
@@ -525,6 +533,18 @@ class UICreator:
         self.crop_mode_action.triggered.connect(self.main_window.toggle_crop_mode)
         self.main_window.toolbar.addAction(self.crop_mode_action)
         self.main_window.crop_mode_action = self.crop_mode_action
+
+        # Add Clip Cuts toggle action
+        self.clip_cuts_action = QAction("Clip Cuts", self.main_window)
+        self.clip_cuts_action.setCheckable(True)
+        self.clip_cuts_action.setChecked(False)
+        self.clip_cuts_action.setToolTip("Toggle Clip Cuts Manager")
+        def toggle_clip_cuts_toolbar(checked):
+            if hasattr(self.main_window, 'clip_cuts_dock'):
+                self.main_window.clip_cuts_dock.setVisible(checked)
+        self.clip_cuts_action.triggered.connect(toggle_clip_cuts_toolbar)
+        self.main_window.toolbar.addAction(self.clip_cuts_action)
+        self.main_window.clip_cuts_action = self.clip_cuts_action
 
         # Add model selector for Auto BBox
         self.main_window.sam_model_selector = QComboBox()
