@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QRect, QTimer
 from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator, QPainter
-
+import cv2
 
 class SelectAllLineEdit(QLineEdit):
     """A QLineEdit that automatically selects all text when clicked"""
@@ -1761,6 +1761,7 @@ class AnnotationDock(QDockWidget):
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
                             blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
+                        anns.remove(ann)
                     elif action == "Shift Position":
                         ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
                     elif action == "Sync Attributes & Class":
@@ -1776,7 +1777,7 @@ class AnnotationDock(QDockWidget):
                 self.main_window.canvas.annotations = (
                     self.main_window.frame_annotations[frame_num].copy()
                 )
-                if action == "Delete" and self.main_window.canvas.selected_annotation in to_edit:
+                if action in ["Delete", "Blur"] and self.main_window.canvas.selected_annotation in to_edit:
                     self.main_window.canvas.selected_annotation = None
                     if hasattr(self.main_window.canvas, "selected_annotations"):
                         self.main_window.canvas.selected_annotations = []

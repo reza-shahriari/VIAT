@@ -149,18 +149,11 @@ class Sam2TrtManager:
                     break
 
                 if is_first_frame:
-                    pts_arg = pts if pts else None
+                    pts_arg = pts if pts else []
                     b_arg = b if b else None
-                    if pts_arg:
-                        res = self.video_predictor.add_prompt(frame_index=0, frame=frame, points=pts_arg)
-                        obj_id = res.object_id
-                        mask = res.mask
-                    elif b_arg:
-                        res = self.video_predictor.click_box(frame_index=0, frame=frame, box=b_arg)
-                        obj_id = res.object_id
-                        mask = res.mask
-                    else:
-                        mask = None
+                    res = self.video_predictor.add_prompt(frame_index=0, frame=frame, points=pts_arg, box=b_arg)
+                    obj_id = res.object_id
+                    mask = res.mask
                     is_first_frame = False
                 else:
                     tracks = self.video_predictor.track_frame(i, frame)
@@ -183,7 +176,7 @@ class Sam2TrtManager:
                         polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
                         frame_polygons.append(polygon)
                         
-                        x, y, w, h = cv2.boundingRect(largest_contour)
+                        x, y, w, h = cv2.boundingRect(mask_uint8)
                         frame_boxes.append([x, y, x+w, y+h])
                     else:
                         frame_polygons.append(None)
@@ -227,7 +220,7 @@ class Sam2TrtManager:
                                 largest_contour = max(contours, key=cv2.contourArea)
                                 polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
                                 frame_polygons.append(polygon)
-                                x, y, w, h = cv2.boundingRect(largest_contour)
+                                x, y, w, h = cv2.boundingRect(mask_uint8)
                                 frame_boxes.append([x, y, x+w, y+h])
                             else:
                                 frame_polygons.append(None)
@@ -248,7 +241,7 @@ class Sam2TrtManager:
                                 largest_contour = max(contours, key=cv2.contourArea)
                                 polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
                                 frame_polygons.append(polygon)
-                                x, y, w, h = cv2.boundingRect(largest_contour)
+                                x, y, w, h = cv2.boundingRect(mask_uint8)
                                 frame_boxes.append([x, y, x+w, y+h])
                             else:
                                 frame_polygons.append(None)
