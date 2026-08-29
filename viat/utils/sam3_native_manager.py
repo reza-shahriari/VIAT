@@ -396,7 +396,9 @@ class Sam3NativeManager:
 
             # Propagate in chunks to avoid VRAM exhaustion on large videos
             CHUNK_SIZE = 50  # process 50 frames at a time
-            num_frames_to_track = end_f - start_f + 1
+            is_backward = start_f > end_f
+            prop_dir = "backward" if is_backward else "forward"
+            num_frames_to_track = abs(end_f - start_f) + 1
             current_start = start_f
             frames_done = 0
 
@@ -409,7 +411,7 @@ class Sam3NativeManager:
                         session_id=session_id,
                         start_frame_index=current_start,
                         max_frame_num_to_track=chunk_size,
-                        propagation_direction="forward",
+                        propagation_direction=prop_dir,
                     )
                 ):
                     out = response["outputs"]
@@ -447,7 +449,10 @@ class Sam3NativeManager:
                     yield True, {"polygons": frame_polygons, "boxes": frame_boxes}
 
                 frames_done += chunk_size
-                current_start += chunk_size
+                if is_backward:
+                    current_start -= chunk_size
+                else:
+                    current_start += chunk_size
                 # Free unused CUDA memory between chunks
                 torch.cuda.empty_cache()
                 

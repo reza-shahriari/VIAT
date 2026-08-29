@@ -8,7 +8,7 @@ class SAMInteractiveDock(QDockWidget):
     """Dock widget for SAM Interactive Tracking mode."""
     
     preview_requested = pyqtSignal()
-    track_requested = pyqtSignal(str, int, int) # strategy, start_frame, end_frame
+    track_requested = pyqtSignal(str, int, int, str) # strategy, start_frame, end_frame, direction
     clear_requested = pyqtSignal()
     undo_requested = pyqtSignal()
     model_changed = pyqtSignal(str)
@@ -93,12 +93,27 @@ class SAMInteractiveDock(QDockWidget):
         self.cmb_scope.currentIndexChanged.connect(self.on_scope_changed)
         self.layout.addWidget(self.cmb_scope)
 
+        # Tracking Direction
+        self.lbl_direction = QLabel("Tracking Direction:")
+        self.layout.addWidget(self.lbl_direction)
+        self.cmb_direction = QComboBox()
+        self.cmb_direction.addItems(["Forward", "Backward", "Bi-directional"])
+        self.cmb_direction.setToolTip(
+            "Forward: Track from current/start frame forward.\n"
+            "Backward: Track from current frame backward in time.\n"
+            "Bi-directional: Track in both forward and backward directions."
+        )
+        self.cmb_direction.currentIndexChanged.connect(self._update_execute_button_label)
+        self.layout.addWidget(self.cmb_direction)
+        self.lbl_direction.setVisible(False)
+        self.cmb_direction.setVisible(False)
+
         # Frame-by-Frame Detection checkbox (only visible for multi-frame scopes)
         self.chk_frame_by_frame = QCheckBox("Frame-by-Frame Detection (no tracking)")
         self.chk_frame_by_frame.setChecked(False)
         self.chk_frame_by_frame.setToolTip(
             "When enabled, SAM runs independently on each frame using the same prompt.\n"
-            "The object is detected fresh per frame â€” no temporal tracking state is used.\n"
+            "The object is detected fresh per frame — no temporal tracking state is used.\n"
             "Useful when objects are unrelated across frames or appear/disappear."
         )
         self.chk_frame_by_frame.toggled.connect(self._update_execute_button_label)
@@ -164,17 +179,36 @@ class SAMInteractiveDock(QDockWidget):
             self.spin_start.setValue(self.current_frame + 1)
             self.spin_end.setValue(self.total_frames)
         self.chk_frame_by_frame.setVisible(is_multi_frame)
+        if hasattr(self, 'cmb_direction'):
+            self.lbl_direction.setVisible(is_multi_frame)
+            self.cmb_direction.setVisible(is_multi_frame)
         self._update_execute_button_label()
+
+    def get_direction(self):
+        if not hasattr(self, 'cmb_direction'):
+            return "forward"
+        text = self.cmb_direction.currentText().lower()
+        if "backward" in text:
+            return "backward"
+        if "bi-directional" in text or "bidirectional" in text:
+            return "bidirectional"
+        return "forward"
 
     def _update_execute_button_label(self):
         """Update the execute button label based on current mode."""
         scope = self.cmb_scope.currentIndex()
+        direction = self.get_direction()
         if scope == 0:
             self.btn_track.setText("Execute (Current Frame) [C]")
         elif self.chk_frame_by_frame.isChecked():
             self.btn_track.setText("Run Frame-by-Frame Detection [C]")
         else:
-            self.btn_track.setText("Execute Tracking [C]")
+            if direction == "backward":
+                self.btn_track.setText("Execute Backward Tracking [C]")
+            elif direction == "bidirectional":
+                self.btn_track.setText("Execute Bi-directional Tracking [C]")
+            else:
+                self.btn_track.setText("Execute Tracking [C]")
 
     def on_model_changed(self, index):
         self.model_changed.emit(self.get_model_type())
@@ -197,6 +231,7 @@ class SAMInteractiveDock(QDockWidget):
 
     def on_track_clicked(self):
         scope = self.cmb_scope.currentIndex()
+        direction = self.get_direction()
         use_frame_by_frame = self.chk_frame_by_frame.isChecked() and scope > 0
 
         if scope == 0:
@@ -205,33 +240,42 @@ class SAMInteractiveDock(QDockWidget):
             end_f = self.current_frame
         elif scope == 1:
             strategy = "detect" if use_frame_by_frame else "video"
-            start_f = 0
-            end_f = self.total_frames - 1
+            if direction == "backward":
+                start_f = self.current_frame
+                end_f = 0
+            elif direction == "bidirectional":
+                start_f = 0
+                end_f = self.total_frames - 1
+            else: # forward
+                start_f = self.current_frame
+                end_f = self.total_frames - 1
         else:
             strategy = "detect" if use_frame_by_frame else "range"
-            start_f = self.spin_start.value() - 1
-            end_f = self.spin_end.value() - 1
-            if start_f > end_f:
+            s_val = self.spin_start.value() - 1
+            e_val = self.spin_end.value() - 1
+            if s_val > e_val:
                 QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
                 return
                 
-            if start_f != self.current_frame:
-                reply = QMessageBox.question(self, "Start Frame Mismatch", 
-                    f"Your current frame is {self.current_frame + 1}, but tracking range starts at {start_f + 1}.\n\n"
-                    f"Do you want to update the start frame to {self.current_frame + 1} and start tracking from here?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
-                
-                if reply == QMessageBox.Yes:
-                    start_f = self.current_frame
-                    self.spin_start.setValue(self.current_frame + 1)
-                    if start_f > end_f:
-                        self.spin_end.setValue(start_f + 1)
-                        end_f = start_f
-                elif reply == QMessageBox.Cancel:
+            if direction == "backward":
+                start_f = self.current_frame
+                end_f = s_val
+                if start_f < end_f:
+                    QMessageBox.warning(self, "Invalid Backward Range", 
+                        f"Current frame ({self.current_frame + 1}) must be >= range start ({s_val + 1}) for backward tracking.")
                     return
-                # If No, continue with original start_f
-                
-        self.track_requested.emit(strategy, start_f, end_f)
+            elif direction == "bidirectional":
+                start_f = s_val
+                end_f = e_val
+            else: # forward
+                start_f = self.current_frame
+                end_f = e_val
+                if start_f > end_f:
+                    QMessageBox.warning(self, "Invalid Forward Range", 
+                        f"Current frame ({self.current_frame + 1}) must be <= range end ({e_val + 1}) for forward tracking.")
+                    return
+
+        self.track_requested.emit(strategy, start_f, end_f, direction)
 
     def get_save_segmentation(self):
         return self.chk_save_seg.isChecked()

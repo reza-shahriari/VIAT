@@ -5,3 +5,5 @@ from .styles import StyleManager
 from .class_info_dialog import ClassInfoDialog
 from .sam_interactive_dock import SAMInteractiveDock
 from .crop_settings_dock import CropSettingsDock
+from .evaluation_dialog import EvaluationDialog
+

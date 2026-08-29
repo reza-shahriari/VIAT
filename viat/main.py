@@ -516,6 +516,7 @@ class VideoAnnotationTool(QMainWindow):
     def init_properties(self):
         """Initialize the application properties and state variables."""
         self.auto_blur_labels = False
+        self.auto_save_blur_on_switch = False
         self.duplicate_frames_enabled = True
         self.duplicate_frames_cache = {}
         self.frame_hashes = {}
@@ -689,6 +690,10 @@ class VideoAnnotationTool(QMainWindow):
             
             act = file_menu.addAction('View Labeler Analytics from JSON...')
             act.triggered.connect(lambda: self.view_labeler_analytics())
+            
+            act = file_menu.addAction('Model Evaluation...')
+            act.triggered.connect(lambda: self.open_evaluation_dialog())
+
             
         dataset_menu = menubar.addMenu('&Dataset')
         img_menu = dataset_menu.addMenu('Image Dataset Operations')
@@ -1688,13 +1693,43 @@ class VideoAnnotationTool(QMainWindow):
         else:
             self.statusBar.showMessage('No mask generated.', 3000)
 
-    def on_sam_track_requested(self, strategy, start_f, end_f):
+    def on_sam_track_requested(self, strategy, start_f, end_f, direction="forward"):
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if not hasattr(self, 'image_files') or not self.image_files:
                 return
         elif not hasattr(self, 'cap') or not self.cap or not self.cap.isOpened():
             return
-            
+
+        if direction == "bidirectional" and strategy != "frame":
+            saved_points = list(self.canvas.sam_prompt_points) if self.canvas.sam_prompt_points else None
+            saved_labels = list(self.canvas.sam_prompt_labels) if self.canvas.sam_prompt_labels else None
+            saved_box = self.canvas.sam_prompt_box
+            prompt_frame = self.current_frame
+
+            # 1. Forward Pass (prompt_frame -> max(start_f, end_f))
+            fwd_end = max(start_f, end_f)
+            if prompt_frame < fwd_end:
+                self.on_sam_track_requested(strategy, prompt_frame, fwd_end, direction="forward")
+
+            # Restore prompt state on prompt_frame for backward pass
+            self.canvas.sam_prompt_points = saved_points if saved_points else []
+            self.canvas.sam_prompt_labels = saved_labels if saved_labels else []
+            self.canvas.sam_prompt_box = saved_box
+            self.sam_interactive_dock.update_status(
+                len([l for l in (saved_labels or []) if l == 1]),
+                len([l for l in (saved_labels or []) if l == 0]),
+                saved_box is not None
+            )
+
+            # 2. Backward Pass (prompt_frame -> min(start_f, end_f))
+            bwd_end = min(start_f, end_f)
+            if prompt_frame > bwd_end:
+                self.on_sam_track_requested(strategy, prompt_frame, bwd_end, direction="backward")
+            return
+
+        is_backward = (direction == "backward") or (start_f > end_f)
+        step = -1 if is_backward else 1
+
         auto_blur_global = getattr(self, 'auto_blur_labels', False)
         sam_blur_checked = self.sam_interactive_dock.get_blur_tracked_objects()
         should_blur = False
@@ -1825,34 +1860,18 @@ class VideoAnnotationTool(QMainWindow):
             classes, current_idx, False)
         if not ok or not target_class:
             return
-        self.save_undo_state(range(start_f, end_f + 1))
+        self.save_undo_state(range(min(start_f, end_f), max(start_f, end_f) + 1))
         self.set_active_class(target_class)
         self.canvas.annotations = [a for a in self.canvas.annotations if 
             getattr(a, 'is_sam_preview', False) == False]
         progress_label = ('Detecting object frame by frame...' if strategy ==
-            'detect' else 'Tracking object...')
-        progress = QProgressDialog(progress_label, 'Cancel', start_f, end_f,
-            self)
+            'detect' else ('Tracking object backward...' if is_backward else 'Tracking object...'))
+        
+        total_steps = abs(end_f - start_f) + 1
+        progress = QProgressDialog(progress_label, 'Cancel', 0, total_steps, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
-        def frame_generator():
-            if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                for f_idx in range(start_f, end_f + 1):
-                    if 0 <= f_idx < len(self.image_files):
-                        frame = cv2.imread(self.image_files[f_idx])
-                        if frame is not None:
-                            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            else:
-                cap = cv2.VideoCapture(self.video_filename)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
-                for f_idx in range(start_f, end_f + 1):
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    yield frame_rgb
-                cap.release()
         if start_f == end_f:
             if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
                 if tracker_engine == 'ettrack':
@@ -1911,6 +1930,8 @@ class VideoAnnotationTool(QMainWindow):
                     get_save_segmentation() else None)
                 if should_blur:
                     self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
+                    if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                        self.remove_annotations_under_blur(start_f)
                 else:
                     self.frame_annotations[start_f].append(ann)
             else:
@@ -1959,9 +1980,8 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage(
                 f'Frame-by-Frame Detection using {model_type}...')
             detected_count = 0
+            source_iter = list(range(start_f, end_f - 1, -1)) if is_backward else list(range(start_f, end_f + 1))
             if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                source_iter = list(range(start_f, end_f + 1))
-
                 def _read_frame_detect(f_idx):
                     if 0 <= f_idx < len(self.image_files):
                         bgr = cv2.imread(self.image_files[f_idx])
@@ -1969,7 +1989,6 @@ class VideoAnnotationTool(QMainWindow):
                             return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     return None
             else:
-                source_iter = list(range(start_f, end_f + 1))
                 _detect_cap = cv2.VideoCapture(self.video_filename)
 
                 def _read_frame_detect(f_idx):
@@ -1978,10 +1997,12 @@ class VideoAnnotationTool(QMainWindow):
                     if ret:
                         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                     return None
+            processed_count = 0
             for f_idx in source_iter:
                 if progress.wasCanceled():
                     break
-                progress.setValue(f_idx)
+                processed_count += 1
+                progress.setValue(processed_count)
                 self.set_current_frame(f_idx)
                 QApplication.processEvents()
                 frame = _read_frame_detect(f_idx)
@@ -2025,6 +2046,8 @@ class VideoAnnotationTool(QMainWindow):
                     get_save_segmentation() else None)
                 if should_blur:
                     self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
+                    if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                        self.remove_annotations_under_blur(f_idx)
                 else:
                     self.frame_annotations[f_idx].append(ann)
                 detected_count += 1
@@ -2043,16 +2066,25 @@ class VideoAnnotationTool(QMainWindow):
         self.statusBar.showMessage(f'Tracking using {model_type}...')
         
         is_sam_tracker = manager in [getattr(self, 'sam_manager', None), getattr(self, 'sam2_trt_manager', None)]
-        CHUNK_SIZE = 400 if is_sam_tracker else (end_f - start_f + 1)
+        CHUNK_SIZE = 400 if is_sam_tracker else (abs(end_f - start_f) + 1)
         
         current_chunk_start = start_f
         chunk_points = points
         chunk_labels = labels
         chunk_box = box
         chunk_text_prompt = text_prompt
+
+        def _has_more_chunks():
+            return current_chunk_start >= end_f if is_backward else current_chunk_start <= end_f
+
+        processed_count = 0
         
-        while current_chunk_start <= end_f:
-            current_chunk_end = min(current_chunk_start + CHUNK_SIZE - 1, end_f)
+        while _has_more_chunks():
+            if is_backward:
+                current_chunk_end = max(current_chunk_start - CHUNK_SIZE + 1, end_f)
+            else:
+                current_chunk_end = min(current_chunk_start + CHUNK_SIZE - 1, end_f)
+
             if progress.wasCanceled():
                 break
                 
@@ -2066,15 +2098,17 @@ class VideoAnnotationTool(QMainWindow):
             else:
                 def chunk_frame_generator():
                     if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                        for f_idx in range(current_chunk_start, current_chunk_end + 1):
+                        end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
+                        for f_idx in range(current_chunk_start, end_bound, step):
                             if 0 <= f_idx < len(self.image_files):
                                 frame = cv2.imread(self.image_files[f_idx])
                                 if frame is not None:
                                     yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     else:
                         cap = cv2.VideoCapture(self.video_filename)
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, current_chunk_start)
-                        for f_idx in range(current_chunk_start, current_chunk_end + 1):
+                        end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
+                        for f_idx in range(current_chunk_start, end_bound, step):
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
                             ret, frame = cap.read()
                             if not ret:
                                 break
@@ -2083,7 +2117,7 @@ class VideoAnnotationTool(QMainWindow):
                         cap.release()
 
                 source_input = chunk_frame_generator()
-                if not getattr(self, 'is_image_dataset', False) and hasattr(self, 'video_filename') and self.video_filename:
+                if not is_backward and not getattr(self, 'is_image_dataset', False) and hasattr(self, 'video_filename') and self.video_filename:
                     if manager == getattr(self, 'fast_tracker_manager', None) or current_chunk_start == 0:
                         source_input = self.video_filename
 
@@ -2118,17 +2152,21 @@ class VideoAnnotationTool(QMainWindow):
                     ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if self.sam_interactive_dock.get_save_segmentation() else None)
                     if should_blur:
                         self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
+                        if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                            self.remove_annotations_under_blur(current_f)
                     else:
                         self.frame_annotations[current_f].append(ann)
                 self.load_current_frame_annotations()
                 self.update_frame_display()
-                progress.setValue(current_f)
-                current_f += 1
+                processed_count += 1
+                progress.setValue(processed_count)
+                current_f += step
 
             if progress.wasCanceled():
                 break
                 
-            if is_sam_tracker and current_chunk_end < end_f:
+            chunk_done = (current_chunk_end <= end_f) if is_backward else (current_chunk_end >= end_f)
+            if is_sam_tracker and not chunk_done:
                 if hasattr(manager, 'clear_session'):
                     manager.clear_session()
                 if last_box:
@@ -2137,10 +2175,10 @@ class VideoAnnotationTool(QMainWindow):
                     chunk_labels = None
                     chunk_text_prompt = None
                 else:
-                    QMessageBox.warning(self, 'Tracking Lost', f'Lost object at frame {current_f-1}. Aborting remaining frames.')
+                    QMessageBox.warning(self, 'Tracking Lost', f'Lost object at frame {current_f-step}. Aborting remaining frames.')
                     break
                     
-            current_chunk_start = current_chunk_end + 1
+            current_chunk_start = current_chunk_end + step
         progress.close()
         self.on_sam_clear_requested()
         self.seek_to_frame(self.current_frame)
@@ -3168,7 +3206,9 @@ Would you like to load it?"""
             
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if self.current_frame > 0:
+                old_frame = self.current_frame
                 self.current_frame -= 1
+                self._handle_auto_save_blur_on_frame_change(old_frame)
                 self.frame_slider.blockSignals(True)
                 self.frame_slider.setValue(self.current_frame)
                 self.frame_slider.blockSignals(False)
@@ -3211,7 +3251,9 @@ Would you like to load it?"""
 
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if self.current_frame < len(self.image_files) - 1:
+                old_frame = self.current_frame
                 self.current_frame += 1
+                self._handle_auto_save_blur_on_frame_change(old_frame)
                 self.frame_slider.blockSignals(True)
                 self.frame_slider.setValue(self.current_frame)
                 self.frame_slider.blockSignals(False)
@@ -3220,7 +3262,9 @@ Would you like to load it?"""
                 self.load_current_frame_annotations()
                 self.update_frame_display()
             elif self.is_playing:
+                old_frame = self.current_frame
                 self.current_frame = 0
+                self._handle_auto_save_blur_on_frame_change(old_frame)
                 self.frame_slider.blockSignals(True)
                 self.frame_slider.setValue(self.current_frame)
                 self.frame_slider.blockSignals(False)
@@ -3642,6 +3686,10 @@ Would you like to load it?"""
         """Programmatically set the current frame"""
         if getattr(self, 'current_frame', -1) == frame:
             return
+            
+        old_frame = getattr(self, 'current_frame', -1)
+        if old_frame >= 0 and old_frame != frame:
+            self._handle_auto_save_blur_on_frame_change(old_frame)
             
         self.current_frame = frame
         
@@ -4810,16 +4858,24 @@ First error: {errors[0]}"""
                 traceback.print_exc()
 
     @log_exceptions
+    @log_exceptions
     def export_blurred_video(self, interactive=True):
-        """Export the current video with blurs baked into the frames."""
-        if not hasattr(self, 'video_filename') or not self.video_filename or not getattr(self, 'cap', None):
+        """Export the current video or image dataset with blurs baked into the frames/files."""
+        is_video = hasattr(self, 'video_filename') and self.video_filename and getattr(self, 'cap', None) is not None
+        is_image_ds = getattr(self, 'is_image_dataset', False) or (hasattr(self, 'image_files') and bool(self.image_files))
+
+        if not is_video and not is_image_ds:
             if interactive:
-                QMessageBox.warning(self, 'Export Blurred Video', 'Please open a video file first!')
+                QMessageBox.warning(self, 'Export Blurred Media', 'Please open a video file or an image dataset first!')
             return
             
         if not hasattr(self, 'blur_manager') or not self.blur_manager.blur_regions:
             if interactive:
-                QMessageBox.information(self, 'Export Blurred Video', 'There are no blur regions to export!')
+                QMessageBox.information(self, 'Export Blurred Media', 'There are no blur regions to export!')
+            return
+
+        if is_image_ds and not is_video:
+            self.export_blurred_image_dataset(interactive=interactive)
             return
 
         base, ext = os.path.splitext(self.video_filename)
@@ -4870,6 +4926,138 @@ First error: {errors[0]}"""
         
         if not progress.wasCanceled() and interactive:
             QMessageBox.information(self, 'Success', f'Blurred video successfully exported to:\n{output_filename}')
+
+    @log_exceptions
+    def export_blurred_image_dataset(self, interactive=True):
+        """Export or burn blur regions into the image dataset files on disk."""
+        if not hasattr(self, 'image_files') or not self.image_files:
+            if interactive:
+                QMessageBox.warning(self, 'Export Blurred Images', 'No image files found in current dataset!')
+            return
+            
+        if not hasattr(self, 'blur_manager') or not self.blur_manager.blur_regions:
+            if interactive:
+                QMessageBox.information(self, 'Export Blurred Images', 'There are no blur regions to export!')
+            return
+
+        mode = "new_dir"
+        output_dir = ""
+
+        if interactive:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Export Blurred Image Dataset")
+            msg_box.setText(
+                "Do you want to export the blurred images to a NEW directory, "
+                "or OVERWRITE the original image files in place?\n\n"
+                "Note: Overwriting original images is permanent and cannot be undone."
+            )
+            btn_new = msg_box.addButton("Export to New Directory", QMessageBox.AcceptRole)
+            btn_overwrite = msg_box.addButton("Overwrite Original Images", QMessageBox.DestructiveRole)
+            btn_cancel = msg_box.addButton(QMessageBox.Cancel)
+            
+            msg_box.exec_()
+            clicked_btn = msg_box.clickedButton()
+
+            if clicked_btn == btn_cancel or clicked_btn is None:
+                return
+            elif clicked_btn == btn_overwrite:
+                confirm = QMessageBox.question(
+                    self,
+                    "Confirm Overwrite",
+                    f"Are you sure you want to permanently apply blurs to {len(self.image_files)} original image files in place?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if confirm != QMessageBox.Yes:
+                    return
+                mode = "overwrite"
+            else:
+                mode = "new_dir"
+                default_dir = os.path.dirname(self.image_files[0]) if self.image_files else ""
+                parent_dir = os.path.dirname(default_dir)
+                folder_name = os.path.basename(default_dir) + "_blurred"
+                suggested_path = os.path.join(parent_dir, folder_name)
+
+                output_dir = QFileDialog.getExistingDirectory(
+                    self,
+                    "Select Output Directory for Blurred Images",
+                    suggested_path,
+                    QFileDialog.ShowDirsOnly
+                )
+                if not output_dir:
+                    return
+
+        total_files = len(self.image_files)
+        progress = QProgressDialog("Applying blur regions to images...", "Cancel", 0, total_files, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        processed_count = 0
+        blurred_count = 0
+
+        for i, img_path in enumerate(self.image_files):
+            if progress.wasCanceled():
+                break
+
+            has_blur = self.blur_manager.has_blur(i)
+            
+            if mode == "new_dir":
+                img_name = os.path.basename(img_path)
+                dest_path = os.path.join(output_dir, img_name)
+                
+                # Preserve dataset split subdirectory if available
+                if hasattr(self, '_viat_frame_to_split') and i < len(self._viat_frame_to_split):
+                    split_name = self._viat_frame_to_split[i]
+                    if split_name and split_name != "root":
+                        dest_dir = os.path.join(output_dir, split_name, "images")
+                        os.makedirs(dest_dir, exist_ok=True)
+                        dest_path = os.path.join(dest_dir, img_name)
+
+                if has_blur:
+                    img_obj = cv2.imread(img_path)
+                    if img_obj is not None:
+                        img_rgb = cv2.cvtColor(img_obj, cv2.COLOR_BGR2RGB)
+                        blurred_rgb = self.blur_manager.apply_blur_to_frame(img_rgb, i)
+                        blurred_bgr = cv2.cvtColor(blurred_rgb, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(dest_path, blurred_bgr)
+                        blurred_count += 1
+                else:
+                    try:
+                        shutil.copy2(img_path, dest_path)
+                    except OSError:
+                        pass
+            elif mode == "overwrite":
+                if has_blur:
+                    img_obj = cv2.imread(img_path)
+                    if img_obj is not None:
+                        img_rgb = cv2.cvtColor(img_obj, cv2.COLOR_BGR2RGB)
+                        blurred_rgb = self.blur_manager.apply_blur_to_frame(img_rgb, i)
+                        blurred_bgr = cv2.cvtColor(blurred_rgb, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(img_path, blurred_bgr)
+                        blurred_count += 1
+
+            processed_count += 1
+            if i % 5 == 0:
+                progress.setValue(i)
+                QApplication.processEvents()
+
+        progress.close()
+
+        if mode == "overwrite" and blurred_count > 0:
+            self.load_current_image()
+
+        if not progress.wasCanceled() and interactive:
+            if mode == "new_dir":
+                QMessageBox.information(
+                    self, 'Success',
+                    f'Blurred images exported successfully ({blurred_count} blurred images) to:\n{output_dir}'
+                )
+            else:
+                QMessageBox.information(
+                    self, 'Success',
+                    f'Successfully applied/burned blurs into {blurred_count} original image files.'
+                )
+        self.statusBar.showMessage(f'Applied blurs to {blurred_count} images.', 5000)
 
     @log_exceptions
     def export_image_dataset(self):
@@ -5261,6 +5449,86 @@ Would you like to load it?"""
 
         state_str = "enabled" if self.auto_blur_labels else "disabled"
         self.statusBar.showMessage(f"Auto-blur new labels {state_str}", 3000)
+
+    @log_exceptions
+    def toggle_auto_save_blur_on_switch(self, checked=None):
+        """Toggle automatic saving/burning of blur regions into image files when switching frames."""
+        if checked is None:
+            self.auto_save_blur_on_switch = not getattr(self, 'auto_save_blur_on_switch', False)
+        else:
+            self.auto_save_blur_on_switch = bool(checked)
+
+        if hasattr(self, 'auto_save_blur_action') and self.auto_save_blur_action.isChecked() != self.auto_save_blur_on_switch:
+            self.auto_save_blur_action.blockSignals(True)
+            self.auto_save_blur_action.setChecked(self.auto_save_blur_on_switch)
+            self.auto_save_blur_action.blockSignals(False)
+
+        state_str = "enabled" if self.auto_save_blur_on_switch else "disabled"
+        self.statusBar.showMessage(f"Auto-save/burn blur on frame switch {state_str}", 3000)
+
+    @log_exceptions
+    def _handle_auto_save_blur_on_frame_change(self, old_frame):
+        """Helper to trigger auto-saving of blur regions for an image dataset when changing frames."""
+        if not getattr(self, 'auto_save_blur_on_switch', False):
+            return
+        if not getattr(self, 'is_image_dataset', False) or not getattr(self, 'image_files', None):
+            return
+        if old_frame < 0 or old_frame >= len(self.image_files):
+            return
+        if not hasattr(self, 'blur_manager') or not self.blur_manager.has_blur(old_frame):
+            return
+
+        self._backup_and_save_blurred_image(old_frame)
+
+    @log_exceptions
+    def _backup_and_save_blurred_image(self, frame_idx):
+        """Bake blur regions for frame_idx into the image file on disk, backing up previous version(s) to unblurred_backups/."""
+        if not hasattr(self, 'image_files') or not self.image_files:
+            return False
+        if frame_idx < 0 or frame_idx >= len(self.image_files):
+            return False
+        if not hasattr(self, 'blur_manager') or not self.blur_manager.has_blur(frame_idx):
+            return False
+
+        image_path = self.image_files[frame_idx]
+        if not os.path.exists(image_path):
+            return False
+
+        try:
+            image_dir = os.path.dirname(image_path)
+            backup_dir = os.path.join(image_dir, "unblurred_backups")
+            os.makedirs(backup_dir, exist_ok=True)
+
+            base_name, ext = os.path.splitext(os.path.basename(image_path))
+            backup_filename = f"{base_name}_unblurred_1{ext}"
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            counter = 1
+            while os.path.exists(backup_path):
+                counter += 1
+                backup_filename = f"{base_name}_unblurred_{counter}{ext}"
+                backup_path = os.path.join(backup_dir, backup_filename)
+
+            # Copy current version to backup folder before modifying original file on disk
+            shutil.copy2(image_path, backup_path)
+
+            # Read current image, apply blur, write back to original image_path
+            img_bgr = cv2.imread(image_path)
+            if img_bgr is not None:
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                blurred_rgb = self.blur_manager.apply_blur_to_frame(img_rgb, frame_idx)
+                blurred_bgr = cv2.cvtColor(blurred_rgb, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(image_path, blurred_bgr)
+
+                # Clear stored blur regions for this frame in blur_manager so we don't double-blur later
+                self.blur_manager.clear_frame(frame_idx)
+
+                msg = f"Auto-saved blur for {os.path.basename(image_path)} (Backup #{counter} in unblurred_backups/)"
+                self.statusBar.showMessage(msg, 5000)
+                return True
+        except Exception as e:
+            logger.error(f"Error auto-saving blurred image for frame {frame_idx}: {e}")
+        return False
 
     @log_exceptions
     def clear_current_frame_blur(self):
@@ -7279,6 +7547,8 @@ Do you want to scan the entire video now for duplicate frames?
     @log_exceptions
     def closeEvent(self, event):
         """Handle application close event."""
+        if getattr(self, 'auto_save_blur_on_switch', False) and getattr(self, 'is_image_dataset', False):
+            self._handle_auto_save_blur_on_frame_change(getattr(self, 'current_frame', -1))
         if not self.check_unsaved_changes():
             event.ignore()
             return
@@ -9066,9 +9336,17 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
             QMessageBox.information(self, 'Comparison Complete', f'Report saved to:\n{out_md}')
         else:
             QMessageBox.critical(self, 'Comparison Error', f'Failed to compare files:\n{msg}')
-            
+
+    @log_exceptions
+    def open_evaluation_dialog(self):
+        """Open the Model & Dataset Evaluation Dialog."""
+        from viat.widgets.evaluation_dialog import EvaluationDialog
+        dlg = EvaluationDialog(self)
+        dlg.exec_()
+
     @log_exceptions
     def view_labeler_analytics(self):
+
         """Generate labeler analytics report from a VIAT JSON project."""
         if not hasattr(self, 'project_file') or not self.project_file:
             json_file, _ = QFileDialog.getOpenFileName(self, 'Select VIAT Project File', '', 'JSON Files (*.json);;All Files (*)')

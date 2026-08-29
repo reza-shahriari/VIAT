@@ -1080,10 +1080,19 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
                 img_size = (frame.shape[1], frame.shape[0])
                 cv2.imwrite(os.path.join(img_dest_dir, img_name), frame)
         else:
-            try:
-                shutil.copy2(img_path, os.path.join(img_dest_dir, img_name))
-            except OSError:
-                pass
+            has_blur = hasattr(parent, 'blur_manager') and parent.blur_manager and parent.blur_manager.has_blur(i)
+            if has_blur:
+                img_obj = cv2.imread(img_path)
+                if img_obj is not None:
+                    img_rgb = cv2.cvtColor(img_obj, cv2.COLOR_BGR2RGB)
+                    blurred_rgb = parent.blur_manager.apply_blur_to_frame(img_rgb, i)
+                    blurred_bgr = cv2.cvtColor(blurred_rgb, cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(os.path.join(img_dest_dir, img_name), blurred_bgr)
+            else:
+                try:
+                    shutil.copy2(img_path, os.path.join(img_dest_dir, img_name))
+                except OSError:
+                    pass
             img_size = _image_size(img_path)
 
         if img_size is not None:
@@ -1257,6 +1266,11 @@ def export_raya_video_dataset(config, image_files, frame_annotations, class_colo
         img = cv2.imread(img_path)
         if img is None:
             continue
+            
+        if hasattr(parent, 'blur_manager') and parent.blur_manager and parent.blur_manager.has_blur(i):
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            blurred_rgb = parent.blur_manager.apply_blur_to_frame(img_rgb, i)
+            img = cv2.cvtColor(blurred_rgb, cv2.COLOR_RGB2BGR)
             
         orig_h, orig_w = img.shape[:2]
         original_sizes[str(i)] = [orig_w, orig_h]

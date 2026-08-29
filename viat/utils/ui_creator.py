@@ -126,8 +126,8 @@ class UICreator:
         )
         file_menu.addAction(export_clip_cuts_action)
 
-        # Export Blurred Video action
-        export_blurred_action = QAction("Export Blurred Video", self.main_window)
+        # Export Blurred Media action
+        export_blurred_action = QAction("Export Blurred Media (Video/Images)...", self.main_window)
         export_blurred_action.triggered.connect(
             lambda: getattr(self.main_window, 'export_blurred_video', lambda: None)()
         )
@@ -303,6 +303,15 @@ class UICreator:
         auto_label_action.triggered.connect(self.main_window.auto_label)
         tools_menu.addAction(auto_label_action)
 
+        # Model Evaluation action
+        model_eval_action = QAction("Model Evaluation...", self.main_window)
+        model_eval_action.setToolTip("Evaluate detector and tracker metrics (COCO mAP, MOT, Center BBox)")
+        model_eval_action.triggered.connect(
+            lambda: getattr(self.main_window, 'open_evaluation_dialog', lambda: None)()
+        )
+        tools_menu.addAction(model_eval_action)
+
+
 
         # Smart Edge Movement action
         smart_edge_action = QAction(
@@ -388,6 +397,15 @@ class UICreator:
             lambda checked: setattr(self.main_window, 'auto_remove_under_blur', checked)
         )
         privacy_menu.addAction(auto_remove_blur_action)
+
+        auto_save_blur_action = QAction("Auto-Save/Burn Blur to Image File on Frame Switch", self.main_window, checkable=True)
+        auto_save_blur_action.setToolTip("Automatically burn blur regions into image files when switching frames, saving unblurred versions to unblurred_backups/")
+        auto_save_blur_action.setChecked(getattr(self.main_window, 'auto_save_blur_on_switch', False))
+        auto_save_blur_action.triggered.connect(
+            lambda checked: getattr(self.main_window, 'toggle_auto_save_blur_on_switch', lambda c: None)(checked)
+        )
+        privacy_menu.addAction(auto_save_blur_action)
+        self.main_window.auto_save_blur_action = auto_save_blur_action
 
         privacy_menu.addSeparator()
 

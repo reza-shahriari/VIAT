@@ -1755,13 +1755,10 @@ class AnnotationDock(QDockWidget):
                 
                 # Apply action
                 for ann in to_edit:
-                    if action == "Delete":
-                        anns.remove(ann)
-                    elif action == "Blur":
+                    if action == "Blur":
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
                             blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
-                        anns.remove(ann)
                     elif action == "Shift Position":
                         ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
                     elif action == "Sync Attributes & Class":
@@ -1772,6 +1769,11 @@ class AnnotationDock(QDockWidget):
                         if hasattr(reference_annotation, "attributes"):
                             for k, v in reference_annotation.attributes.items():
                                 ann.attributes[k] = v
+                                
+                if action in ["Delete", "Blur"]:
+                    self.main_window.frame_annotations[frame_num] = [
+                        a for a in anns if a not in to_edit
+                    ]
 
             if frame_num == self.main_window.current_frame:
                 self.main_window.canvas.annotations = (
