@@ -218,12 +218,16 @@ class SAMInteractiveDock(QDockWidget):
         self.lbl_box.setText("Bounding Box: Set" if has_box else "Bounding Box: Not Set")
 
     def update_frame_info(self, current_frame, total_frames):
+        is_new_media = (getattr(self, 'total_frames', -1) != total_frames)
         self.current_frame = current_frame
         self.total_frames = total_frames
         self.spin_start.setMaximum(max(1, total_frames))
         self.spin_end.setMaximum(max(1, total_frames))
         
-        if self.cmb_scope.currentIndex() == 2: # If Custom range is active, don't override unless necessary
+        if is_new_media:
+            self.spin_start.setValue(1)
+            self.spin_end.setValue(total_frames)
+        elif self.cmb_scope.currentIndex() == 2: # If Custom range is active, don't override unless necessary
             pass
         else:
             self.spin_start.setValue(current_frame + 1)
@@ -256,6 +260,33 @@ class SAMInteractiveDock(QDockWidget):
             if s_val > e_val:
                 QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
                 return
+                
+            if s_val != self.current_frame:
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Start Frame Mismatch")
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setText(
+                    f"Prompts were placed on current frame {self.current_frame + 1}, "
+                    f"but Custom Range start frame is set to {s_val + 1}."
+                )
+                msg_box.setInformativeText(
+                    "Would you like to change the starting point to the current frame?"
+                )
+                btn_change = msg_box.addButton("Change to Current Frame", QMessageBox.AcceptRole)
+                btn_keep = msg_box.addButton("Keep Existing Start", QMessageBox.RejectRole)
+                btn_cancel = msg_box.addButton(QMessageBox.Cancel)
+                msg_box.setDefaultButton(btn_change)
+                msg_box.exec_()
+                
+                clicked_button = msg_box.clickedButton()
+                if clicked_button == btn_cancel:
+                    return
+                elif clicked_button == btn_change:
+                    self.spin_start.setValue(self.current_frame + 1)
+                    s_val = self.current_frame
+                    if s_val > e_val:
+                        self.spin_end.setValue(max(self.current_frame + 1, self.total_frames))
+                        e_val = self.spin_end.value() - 1
                 
             if direction == "backward":
                 start_f = self.current_frame

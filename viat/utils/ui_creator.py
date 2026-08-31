@@ -289,6 +289,15 @@ class UICreator:
         toggle_clip_cuts_action.triggered.connect(toggle_clip_cuts)
         view_menu.addAction(toggle_clip_cuts_action)
 
+        # Toggle Visual Inspector
+        toggle_visual_inspector_action = QAction("Visual Inspector (SHOW)", self.main_window, checkable=True)
+        toggle_visual_inspector_action.setChecked(False)
+        def toggle_visual_inspector(checked):
+            if hasattr(self.main_window, 'visual_inspector_dock'):
+                self.main_window.visual_inspector_dock.setVisible(checked)
+        toggle_visual_inspector_action.triggered.connect(toggle_visual_inspector)
+        view_menu.addAction(toggle_visual_inspector_action)
+
         view_menu.addSeparator()
 
         # Add Style Menu as a submenu
@@ -705,6 +714,14 @@ class UICreator:
             Qt.RightDockWidgetArea, self.main_window.clip_cuts_dock
         )
         self.main_window.clip_cuts_dock.hide() # Hidden by default
+
+        # Visual Inspector (SHOW) dock
+        from viat.widgets import VisualInspectorDock
+        self.main_window.visual_inspector_dock = VisualInspectorDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.BottomDockWidgetArea, self.main_window.visual_inspector_dock
+        )
+        self.main_window.visual_inspector_dock.hide() # Hidden by default
 
 
         # Tabify them to create a collapsible side panel

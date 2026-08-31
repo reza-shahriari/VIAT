@@ -14,3 +14,14 @@ timm
 jpeg4py
 visdom
 tensorboardX
+
+# Evaluation & Analytics dependencies
+pandas
+scipy
+matplotlib
+pyyaml
+shapely
+rich
+ultralytics
+faster-coco-eval
+
