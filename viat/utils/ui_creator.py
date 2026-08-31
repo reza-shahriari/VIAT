@@ -16,7 +16,9 @@ from PyQt5.QtWidgets import (
     QSlider,
     QStatusBar,
     QSpinBox,
-    QCheckBox
+    QCheckBox,
+    QMainWindow,
+    QTabWidget
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
@@ -226,77 +228,139 @@ class UICreator:
         """Create the View menu and its actions."""
         view_menu = menubar.addMenu("View")
 
-        # Toggle Docks action
-        toggle_docks_action = QAction("Toggle Side Panel", self.main_window, checkable=True)
-        toggle_docks_action.setChecked(True)
+        # Toggle Side Panel (collapses / restores the entire right panel)
+        self.toggle_docks_action = QAction("Toggle Side Panel", self.main_window, checkable=True)
+        self.toggle_docks_action.setChecked(True)
         def toggle_side_panel(checked):
-            if hasattr(self.main_window, 'annotation_dock'):
-                self.main_window.annotation_dock.setVisible(checked)
-            if hasattr(self.main_window, 'class_dock'):
-                self.main_window.class_dock.setVisible(checked)
-        toggle_docks_action.triggered.connect(toggle_side_panel)
-        view_menu.addAction(toggle_docks_action)
+            right_docks = [
+                getattr(self.main_window, 'annotation_dock', None),
+                getattr(self.main_window, 'class_dock', None),
+                getattr(self.main_window, 'sam_interactive_dock', None),
+                getattr(self.main_window, 'empty_frames_dock', None),
+                getattr(self.main_window, 'class_frames_dock', None),
+                getattr(self.main_window, 'uncertain_frames_dock', None),
+                getattr(self.main_window, 'crop_settings_dock', None),
+                getattr(self.main_window, 'clip_cuts_dock', None),
+            ]
+            if checked:
+                if hasattr(self.main_window, 'annotation_dock'):
+                    self.main_window.annotation_dock.setVisible(True)
+                    self.main_window.annotation_dock.raise_()
+                if hasattr(self.main_window, 'class_dock'):
+                    self.main_window.class_dock.setVisible(True)
+            else:
+                for dock in right_docks:
+                    if dock:
+                        dock.setVisible(False)
+        self.toggle_docks_action.triggered.connect(toggle_side_panel)
+        view_menu.addAction(self.toggle_docks_action)
 
-        # Toggle Empty Frames Manager
-        toggle_empty_frames_action = QAction("Empty Frames Manager", self.main_window, checkable=True)
-        toggle_empty_frames_action.setChecked(False)
-        def toggle_empty_frames(checked):
-            if hasattr(self.main_window, 'empty_frames_dock'):
-                self.main_window.empty_frames_dock.setVisible(checked)
+        view_menu.addSeparator()
+
+        def _make_right_dock_toggler(dock_attr, on_show=None):
+            def handler(checked):
+                dock = getattr(self.main_window, dock_attr, None)
+                if not dock:
+                    return
                 if checked:
-                    self.main_window.refresh_empty_frames_dock()
-        toggle_empty_frames_action.triggered.connect(toggle_empty_frames)
-        view_menu.addAction(toggle_empty_frames_action)
+                    # Tabify into right dock area so it opens as a tab instead of stacking below
+                    if hasattr(self.main_window, 'annotation_dock') and self.main_window.annotation_dock is not dock:
+                        self.main_window.tabifyDockWidget(self.main_window.annotation_dock, dock)
+                    dock.setVisible(True)
+                    dock.raise_()
+                    if on_show:
+                        on_show()
+                else:
+                    dock.setVisible(False)
+            return handler
+
+        # Annotations Dock
+        self.toggle_annotations_action = QAction("Annotations Panel", self.main_window, checkable=True)
+        self.toggle_annotations_action.setChecked(True)
+        self.toggle_annotations_action.triggered.connect(
+            _make_right_dock_toggler('annotation_dock')
+        )
+        view_menu.addAction(self.toggle_annotations_action)
+
+        # Classes Dock
+        self.toggle_classes_action = QAction("Classes Panel", self.main_window, checkable=True)
+        self.toggle_classes_action.setChecked(True)
+        self.toggle_classes_action.triggered.connect(
+            _make_right_dock_toggler('class_dock')
+        )
+        view_menu.addAction(self.toggle_classes_action)
+
+        # SAM Interactive Dock
+        self.toggle_sam_action = QAction("SAM Interactive Panel", self.main_window, checkable=True)
+        self.toggle_sam_action.setChecked(False)
+        self.toggle_sam_action.triggered.connect(
+            _make_right_dock_toggler('sam_interactive_dock')
+        )
+        view_menu.addAction(self.toggle_sam_action)
+
+        # Empty Frames Manager
+        self.toggle_empty_frames_action = QAction("Empty Frames Manager", self.main_window, checkable=True)
+        self.toggle_empty_frames_action.setChecked(False)
+        self.toggle_empty_frames_action.triggered.connect(
+            _make_right_dock_toggler('empty_frames_dock', lambda: getattr(self.main_window, 'refresh_empty_frames_dock', lambda: None)())
+        )
+        view_menu.addAction(self.toggle_empty_frames_action)
         
-        # Toggle Class Frames Manager
-        toggle_class_frames_action = QAction("Class Frames Manager", self.main_window, checkable=True)
-        toggle_class_frames_action.setChecked(False)
-        def toggle_class_frames(checked):
-            if hasattr(self.main_window, 'class_frames_dock'):
-                self.main_window.class_frames_dock.setVisible(checked)
-                if checked:
-                    self.main_window.refresh_class_frames_dock()
-        toggle_class_frames_action.triggered.connect(toggle_class_frames)
-        view_menu.addAction(toggle_class_frames_action)
+        # Class Frames Manager
+        self.toggle_class_frames_action = QAction("Class Frames Manager", self.main_window, checkable=True)
+        self.toggle_class_frames_action.setChecked(False)
+        self.toggle_class_frames_action.triggered.connect(
+            _make_right_dock_toggler('class_frames_dock', lambda: getattr(self.main_window, 'refresh_class_frames_dock', lambda: None)())
+        )
+        view_menu.addAction(self.toggle_class_frames_action)
         
-        # Toggle Uncertain Frames Manager
-        toggle_uncertain_frames_action = QAction("Uncertain Frames Manager", self.main_window, checkable=True)
-        toggle_uncertain_frames_action.setChecked(False)
-        def toggle_uncertain_frames(checked):
-            if hasattr(self.main_window, 'uncertain_frames_dock'):
-                self.main_window.uncertain_frames_dock.setVisible(checked)
-                if checked:
-                    if hasattr(self.main_window, 'refresh_uncertain_frames_dock'):
-                        self.main_window.refresh_uncertain_frames_dock()
-        toggle_uncertain_frames_action.triggered.connect(toggle_uncertain_frames)
-        view_menu.addAction(toggle_uncertain_frames_action)
+        # Uncertain Frames Manager
+        self.toggle_uncertain_frames_action = QAction("Uncertain Frames Manager", self.main_window, checkable=True)
+        self.toggle_uncertain_frames_action.setChecked(False)
+        self.toggle_uncertain_frames_action.triggered.connect(
+            _make_right_dock_toggler('uncertain_frames_dock', lambda: getattr(self.main_window, 'refresh_uncertain_frames_dock', lambda: None)())
+        )
+        view_menu.addAction(self.toggle_uncertain_frames_action)
         
-        # Toggle Video Manager
-        toggle_video_manager_action = QAction("Video Manager", self.main_window, checkable=True)
-        toggle_video_manager_action.setChecked(True)
+        # Clip Cuts Manager
+        self.toggle_clip_cuts_action = QAction("Clip Cuts Manager", self.main_window, checkable=True)
+        self.toggle_clip_cuts_action.setChecked(False)
+        self.toggle_clip_cuts_action.triggered.connect(
+            _make_right_dock_toggler('clip_cuts_dock')
+        )
+        view_menu.addAction(self.toggle_clip_cuts_action)
+
+        # Crop Settings Dock
+        self.toggle_crop_settings_action = QAction("Crop Settings Panel", self.main_window, checkable=True)
+        self.toggle_crop_settings_action.setChecked(False)
+        self.toggle_crop_settings_action.triggered.connect(
+            _make_right_dock_toggler('crop_settings_dock')
+        )
+        view_menu.addAction(self.toggle_crop_settings_action)
+
+        view_menu.addSeparator()
+
+        # Toggle Video Manager (Left Area)
+        self.toggle_video_manager_action = QAction("Video Manager", self.main_window, checkable=True)
+        self.toggle_video_manager_action.setChecked(False)
         def toggle_video_manager(checked):
             if hasattr(self.main_window, 'video_manager_dock'):
                 self.main_window.video_manager_dock.setVisible(checked)
-        toggle_video_manager_action.triggered.connect(toggle_video_manager)
-        view_menu.addAction(toggle_video_manager_action)
-        
-        # Toggle Clip Cuts Manager
-        toggle_clip_cuts_action = QAction("Clip Cuts Manager", self.main_window, checkable=True)
-        toggle_clip_cuts_action.setChecked(False)
-        def toggle_clip_cuts(checked):
-            if hasattr(self.main_window, 'clip_cuts_dock'):
-                self.main_window.clip_cuts_dock.setVisible(checked)
-        toggle_clip_cuts_action.triggered.connect(toggle_clip_cuts)
-        view_menu.addAction(toggle_clip_cuts_action)
+                if checked:
+                    self.main_window.video_manager_dock.raise_()
+        self.toggle_video_manager_action.triggered.connect(toggle_video_manager)
+        view_menu.addAction(self.toggle_video_manager_action)
 
-        # Toggle Visual Inspector
-        toggle_visual_inspector_action = QAction("Visual Inspector (SHOW)", self.main_window, checkable=True)
-        toggle_visual_inspector_action.setChecked(False)
+        # Toggle Visual Inspector (Bottom Area)
+        self.toggle_visual_inspector_action = QAction("Visual Inspector (SHOW)", self.main_window, checkable=True)
+        self.toggle_visual_inspector_action.setChecked(False)
         def toggle_visual_inspector(checked):
             if hasattr(self.main_window, 'visual_inspector_dock'):
                 self.main_window.visual_inspector_dock.setVisible(checked)
-        toggle_visual_inspector_action.triggered.connect(toggle_visual_inspector)
-        view_menu.addAction(toggle_visual_inspector_action)
+                if checked:
+                    self.main_window.visual_inspector_dock.raise_()
+        self.toggle_visual_inspector_action.triggered.connect(toggle_visual_inspector)
+        view_menu.addAction(self.toggle_visual_inspector_action)
 
         view_menu.addSeparator()
 
@@ -568,7 +632,13 @@ class UICreator:
         self.clip_cuts_action.setToolTip("Toggle Clip Cuts Manager")
         def toggle_clip_cuts_toolbar(checked):
             if hasattr(self.main_window, 'clip_cuts_dock'):
-                self.main_window.clip_cuts_dock.setVisible(checked)
+                if checked:
+                    if hasattr(self.main_window, 'annotation_dock'):
+                        self.main_window.tabifyDockWidget(self.main_window.annotation_dock, self.main_window.clip_cuts_dock)
+                    self.main_window.clip_cuts_dock.setVisible(True)
+                    self.main_window.clip_cuts_dock.raise_()
+                else:
+                    self.main_window.clip_cuts_dock.setVisible(False)
         self.clip_cuts_action.triggered.connect(toggle_clip_cuts_toolbar)
         self.main_window.toolbar.addAction(self.clip_cuts_action)
         self.main_window.clip_cuts_action = self.clip_cuts_action
@@ -724,14 +794,52 @@ class UICreator:
         self.main_window.visual_inspector_dock.hide() # Hidden by default
 
 
-        # Tabify them to create a collapsible side panel
-        self.main_window.tabifyDockWidget(
-            self.main_window.annotation_dock, self.main_window.class_dock
+        # Tabify all right side docks together so they share a single tabbed container
+        right_docks = [
+            self.main_window.annotation_dock,
+            self.main_window.class_dock,
+            self.main_window.sam_interactive_dock,
+            self.main_window.empty_frames_dock,
+            self.main_window.class_frames_dock,
+            self.main_window.uncertain_frames_dock,
+            self.main_window.crop_settings_dock,
+            self.main_window.clip_cuts_dock,
+        ]
+        for i in range(len(right_docks) - 1):
+            self.main_window.tabifyDockWidget(right_docks[i], right_docks[i + 1])
+
+        # Configure dock area tab positions and options to prevent height ballooning
+        self.main_window.setDockOptions(
+            QMainWindow.AllowTabbedDocks | QMainWindow.AnimatedDocks
         )
-        self.main_window.tabifyDockWidget(
-            self.main_window.class_dock, self.main_window.sam_interactive_dock
-        )
+        self.main_window.setTabPosition(Qt.RightDockWidgetArea, QTabWidget.North)
+        self.main_window.setTabPosition(Qt.LeftDockWidgetArea, QTabWidget.North)
+
         self.main_window.annotation_dock.raise_()
+
+        # Connect dock visibility signals to menu actions to keep check states in sync
+        self._sync_view_menu_actions()
+
+    def _sync_view_menu_actions(self):
+        """Connect dock visibility signals to View menu actions to keep check states in sync."""
+        mappings = [
+            (getattr(self.main_window, 'annotation_dock', None), getattr(self, 'toggle_annotations_action', None)),
+            (getattr(self.main_window, 'class_dock', None), getattr(self, 'toggle_classes_action', None)),
+            (getattr(self.main_window, 'sam_interactive_dock', None), getattr(self, 'toggle_sam_action', None)),
+            (getattr(self.main_window, 'empty_frames_dock', None), getattr(self, 'toggle_empty_frames_action', None)),
+            (getattr(self.main_window, 'class_frames_dock', None), getattr(self, 'toggle_class_frames_action', None)),
+            (getattr(self.main_window, 'uncertain_frames_dock', None), getattr(self, 'toggle_uncertain_frames_action', None)),
+            (getattr(self.main_window, 'video_manager_dock', None), getattr(self, 'toggle_video_manager_action', None)),
+            (getattr(self.main_window, 'clip_cuts_dock', None), getattr(self, 'toggle_clip_cuts_action', None)),
+            (getattr(self.main_window, 'crop_settings_dock', None), getattr(self, 'toggle_crop_settings_action', None)),
+            (getattr(self.main_window, 'visual_inspector_dock', None), getattr(self, 'toggle_visual_inspector_action', None)),
+        ]
+        for dock, action in mappings:
+            if dock and action:
+                try:
+                    dock.visibilityChanged.connect(action.setChecked)
+                except Exception:
+                    pass
 
     def create_status_bar(self):
         """Create the status bar."""

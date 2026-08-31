@@ -74,34 +74,71 @@ except ImportError:
 
 import time
 
+import re
+
 def strip_header_lines(lines):
-    """Strip Raya header block (delimited by ###) or leading comment lines."""
-    in_header = False
-    data_lines = []
-    for line in lines:
-        sline = line.strip()
-        if sline == "###":
-            in_header = not in_header
-            continue
-        if in_header or sline.startswith("#"):
-            continue
-        data_lines.append(line)
-    return data_lines
-
-
-def build_categories(category_names, observed_cat_ids):
-    """Build a clean, non-duplicate COCO categories list.
-
-    Annotations use 0-indexed class IDs (VIAT/YOLO convention).
-    If category_names are provided we generate one entry per name
-    at id == index (0, 1, 2, ...), which matches the annotation IDs.
-    Any observed category_id not covered by category_names gets a
-    fallback numeric name.
     """
+    Strip Raya header block (delimited by ###), leading comments, or YOLO-style headers.
+    Returns (data_lines, local_class_names)
+    """
+    data_lines = []
+    local_class_names = []
+    
+    in_raya_header = False
+    in_names_block = False
+    header_end_idx = 0
+    has_yolo_header = False
+    
+    for i, raw in enumerate(lines):
+        sline = raw.strip()
+        if not in_names_block:
+            if sline.lower().startswith("names:"):
+                in_names_block = True
+                has_yolo_header = True
+            elif sline == "###":
+                in_raya_header = not in_raya_header
+            elif in_raya_header or sline.startswith("#"):
+                pass
+            else:
+                pass
+        else:
+            if re.match(r"^-?\s*nc\s*:\s*\d+", sline, re.IGNORECASE):
+                header_end_idx = i + 1
+                break
+            name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
+            if name:
+                local_class_names.append(name)
+                
+    if has_yolo_header:
+        # find the end of the header
+        while header_end_idx < len(lines):
+            candidate = lines[header_end_idx].strip()
+            if candidate == "" or candidate.upper() == "DELETED;" or "[" in candidate:
+                break
+            header_end_idx += 1
+        data_lines = lines[header_end_idx:]
+    else:
+        # Just use the raya strip logic
+        in_header = False
+        for line in lines:
+            sline = line.strip()
+            if sline == "###":
+                in_header = not in_header
+                continue
+            if in_header or sline.startswith("#"):
+                continue
+            data_lines.append(line)
+
+    return data_lines, local_class_names
+
+
+def build_categories(category_names, observed_cat_ids, global_id_to_string=None):
+    """Build a clean, non-duplicate COCO categories list."""
     seen_ids = set()
     categories = []
 
-    if category_names:
+    # If category_names is a list (legacy behavior)
+    if isinstance(category_names, list):
         for idx, name in enumerate(category_names):
             if idx not in seen_ids:
                 categories.append({'id': idx, 'name': name, 'supercategory': 'none'})
@@ -110,8 +147,12 @@ def build_categories(category_names, observed_cat_ids):
     # Cover any annotation IDs not already in the list
     for cid in sorted(observed_cat_ids):
         if cid not in seen_ids:
-            # Try to resolve a friendly name from category_names
-            name = category_names[cid] if (category_names and 0 <= cid < len(category_names)) else str(cid)
+            name = str(cid)
+            if global_id_to_string and cid in global_id_to_string:
+                name = global_id_to_string[cid]
+            elif isinstance(category_names, list) and isinstance(cid, int) and 0 <= cid < len(category_names):
+                name = category_names[cid]
+                
             categories.append({'id': cid, 'name': name, 'supercategory': 'none'})
             seen_ids.add(cid)
 
@@ -121,24 +162,45 @@ def build_categories(category_names, observed_cat_ids):
     return categories
 
 
-def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_thr=None,check_for_speeds=False,ignore_all = True,category_names=[],class_mapping=None, ignored_videos=None, video_class_mappings=None, video_category_mappings=None):
-    # groundtruth_txt_paths = []
-    # groundtruth_txt_paths.append(input('Enter ground truth txts path or d for default: '))
-    # if groundtruth_txt_paths[0] == 'd':
-    #     gt_type_folder_name = 'crop_640_640'
-    #     print('\033[1m'+f'Using Ground Truths From {gt_type_folder_name} Folder'+'\033[0m')
-    #     groundtruth_txt_paths = []
-    #     groundtruth_txt_paths.append('/media/hds/88AA0CE2AA0CCE9E/Users/HDS/Desktop/Works/UAVs-Works/dataset/use/lablelling/Download/Labeled/test/current_useful/'+gt_type_folder_name)
-    #     groundtruth_txt_paths.append('/media/hds/88AA0CE2AA0CCE9E/Users/HDS/Desktop/Works/UAVs-Works/dataset/use/lablelling/Stadium/Labeled/test/'+gt_type_folder_name)
-    # dets_txt_paths = []
-    # dets_txt_paths.append(input('Enter stadium detection txts path: '))
-    # dets_txt_paths.append(input('Enter download detection txts path: '))
+def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_thr=None,check_for_speeds=False,ignore_all = True,category_names=[],class_mapping=None, ignored_videos=None, video_class_mappings=None, video_category_mappings=None, target_classes=None):
+    global_string_to_id = {}
+    global_id_to_string = {}
+    next_id = 0
+    
+    # Pre-populate with target_classes if provided to ensure they get expected IDs (0, 1, 2...)
+    if isinstance(target_classes, list):
+        for i, name in enumerate(target_classes):
+            global_string_to_id[name] = i
+            global_id_to_string[i] = name
+            next_id = max(next_id, i + 1)
+            
+    def get_cat_id(target):
+        nonlocal next_id
+        if isinstance(target, int):
+            return target
+        if target not in global_string_to_id:
+            global_string_to_id[target] = next_id
+            global_id_to_string[next_id] = target
+            next_id += 1
+        return global_string_to_id[target]
+    
     if size_thr == None:	    
         size_thr = eval(input('Enter Thr for Size: '))	    
     if quality_thr == None:	
         quality_thr = eval(input('Enter Thr for Quality: '))
     ignore_all = ignore_all # ignore all detection that placed on hard gtruth area (hard area is area that it's size and quality of bbox is below threshold) 
     
+    # Clear stale JSON files from previous runs to prevent zombie evaluations
+    import glob
+    import os
+    for path in groundtruth_txt_paths + dets_txt_paths:
+        if os.path.isdir(path):
+            for stale_json in glob.glob(os.path.join(path, '*.json')):
+                try:
+                    os.remove(stale_json)
+                except OSError:
+                    pass
+
     cnt = 0
     det_cnt = 0
     img_id = 0
@@ -198,7 +260,7 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                             # print(os.path.join(dets_txt_path,name+'.txt')," doesn't exist")
                             continue
                         with open(os.path.join(dets_txt_path,name+'.txt'),'r') as det_txt:
-                            det_lines = strip_header_lines(det_txt.readlines())
+                            det_lines, det_local_class_names = strip_header_lines(det_txt.readlines())
                             txt = os.path.splitext(video)[0]+'.txt'
                             images = []
                             annotations = []
@@ -216,7 +278,7 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                             local_img_id = 0
                             
                             with open(txt,'r') as t:
-                                lines = strip_header_lines(t.readlines())
+                                lines, gt_local_class_names = strip_header_lines(t.readlines())
                                 last_frame_middle_bbox = [-2,-2,-2]
                                 for i,line in enumerate(lines):
                                     img_id+=1
@@ -284,17 +346,29 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                                             if len(bbox):
                                                 cnt+=1
                                                 gt_cat_id = sline[0]
+                                                if isinstance(gt_cat_id, float) and gt_cat_id.is_integer():
+                                                    gt_cat_id = int(gt_cat_id)
+                                                    
+                                                orig_cat_str = str(gt_cat_id)
+                                                if isinstance(gt_cat_id, int):
+                                                    if 0 <= gt_cat_id < len(gt_local_class_names):
+                                                        orig_cat_str = gt_local_class_names[gt_cat_id]
+                                                    elif isinstance(target_classes, list) and 0 <= gt_cat_id < len(target_classes):
+                                                        orig_cat_str = target_classes[gt_cat_id]
+                                                        
                                                 if class_mapping is not None or video_class_mappings is not None:
                                                     mapped_target = None
                                                     if video_class_mappings and name in video_class_mappings:
-                                                        mapped_target = video_class_mappings[name].get(gt_cat_id, video_class_mappings[name].get(str(gt_cat_id)))
+                                                        mapped_target = video_class_mappings[name].get(orig_cat_str, video_class_mappings[name].get(str(gt_cat_id)))
                                                     if mapped_target is None and class_mapping is not None:
-                                                        mapped_target = class_mapping.get(gt_cat_id, class_mapping.get(str(gt_cat_id)))
+                                                        mapped_target = class_mapping.get(orig_cat_str, class_mapping.get(str(gt_cat_id)))
                                                     
                                                     if mapped_target is not None:
                                                         if mapped_target == "__IGNORE__":
                                                             continue  # Ignore this gt
-                                                        gt_cat_id = mapped_target if isinstance(mapped_target, int) else 1
+                                                        gt_cat_id = get_cat_id(mapped_target)
+                                                    else:
+                                                        gt_cat_id = get_cat_id(orig_cat_str)
 
                                                 res = {'area':int(bbox[2]*bbox[3]),
                                                 'bbox':bbox,
@@ -358,17 +432,8 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                                                 det_bbox = []
                                             if len(det_bbox):
                                                 det_cat_id = sub_det_line[0] if len(sub_det_line) > 0 else 1
-                                                if class_mapping is not None or video_class_mappings is not None:
-                                                    mapped_target = None
-                                                    if video_class_mappings and name in video_class_mappings:
-                                                        mapped_target = video_class_mappings[name].get(det_cat_id, video_class_mappings[name].get(str(det_cat_id)))
-                                                    if mapped_target is None and class_mapping is not None:
-                                                        mapped_target = class_mapping.get(det_cat_id, class_mapping.get(str(det_cat_id)))
-                                                    
-                                                    if mapped_target is not None:
-                                                        if mapped_target == "__IGNORE__":
-                                                            continue  # Ignore this prediction
-                                                        det_cat_id = mapped_target if isinstance(mapped_target, int) else 1
+                                                if isinstance(det_cat_id, float) and det_cat_id.is_integer():
+                                                    det_cat_id = int(det_cat_id)
 
                                                 res = {'area':int(det_bbox[2]*det_bbox[3]),
                                                 'bbox':det_bbox,
@@ -399,7 +464,7 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                                     sub_all_img.append({'file_name':name+f'_{local_img_id}.jpg','height':height, 'id':img_id,'width':width})
 
                                 observed_cats = set(a['category_id'] for a in annotations + det_annotations)
-                                categories = build_categories(category_names, observed_cats)
+                                categories = build_categories(target_classes, observed_cats, global_id_to_string)
 
                                 gts = {'annotations':annotations ,'categories':categories , 'images':images,'type':'instances'}
                                 # nospeed_gts = {'annotations':nospeed_annotations ,'categories':categories , 'images':images,'type':'instances'}
@@ -493,7 +558,7 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                     cat_bins_dt[cat].append(ann)
 
             all_observed_cats = set(a['category_id'] for a in all_annotations + all_det_annotations)
-            categories = build_categories(category_names, all_observed_cats)
+            categories = build_categories(target_classes, all_observed_cats, global_id_to_string)
 
             for cat in cat_bins_img.keys():
                 cat_gts = {'annotations': cat_bins_gt[cat], 'categories': categories, 'images': cat_bins_img[cat], 'type': 'instances'}
@@ -505,7 +570,7 @@ def convert_to_json(groundtruth_txt_paths,dets_txt_paths,size_thr=None,quality_t
                     json.dump(cat_dets, f)
         if video_count > 1:
             all_observed_cats = set(a['category_id'] for a in all_annotations + all_det_annotations)
-            categories = build_categories(category_names, all_observed_cats)
+            categories = build_categories(target_classes, all_observed_cats, global_id_to_string)
 
 
             all_gts = {'annotations':all_annotations ,'categories':categories , 'images':all_img,'type':'instances'}

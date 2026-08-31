@@ -627,6 +627,7 @@ class EvaluationDialog(QDialog):
         mapping_layout.addWidget(btn_scan, 0, Qt.AlignLeft)
 
         self.table_classes = QTableWidget(0, 4)
+        self.table_classes.setMinimumHeight(300)
         self.table_classes.setHorizontalHeaderLabels(["Original Class ID / Name", "Target Evaluation Name", "Include in Eval", "Target Video (Empty=All)"])
         self.table_classes.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         mapping_layout.addWidget(self.table_classes)
@@ -850,7 +851,9 @@ class EvaluationDialog(QDialog):
                 w.index = i
 
     def scan_and_populate_classes(self):
-        scanned_classes = set()
+        global_yaml_classes = []
+        local_gt_classes = []
+        
         for b in self.bundle_widgets:
             gt_p = b.get_gt_path()
             yaml_p = b.get_yaml_path()
@@ -858,35 +861,73 @@ class EvaluationDialog(QDialog):
             if yaml_p and os.path.exists(yaml_p):
                 yaml_dict = parse_yolo_yaml(yaml_p)
                 for k, v in yaml_dict.items():
-                    scanned_classes.add(str(v))
-            elif gt_p and os.path.exists(gt_p):
+                    global_yaml_classes.append(str(v))
+            
+            if gt_p and os.path.exists(gt_p):
                 cls_list = scan_dataset_classes(gt_p)
                 for c in cls_list:
-                    scanned_classes.add(str(c))
+                    str_c = str(c)
+                    if str_c not in local_gt_classes:
+                        local_gt_classes.append(str_c)
 
-        if not scanned_classes:
-            scanned_classes = ["0"]
+        if not local_gt_classes and not global_yaml_classes:
+            local_gt_classes = ["0"]
 
         self.table_classes.setRowCount(0)
-        for c in sorted(list(scanned_classes)):
+        global_yaml_lower = {g.lower(): g for g in global_yaml_classes}
+
+        # If they provided a YAML, but no GT classes were found, just show the YAML classes
+        classes_to_process = local_gt_classes if local_gt_classes else global_yaml_classes
+
+        for c in classes_to_process:
             row = self.table_classes.rowCount()
             self.table_classes.insertRow(row)
 
             orig_class = str(c)
             target_class = orig_class
+            include_in_eval = True
 
-            # If class is numeric (e.g. from txt files without yaml), ask user for a name
-            if orig_class.isdigit():
-                text, ok = QInputDialog.getText(self, "Class Mapping", 
-                                                f"Found numeric class '{orig_class}'.\nWhat is the human-readable name for this class? (e.g., car, person)\nLeave empty to keep it as '{orig_class}'.")
-                if ok and text.strip():
-                    target_class = text.strip()
+            # Auto-match case-insensitive against YAML if we have one
+            if global_yaml_classes:
+                if orig_class.lower() in global_yaml_lower:
+                    target_class = global_yaml_lower[orig_class.lower()]
+                else:
+                    # Unmatched class -> leave target_class as original name, 
+                    # user can edit it manually in the table if they want to merge it.
+                    pass
 
             self.table_classes.setItem(row, 0, QTableWidgetItem(orig_class))
-            self.table_classes.setItem(row, 1, QTableWidgetItem(target_class))
+            
+            # Use QComboBox for target classes to easily select from YAML classes
+            combo_target = QComboBox()
+            combo_target.setEditable(True)
+            if global_yaml_classes:
+                # Deduplicate and sort, but keep exact cases
+                combo_target.addItems(sorted(list(set(global_yaml_classes))))
+            
+            # Find index if it matches (case insensitive)
+            idx = -1
+            if global_yaml_classes:
+                for i in range(combo_target.count()):
+                    if combo_target.itemText(i).lower() == target_class.lower():
+                        idx = i
+                        break
+            
+            if idx >= 0:
+                combo_target.setCurrentIndex(idx)
+            else:
+                if global_yaml_classes:
+                    # Unmatched with YAML present, leave it blank to force user choice
+                    combo_target.setCurrentText("")
+                    include_in_eval = False # Uncheck by default so it doesn't break if they forget
+                else:
+                    # No YAML at all, just default to itself
+                    combo_target.setCurrentText(target_class)
+                
+            self.table_classes.setCellWidget(row, 1, combo_target)
 
             chk = QCheckBox()
-            chk.setChecked(True)
+            chk.setChecked(include_in_eval)
             self.table_classes.setCellWidget(row, 2, chk)
             self.table_classes.setItem(row, 3, QTableWidgetItem(""))
 
@@ -968,6 +1009,29 @@ class EvaluationDialog(QDialog):
     def start_evaluation(self):
         gt_paths = []
         dt_paths = []
+        
+        # We need to extract the global YAML classes to pass to the evaluator
+        global_yaml_classes = []
+        for b in self.bundle_widgets:
+            yaml_p = b.get_yaml_path()
+            if yaml_p and os.path.exists(yaml_p):
+                from viat.evaluation.utils.yaml_parser import parse_yolo_yaml
+                y_dict = parse_yolo_yaml(yaml_p)
+                for k, v in y_dict.items():
+                    if str(v) not in global_yaml_classes:
+                        global_yaml_classes.append(str(v))
+                        
+        if not global_yaml_classes:
+            # If no YAML, extract the unique target strings from the table in order
+            for row in range(self.table_classes.rowCount()):
+                try:
+                    target_name = self.table_classes.cellWidget(row, 1).currentText()
+                except AttributeError:
+                    target_name = self.table_classes.item(row, 1).text()
+                if target_name and target_name not in global_yaml_classes:
+                    global_yaml_classes.append(target_name)
+
+        target_classes = global_yaml_classes
         category_names = []
 
         for b in self.bundle_widgets:
@@ -1035,7 +1099,10 @@ class EvaluationDialog(QDialog):
         self.video_class_mappings = {}
         for row in range(self.table_classes.rowCount()):
             orig_name = self.table_classes.item(row, 0).text()
-            target_name = self.table_classes.item(row, 1).text()
+            try:
+                target_name = self.table_classes.cellWidget(row, 1).currentText()
+            except AttributeError:
+                target_name = self.table_classes.item(row, 1).text()
             include = self.table_classes.cellWidget(row, 2).isChecked()
             video_name_item = self.table_classes.item(row, 3)
             video_name = video_name_item.text().strip() if video_name_item else ""
@@ -1076,6 +1143,7 @@ class EvaluationDialog(QDialog):
                     gt_path=gt_paths,
                     det_path=dt_paths,
                     category_names=category_names,
+                    target_classes=target_classes,
                     quality_thr=self.spin_quality_thr.value(),
                     size_thr=self.spin_size_thr.value(),
                     margin_check=False,
@@ -1257,7 +1325,10 @@ class EvaluationDialog(QDialog):
 
         for row in range(self.table_classes.rowCount()):
             orig_name = self.table_classes.item(row, 0).text()
-            target_name = self.table_classes.item(row, 1).text()
+            try:
+                target_name = self.table_classes.cellWidget(row, 1).currentText()
+            except AttributeError:
+                target_name = self.table_classes.item(row, 1).text()
             include = self.table_classes.cellWidget(row, 2).isChecked()
             profile["class_mappings"].append({"orig": orig_name, "target": target_name, "include": include})
 
@@ -1314,7 +1385,12 @@ class EvaluationDialog(QDialog):
             row = self.table_classes.rowCount()
             self.table_classes.insertRow(row)
             self.table_classes.setItem(row, 0, QTableWidgetItem(m.get("orig", "")))
-            self.table_classes.setItem(row, 1, QTableWidgetItem(m.get("target", "")))
+            
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.setCurrentText(m.get("target", ""))
+            self.table_classes.setCellWidget(row, 1, combo)
+            
             chk = QCheckBox()
             chk.setChecked(m.get("include", True))
             self.table_classes.setCellWidget(row, 2, chk)

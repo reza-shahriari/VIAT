@@ -45,43 +45,62 @@ def scan_dataset_classes(gt_path):
     if not gt_path or not os.path.exists(gt_path):
         return []
 
-    classes_found = set()
-
-    # Check for data.yaml anywhere in the directory
-    for root, _, files in os.walk(gt_path):
-        yaml_files = [f for f in files if f.endswith('.yaml') or f.endswith('.yml')]
-        if yaml_files:
-            yaml_dict = parse_yolo_yaml(os.path.join(root, yaml_files[0]))
-            if yaml_dict:
-                return list(yaml_dict.values())
+    classes_found = []
 
     # Check txt files
     txt_files = []
     for root, _, files in os.walk(gt_path):
         txt_files.extend([os.path.join(root, f) for f in files if f.endswith('.txt')])
-        if len(txt_files) >= 20:
-            break
 
-    for file_p in txt_files[:20]: # sample up to 20 files
+    for file_p in txt_files:
         try:
             with open(file_p, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
+                lines = f.readlines()
+                
+                # First check for inline header block like video_to_yolo.py uses
+                in_names_block = False
+                header_names = []
+                has_header = False
+                for line in lines:
+                    sline = line.strip()
+                    if not sline: continue
+                    if not in_names_block:
+                        if sline.lower().startswith("names:"):
+                            in_names_block = True
+                            has_header = True
+                        continue
+                    if re.match(r"^-?\s*nc\s*:\s*\d+", sline, re.IGNORECASE):
+                        break
+                    # Parse bullet points
+                    name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
+                    if name:
+                        header_names.append(name)
+                        
+                if has_header and header_names:
+                    for name in header_names:
+                        if name not in classes_found:
+                            classes_found.append(name)
+                    continue # Try next file, maybe it has different headers
+                    
+                # Fallback to scanning bounding boxes
+                for line in lines:
                     line = line.strip()
                     if not line:
                         continue
                     if line.startswith('['):
-                        # Raya format: [class_id, x, y, w, h, ...] or [[class_id, ...]]
+                        # Raya format
                         try:
                             raw = line.split(';')[0]
                             sline = eval(raw)
-                            # Handle list of lists
                             if isinstance(sline, list) and len(sline) > 0 and isinstance(sline[0], list):
                                 sline = sline[0]
                             if isinstance(sline, list) and len(sline) > 0:
                                 val = sline[0]
                                 if isinstance(val, float) and val.is_integer():
                                     val = int(val)
-                                classes_found.add(str(val))
+                                str_val = str(val)
+                                if str_val not in classes_found:
+                                    classes_found.append(str_val)
                         except Exception:
                             pass
                     else:
@@ -91,10 +110,14 @@ def scan_dataset_classes(gt_path):
                                 val = float(parts[0])
                                 if val.is_integer():
                                     val = int(val)
-                                classes_found.add(str(val))
+                                str_val = str(val)
+                                if str_val not in classes_found:
+                                    classes_found.append(str_val)
                             except ValueError:
-                                classes_found.add(parts[0])
+                                str_val = parts[0]
+                                if str_val not in classes_found:
+                                    classes_found.append(str_val)
         except Exception:
             pass
 
-    return sorted(list(classes_found))
+    return classes_found

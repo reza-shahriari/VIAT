@@ -273,15 +273,39 @@ def get_coco_summary(groundtruth_bbs, detected_bbs):
         x['TP'] / x['total positives'] for k in max_det10 for x in max_det10[k]
         if x['TP'] is not None
     ])
-    # print(x['precision'] for x in full[0.50] if x['precision'] is not None)
+    APsmall = [x['AP'] for k in small for x in small[k] if x['AP'] is not None]
+    APsmall = np.nan if APsmall == [] else np.mean(APsmall)
+    APmedium = [x['AP'] for k in medium for x in medium[k] if x['AP'] is not None]
+    APmedium = np.nan if APmedium == [] else np.mean(APmedium)
+    APlarge = [x['AP'] for k in large for x in large[k] if x['AP'] is not None]
+    APlarge = np.nan if APlarge == [] else np.mean(APlarge)
+
+    # Per-class AP breakdown
+    per_class_metrics = {}
+    for x in full[0.50]:
+        c_id = x['class']
+        c_ap50 = x['AP']
+        c_ap_list = [entry['AP'] for k in full for entry in full[k] if entry['class'] == c_id and entry['AP'] is not None]
+        c_ap = np.mean(c_ap_list) if len(c_ap_list) > 0 else np.nan
+        per_class_metrics[c_id] = {'AP50': c_ap50, 'AP': c_ap}
+
+    per_size_metrics = {
+        'Small (<32²)': APsmall,
+        'Medium (32²-96²)': APmedium,
+        'Large (>96²)': APlarge
+    }
+
     return {
-        "Precision":full[0.5][0]["precision"][argmax] ,
-        "Recall" : full[0.5][0]["recall"][argmax],
+        "Precision": full[0.5][0]["precision"][argmax] if argmax is not None and len(full[0.5]) > 0 else 0.0,
+        "Recall": full[0.5][0]["recall"][argmax] if argmax is not None and len(full[0.5]) > 0 else 0.0,
         "F1": F1,
         "AP": AP,
         "AP40": AP40,
         "AP50": AP50,
         "AP75": AP75,
+        "APsmall": APsmall,
+        "APmedium": APmedium,
+        "APlarge": APlarge,
         "APsmall16": APsmall16,
         "APsmall32": APsmall32,
         "APmedium64": APmedium64,
@@ -299,14 +323,15 @@ def get_coco_summary(groundtruth_bbs, detected_bbs):
         "ARsmall": ARsmall,
         "ARmedium": ARmedium,
         "ARlarge": ARlarge,
-        "TP(zero_score)":TP,
-        "FP(zero_score)":FP,
-        "FN(zero_score)":FN,
-        "Score":score,
-        "TP":TPs,
-        "FP":FPs,
-        "FN":FNs,
-        
+        "TP(zero_score)": TP,
+        "FP(zero_score)": FP,
+        "FN(zero_score)": FN,
+        "Score": score,
+        "TP": TPs,
+        "FP": FPs,
+        "FN": FNs,
+        "per_class_metrics": per_class_metrics,
+        "per_size_metrics": per_size_metrics
     }
 
 

@@ -1747,6 +1747,8 @@ class VideoAnnotationTool(QMainWindow):
             
         self.canvas.sam_interactive_mode = checked
         if checked:
+            if hasattr(self, 'annotation_dock') and hasattr(self, 'tabifyDockWidget'):
+                self.tabifyDockWidget(self.annotation_dock, self.sam_interactive_dock)
             self.sam_interactive_dock.show()
             self.sam_interactive_dock.raise_()
             model_type = self.sam_interactive_dock.get_model_type()
@@ -6850,6 +6852,8 @@ Do you want to scan the entire video now for duplicate frames?
             self.statusBar.showMessage('Crop Mode enabled. Draw a box to define the crop region.', 3000)
             self.canvas.setCursor(Qt.CrossCursor)
             if hasattr(self, 'crop_settings_dock'):
+                if hasattr(self, 'annotation_dock') and hasattr(self, 'tabifyDockWidget'):
+                    self.tabifyDockWidget(self.annotation_dock, self.crop_settings_dock)
                 self.crop_settings_dock.show()
                 self.crop_settings_dock.raise_()
         else:

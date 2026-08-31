@@ -44,6 +44,7 @@ try:
     from viat.evaluation.utils.write_combined_results import create_table
     from viat.evaluation.conf.configs import config
     from viat.evaluation.evaluators.coco_evaluator import jaccard
+    from viat.evaluation.utils.plotter import plot_map_by_class, plot_map_by_size
 except ImportError:
     from .utils.converter import coco2bb
     from .evaluators import coco_evaluator
@@ -53,6 +54,7 @@ except ImportError:
     from .utils.write_combined_results import create_table
     from .conf.configs import config
     from .evaluators.coco_evaluator import jaccard
+    from .utils.plotter import plot_map_by_class, plot_map_by_size
 
 try:
     from viat.evaluation.trackEval.scripts.our_run_mot_challenge import initialize as run_tracker
@@ -65,7 +67,7 @@ class Evaluate():
                  size_thr,margin_check,margin_value,center_check,
                  detection_check,tracking_check,speed_check,visualize_check,
                  combine = True,visualize_iou = 0.5,ignore_all = True,center_conf_thr = None,
-                 class_mapping=None, ignored_videos=None, video_class_mappings=None, video_category_mappings=None) :
+                 class_mapping=None, ignored_videos=None, video_class_mappings=None, video_category_mappings=None, target_classes=None) :
         self.exts = ['*.mp4','*.avi','*.mkv','*.mov','*.webm','*.mpg', '*.MOV','*.m4v']
         self.gt_path = gt_path if isinstance(gt_path,list) else [gt_path]
         self.det_path = det_path if isinstance(det_path, list) else [det_path]
@@ -84,6 +86,7 @@ class Evaluate():
         self.ignore_all = ignore_all
         self.center_conf_thr = center_conf_thr
         self.category_names = category_names
+        self.target_classes = target_classes
         self.class_mapping = class_mapping
         self.ignored_videos = ignored_videos
         self.video_class_mappings = video_class_mappings
@@ -267,122 +270,23 @@ class Evaluate():
     
     def eval_detect(self):
         def evaluate_detector(dets_path, gt_path):
-            try:
-                import json as _json
-                from faster_coco_eval import COCO, COCOeval_faster
-                cocoGt = COCO(gt_path)
-
-                # Load DT annotations as a flat list (proper COCO detection format)
-                with open(dets_path, 'r') as _f:
-                    _dt_data = _json.load(_f)
-                dt_anns = _dt_data.get('annotations', [])
-                # Ensure every detection has a score
-                for ann in dt_anns:
-                    if 'score' not in ann:
-                        ann['score'] = float(ann.get('confidence', 1.0))
-                n_dt = len(dt_anns)
-
-                if not dt_anns:
-                    # No predictions → all metrics 0
-                    return {'Precision': 0.0, 'Recall': 0.0, 'F1': 0.0, 'Score': 0.5,
-                            'TP': 0, 'FP': 0, 'FN': len(cocoGt.getAnnIds()),
-                            'AP': 0.0, 'AP40': 0.0, 'AP50': 0.0, 'AP75': 0.0,
-                            'APsmall': float('nan'), 'APmedium': float('nan'), 'APlarge': 0.0,
-                            'AR1': 0.0, 'AR10': 0.0, 'AR100': 0.0,
-                            'ARsmall': float('nan'), 'ARmedium': float('nan'), 'ARlarge': 0.0}
-
-                cocoDt = cocoGt.loadRes(dt_anns)
-                cocoEval = COCOeval_faster(cocoGt, cocoDt, 'bbox')
-                cocoEval.evaluate()
-                cocoEval.accumulate()
-                cocoEval.summarize()
-                stats = cocoEval.stats
-
-                # Re-run for AP40
-                cocoEval40 = COCOeval_faster(cocoGt, cocoDt, 'bbox')
-                cocoEval40.params.iouThrs = np.array([0.40])
-                cocoEval40.evaluate()
-                cocoEval40.accumulate()
-                cocoEval40.summarize()
-                ap40 = float(cocoEval40.stats[0]) if len(cocoEval40.stats) > 0 and cocoEval40.stats[0] >= 0 else 0.0
-
-                optimal_score = 0.5
-                precision = 0.0
-                recall = float(stats[8]) if len(stats) > 8 and stats[8] >= 0 else 0.0
-                f1_score = 0.0
-
-                if hasattr(cocoEval, 'eval') and cocoEval.eval:
-                    try:
-                        pr = cocoEval.eval.get('precision')
-                        sc = cocoEval.eval.get('scores')
-                        if pr is not None and sc is not None:
-                            # Shape: (T, R, K, A, M) → IoU=0.50 (T=0), all areas (A=0), maxDets=100 (M=-1)
-                            # We want the max F1 across all recall thresholds
-                            # recall array is np.linspace(0, 1, 101)
-                            rc = np.linspace(0.0, 1.0, 101)
-                            pr_05 = pr[0, :, 0, 0, -1]  # using first class (K=0) for simplicity
-                            sc_05 = sc[0, :, 0, 0, -1]
-                            
-                            valid_mask = (pr_05 >= 0)
-                            if np.any(valid_mask):
-                                pr_valid = pr_05[valid_mask]
-                                rc_valid = rc[valid_mask]
-                                sc_valid = sc_05[valid_mask]
-                                
-                                f1_curve = 2 * pr_valid * rc_valid / (pr_valid + rc_valid + 1e-6)
-                                max_idx = np.argmax(f1_curve)
-                                
-                                precision = float(pr_valid[max_idx])
-                                recall = float(rc_valid[max_idx])
-                                f1_score = float(f1_curve[max_idx])
-                                optimal_score = float(sc_valid[max_idx])
-                    except Exception:
-                        pass
-                
-                if f1_score == 0.0 and (precision + recall) > 0:
-                    f1_score = (2 * precision * recall / (precision + recall + 1e-6))
-
-                n_gt = len(cocoGt.getAnnIds()) if hasattr(cocoGt, 'getAnnIds') else 0
-                tp_est = int(round(recall * n_gt)) if n_gt > 0 else 0
-                fp_est = max(0, n_dt - tp_est)
-                fn_est = max(0, n_gt - tp_est)
-
-                return {
-                    'Precision': precision,
-                    'Recall': recall,
-                    'F1': f1_score,
-                    'Score': optimal_score,
-                    'TP': tp_est,
-                    'FP': fp_est,
-                    'FN': fn_est,
-                    'AP': float(stats[0]) if len(stats) > 0 and stats[0] >= 0 else 0.0,
-                    'AP40': ap40,
-                    'AP50': float(stats[1]) if len(stats) > 1 and stats[1] >= 0 else 0.0,
-                    'AP75': float(stats[2]) if len(stats) > 2 and stats[2] >= 0 else 0.0,
-                    'APsmall': float(stats[3]) if len(stats) > 3 and stats[3] >= 0 else float('nan'),
-                    'APmedium': float(stats[4]) if len(stats) > 4 and stats[4] >= 0 else float('nan'),
-                    'APlarge': float(stats[5]) if len(stats) > 5 and stats[5] >= 0 else float('nan'),
-                    'AR1': float(stats[6]) if len(stats) > 6 and stats[6] >= 0 else 0.0,
-                    'AR10': float(stats[7]) if len(stats) > 7 and stats[7] >= 0 else 0.0,
-                    'AR100': float(stats[8]) if len(stats) > 8 and stats[8] >= 0 else 0.0,
-                    'ARsmall': float(stats[9]) if len(stats) > 9 and stats[9] >= 0 else float('nan'),
-                    'ARmedium': float(stats[10]) if len(stats) > 10 and stats[10] >= 0 else float('nan'),
-                    'ARlarge': float(stats[11]) if len(stats) > 11 and stats[11] >= 0 else float('nan'),
-                }
-            except Exception:
-                dets = coco2bb(dets_path, BBType.DETECTED)
-                gts = coco2bb(gt_path)
-                coc = coco_evaluator.get_coco_summary(gts, dets)
-                if 'Score' not in coc:
-                    coc['Score'] = 0.5
-                return coc
+            dets = coco2bb(dets_path, BBType.DETECTED)
+            gts = coco2bb(gt_path)
+            coc = coco_evaluator.get_coco_summary(gts, dets)
+            if 'Score' not in coc:
+                coc['Score'] = 0.5
+            return coc
         # Creating json file
         gt_path = [self.gt_path] if isinstance(self.gt_path,str) else self.gt_path
         det_path = [self.det_path] if isinstance(self.det_path,str) else self.det_path
         with cons.status('[bold blue] writing json files ') as status:
             convert_to_json(gt_path, det_path,self.size_thr,
                             self.quality_thr,self.speed_check,self.ignore_all,self.category_names,
-                            class_mapping=self.class_mapping, ignored_videos=self.ignored_videos, video_class_mappings=self.video_class_mappings, video_category_mappings=self.video_category_mappings)
+                            class_mapping=self.class_mapping,
+                            ignored_videos=self.ignored_videos,
+                            video_class_mappings=self.video_class_mappings,
+                            video_category_mappings=self.video_category_mappings,
+                            target_classes=self.target_classes)
         data_list = []
         cons.print("[bold cyan]json files created")
         # evaluating created json files
@@ -441,11 +345,41 @@ class Evaluate():
         out_folder = self.det_path[0]+'/evaluation_result'
         pathlib.Path(out_folder).mkdir(parents=True, exist_ok=True)
 
+        # Generate per-class and per-size mAP plots from summary data
+        target_summary_data = all_data if len(all_data) > 0 else (new_list[0] if len(new_list) > 0 else {})
+        if target_summary_data:
+            per_class_m = target_summary_data.get('per_class_metrics', {})
+            per_size_m = target_summary_data.get('per_size_metrics', {})
+
+            # Map numeric category IDs to category names if available
+            named_class_m = {}
+            for c_id, metrics in per_class_m.items():
+                if isinstance(c_id, int) and 0 <= c_id - 1 < len(self.category_names):
+                    c_name = self.category_names[c_id - 1]
+                else:
+                    c_name = str(c_id)
+                named_class_m[c_name] = metrics
+
+            if named_class_m:
+                try:
+                    plot_map_by_class(named_class_m, os.path.join(out_folder, 'map_by_class.png'))
+                except Exception:
+                    pass
+            if per_size_m:
+                try:
+                    plot_map_by_size(per_size_m, os.path.join(out_folder, 'map_by_size.png'))
+                except Exception:
+                    pass
+
         if HAS_PANDAS and pd is not None:
             df = pd.DataFrame(new_list)
+            # Drop nested dict columns before saving to CSV
+            for col in ['per_class_metrics', 'per_size_metrics']:
+                if col in df.columns:
+                    df = df.drop(columns=[col])
             for i in df:
                 for j in range(len(df[i])):
-                    if type(df[i][j]) in [np.ndarray,np.array]:
+                    if type(df[i][j]) in [np.ndarray, np.array]:
                         df[i][j] = 0
             if self.write_detection_check_res:
                 df.to_csv(out_folder+f"/eval_detection.csv", index=False, header=True)
@@ -453,9 +387,10 @@ class Evaluate():
         else:
             if self.write_detection_check_res and new_list:
                 headers = []
+                skip_keys = {'per_class_metrics', 'per_size_metrics'}
                 for item in new_list:
                     for k in item.keys():
-                        if k not in headers:
+                        if k not in headers and k not in skip_keys:
                             headers.append(k)
                 with open(out_folder+"/eval_detection.csv", "w", newline="", encoding="utf-8") as f:
                     writer = csv.DictWriter(f, fieldnames=headers)
@@ -463,6 +398,8 @@ class Evaluate():
                     for row in new_list:
                         cleaned_row = {}
                         for k, v in row.items():
+                            if k in skip_keys:
+                                continue
                             if isinstance(v, (np.ndarray, list)):
                                 cleaned_row[k] = 0
                             else:
@@ -470,22 +407,8 @@ class Evaluate():
                         writer.writerow(cleaned_row)
             self.df = new_list
 
-        # deleting jsons
-        for main_path in self.gt_path:
-            for json in glob.glob(main_path+'/*.json'):
-                continue
-                try:
-                    os.remove(json)
-                except Exception:
-                    pass
-        for main_path in self.det_path:
-            for json in glob.glob(main_path+'/*.json'):
-                continue
-                try:
-                    os.remove(json)
-                except Exception:
-                    pass
-        cons.print('[bold cyan]detector evaluated successfully :smiley:')
+        # JSON files are intentionally kept for debugging; remove manually when no longer needed.
+        cons.print('[bold cyan]detector evaluated successfully & mAP plots saved! :smiley:')
     
     def eval_center(self):
         with cons.status('[bold green] evaluating center bbox') as status:
