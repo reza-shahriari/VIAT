@@ -30,7 +30,13 @@ class DatasetWizardDialog(QDialog):
         self.main_dataset_input = QLineEdit()
         self.main_dataset_input.setReadOnly(True)
         # Load from config if available
-        from config import DEFAULT_SETTINGS
+        try:
+            from viat.config import DEFAULT_SETTINGS
+        except ImportError:
+            try:
+                from config import DEFAULT_SETTINGS
+            except ImportError:
+                DEFAULT_SETTINGS = {}
         saved_path = DEFAULT_SETTINGS.get("main_dataset_path", "")
         self.main_dataset_input.setText(saved_path)
         
@@ -211,7 +217,13 @@ class DatasetWizardDialog(QDialog):
         folder = QFileDialog.getExistingDirectory(self, "Select Main Dataset Directory")
         if folder:
             self.main_dataset_input.setText(folder)
-            from config import DEFAULT_SETTINGS
+            try:
+                from viat.config import DEFAULT_SETTINGS
+            except ImportError:
+                try:
+                    from config import DEFAULT_SETTINGS
+                except ImportError:
+                    DEFAULT_SETTINGS = {}
             DEFAULT_SETTINGS["main_dataset_path"] = folder
             
     def browse_new_dataset(self):

@@ -141,7 +141,7 @@ def discover_pairs(folder: Path):
     Returns list of dicts: {n, video_path, label_path}
     """
     all_files = list(folder.iterdir())
-    video_re = re.compile(r"^video_(\d+)(_blurred)?\.mp4$", re.IGNORECASE)
+    video_re = re.compile(r"^video_?(\d+)_?(blurred|blured)?\.mp4$", re.IGNORECASE)
 
     by_n = {}  # n -> {"plain": path or None, "blurred": path or None}
     for f in all_files:
@@ -165,12 +165,11 @@ def discover_pairs(folder: Path):
             continue
 
         # Label file naming follows the chosen video's naming: if we're
-        # using the blurred video, prefer video_N_blurred.txt (falling back
-        # to video_N.txt if the blurred-specific label file doesn't exist).
+        # using the blurred video, prefer video_N_blurred.txt or videoN_blured.txt
         if use_blurred:
-            candidate_label_paths = [folder / f"video_{n}_blurred.txt", folder / f"video_{n}.txt"]
+            candidate_label_paths = [folder / f"video_{n}_blurred.txt", folder / f"video_{n}_blured.txt", folder / f"video{n}_blured.txt", folder / f"video_{n}.txt"]
         else:
-            candidate_label_paths = [folder / f"video_{n}.txt"]
+            candidate_label_paths = [folder / f"video_{n}.txt", folder / f"video{n}.txt"]
 
         label_path = next((p for p in candidate_label_paths if p.exists()), None)
         if label_path is None:
@@ -191,20 +190,13 @@ def main():
 
     ap.add_argument("--fourcc", type=str, default="avc1", help="FourCC for H.264 (try 'avc1' or 'h264' or 'mp4v' as fallback)")
     args = ap.parse_args()
-    folder = Path(
-        "/media/reza/New Volume/Reza/AiCLab/MLM/Lableing/videos/IDF_D9_armored_bulldozer/"
-    )
-    out_video = folder / 'outvideo.mp4'
-    out_labels = folder / 'outvideo.txt'
-    folder = Path(folder)
+def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, fourcc: str = "avc1"):
     if not folder.is_dir():
-        print(f"ERROR: {folder} is not a directory", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"{folder} is not a directory")
 
     pairs = discover_pairs(folder)
     if not pairs:
-        print("ERROR: no video/label pairs found", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("No video/label pairs found")
 
     print(f"Found {len(pairs)} video/label pairs (in order):")
     for p in pairs:
@@ -223,8 +215,7 @@ def main():
         try:
             local_names, nc, body_start = parse_header(raw_lines)
         except ValueError as e:
-            print(f"ERROR parsing header of {p['label_path']}: {e}", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"ERROR parsing header of {p['label_path']}: {e}")
 
         if nc is not None and len(local_names) != nc:
             print(f"WARNING: {p['label_path'].name} declares nc={nc} but has {len(local_names)} names", file=sys.stderr)
@@ -257,8 +248,7 @@ def main():
     # ---- Pass 2: open first video to get fps/resolution for the writer ----
     first_cap = cv2.VideoCapture(str(per_video_data[0]["video_path"]))
     if not first_cap.isOpened():
-        print(f"ERROR: could not open {per_video_data[0]['video_path']}", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"ERROR: could not open {per_video_data[0]['video_path']}")
     fps = first_cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(first_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(first_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -266,15 +256,14 @@ def main():
 
     print(f"\nOutput video params: {width}x{height} @ {fps:.3f}fps")
 
-    fourcc = cv2.VideoWriter_fourcc(*args.fourcc)
-    writer = cv2.VideoWriter(out_video, fourcc, fps, (width, height))
+    fourcc_val = cv2.VideoWriter_fourcc(*fourcc)
+    writer = cv2.VideoWriter(str(out_video), fourcc_val, fps, (width, height))
     if not writer.isOpened():
-        print(f"WARNING: VideoWriter failed to open with fourcc={fourcc}, retrying with 'mp4v'", file=sys.stderr)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(out_video, fourcc, fps, (width, height))
+        print(f"WARNING: VideoWriter failed to open with fourcc={fourcc_val}, retrying with 'mp4v'", file=sys.stderr)
+        fourcc_val = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_video), fourcc_val, fps, (width, height))
         if not writer.isOpened():
-            print("ERROR: could not open VideoWriter with any fourcc", file=sys.stderr)
-            sys.exit(1)
+            raise RuntimeError("ERROR: could not open VideoWriter with any fourcc")
 
     out_label_lines = []
     total_frames_in = 0
@@ -284,8 +273,7 @@ def main():
     for vd in per_video_data:
         cap = cv2.VideoCapture(str(vd["video_path"]))
         if not cap.isOpened():
-            print(f"ERROR: could not open {vd['video_path']}", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"ERROR: could not open {vd['video_path']}")
 
         n_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         n_label_lines = len(vd["body_lines"])
@@ -314,8 +302,7 @@ def main():
             try:
                 kind, payload = parse_label_line(line)
             except ValueError as e:
-                print(f"ERROR parsing label line {frame_idx} in {vd['label_path']}: {e}", file=sys.stderr)
-                sys.exit(1)
+                raise ValueError(f"ERROR parsing label line {frame_idx} in {vd['label_path']}: {e}")
 
             if kind == "DELETE":
                 total_frames_deleted += 1
@@ -329,9 +316,8 @@ def main():
                 for box in payload:
                     cls_local = box[0]
                     if cls_local not in local_idx_to_global_idx:
-                        print(f"ERROR: class index {cls_local} in {vd['label_path']} frame {frame_idx} "
-                              f"has no entry in that video's header names list", file=sys.stderr)
-                        sys.exit(1)
+                        raise ValueError(f"ERROR: class index {cls_local} in {vd['label_path']} frame {frame_idx} "
+                              f"has no entry in that video's header names list")
                     cls_global = local_idx_to_global_idx[cls_local]
                     rest = box[1:]
                     remapped_items.append(f"[{cls_global}," + ",".join(rest) + "]")
@@ -363,7 +349,23 @@ def main():
     print(f"  Frames kept/written:  {total_frames_kept}")
     print(f"  Output video:  {out_video}")
     print(f"  Output labels: {out_labels}")
+    return True, f"Merged successfully. Frames kept: {total_frames_kept}"
 
+def main():
+    ap = argparse.ArgumentParser(description="Merge dataset videos + labels into one video/txt")
+    ap.add_argument("--fourcc", type=str, default="avc1", help="FourCC for H.264 (try 'avc1' or 'h264' or 'mp4v' as fallback)")
+    ap.add_argument("--folder", type=str, default="/media/reza/New Volume/Reza/AiCLab/MLM/Lableing/videos/IDF_D9_armored_bulldozer/")
+    args = ap.parse_args()
+    
+    folder = Path(args.folder)
+    out_video = folder / 'outvideo.mp4'
+    out_labels = folder / 'outvideo.txt'
+    
+    try:
+        merge_dataset_programmatic(folder, out_video, out_labels, args.fourcc)
+    except Exception as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

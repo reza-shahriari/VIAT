@@ -87,6 +87,11 @@ class CollapsibleSection(QWidget):
         self._is_collapsed = not checked
         self._content.setVisible(checked)
         self._toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        
+        # Adjust dialog size dynamically
+        window = self.window()
+        if window:
+            window.adjustSize()
 
     def add_widget(self, widget):
         self._content_layout.addWidget(widget)
@@ -109,7 +114,7 @@ class AutoAnnotateDialog(QDialog):
         self.total_frames = total_frames
         self._test_mode = False   # True when caller wants single-frame preview
         self.setWindowTitle('Auto Annotate')
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(800)
         self.setMinimumHeight(400)
         self._setup_ui()
         self._populate_existing_classes()
@@ -191,7 +196,7 @@ class AutoAnnotateDialog(QDialog):
         self.classes_table.horizontalHeader().setStretchLastSection(True)
         self.classes_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.classes_table.setMinimumHeight(150)
-        self.classes_table.setMaximumHeight(200)
+        self.classes_table.setMaximumHeight(400)
         self._adv_section.add_widget(self.classes_table)
 
         add_row_btn = QPushButton('+ Add Class Row')
@@ -205,7 +210,7 @@ class AutoAnnotateDialog(QDialog):
         self.det_model_list.setSelectionMode(QAbstractItemView.MultiSelection)
         for display, _ in ZERO_SHOT_MODELS:
             self.det_model_list.addItem(display)
-        self.det_model_list.setMaximumHeight(70)
+        self.det_model_list.setMaximumHeight(150)
         self.det_model_list.setToolTip(
             'Optionally run additional models in addition to the one selected above.')
         self._adv_section.add_widget(self.det_model_list)

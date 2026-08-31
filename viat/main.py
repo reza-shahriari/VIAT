@@ -756,7 +756,12 @@ class VideoAnnotationTool(QMainWindow):
         act.triggered.connect(lambda : self.open_dataset_cleaner_dialog())
         act = img_menu.addAction('Dataset Integration Wizard (Roadmap)...')
         act.triggered.connect(lambda : self.viat_launch_integration_wizard())
+        img_menu.addSeparator()
+        act = img_menu.addAction('Auto Blur Labels...')
+        act.triggered.connect(lambda : self.open_auto_blur_dialog())
         vid_menu = dataset_menu.addMenu('Video Annotation Operations')
+        act = vid_menu.addAction('Auto Blur Labels...')
+        act.triggered.connect(lambda : self.open_auto_blur_dialog())
         act = vid_menu.addAction('Split Video by Scene Cuts...')
         act.triggered.connect(lambda : self.viat_split_video_scenes())
         act = vid_menu.addAction('Import VIAT JSON Annotations...')
@@ -777,6 +782,8 @@ class VideoAnnotationTool(QMainWindow):
         vid_menu.addSeparator()
         act = vid_menu.addAction('Export VIAT JSON...')
         act.triggered.connect(lambda : self.viat_export_json())
+        act = vid_menu.addAction('Merge Videos in Folder...')
+        act.triggered.connect(lambda : self.viat_merge_videos_in_folder())
         act = vid_menu.addAction('Toggle Remove Unverified Labels')
         act.setShortcut('Shift+U')
         act.triggered.connect(lambda : self.viat_toggle_remove_unverified())
@@ -805,11 +812,185 @@ class VideoAnnotationTool(QMainWindow):
         self._viat_extra_menus = dataset_menu
 
     @log_exceptions
+    def viat_merge_videos_in_folder(self):
+        """Prompt user to select a folder and merge all videos in it."""
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox, QApplication
+        import sys
+        import os
+        from pathlib import Path
+        
+        default_dir = os.path.dirname(self.video_filename) if getattr(self, 'video_filename', None) else ''
+        folder_path = QFileDialog.getExistingDirectory(self, 'Select Folder to Merge Videos', default_dir)
+        
+        if not folder_path:
+            return
+            
+        # Optional: warn the user that this might take time
+        reply = QMessageBox.question(self, 'Confirm Merge',
+            f'Are you sure you want to merge all annotated videos in:\n{folder_path}?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            
+        if reply != QMessageBox.Yes:
+            return
+            
+        # Ensure current video cap is released if it is inside the folder to avoid locking issues (mostly Windows, but safe everywhere)
+        if getattr(self, 'cap', None) and getattr(self, 'video_filename', None) and self.video_filename.startswith(folder_path):
+            self.cap.release()
+            self.cap = None
+
+        try:
+            root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if root_path not in sys.path:
+                sys.path.insert(0, root_path)
+                
+            from many2single import merge_dataset_programmatic
+            
+            folder = Path(folder_path)
+            out_video = folder / 'outvideo.mp4'
+            out_labels = folder / 'outvideo.txt'
+            
+            self.statusBar.showMessage('Merging videos... This may take a while.')
+            QApplication.processEvents()
+            
+            success, msg = merge_dataset_programmatic(folder, out_video, out_labels)
+            
+            if success:
+                QMessageBox.information(self, "Merge Successful", msg)
+            self.statusBar.showMessage('Merge complete', 5000)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Merge Error", f"Failed to merge videos:\n{e}")
+
+    @log_exceptions
     def open_dataset_cleaner_dialog(self):
         """Launches the Dataset Cleaner Dialog."""
         from .widgets.dataset_cleaner_dialog import DatasetCleanerDialog
         dialog = DatasetCleanerDialog(self)
         dialog.exec_()
+
+    @log_exceptions
+    def open_auto_blur_dialog(self):
+        """Launches the Auto Blur Dialog."""
+        from .widgets.auto_blur_dialog import AutoBlurDialog
+        from PyQt5.QtWidgets import QDialog
+        dialog = AutoBlurDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.apply_auto_blur(dialog.settings)
+
+    @log_exceptions
+    def apply_auto_blur(self, settings):
+        from PyQt5.QtWidgets import QProgressDialog, QMessageBox
+        from PyQt5.QtCore import Qt
+        
+        frames_to_process = []
+        if settings.get("all_frames", False):
+            if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                frames_to_process = list(range(self.total_frames))
+            else:
+                frames_to_process = list(self.frame_annotations.keys())
+                if not frames_to_process and self.total_frames > 0:
+                    frames_to_process = list(range(self.total_frames))
+        else:
+            frames_to_process = [self.current_frame]
+            
+        if not frames_to_process:
+            return
+            
+        progress = QProgressDialog("Applying Auto Blur...", "Cancel", 0, len(frames_to_process), self)
+        progress.setWindowModality(Qt.WindowModal)
+        
+        blurred_count = 0
+        removed_count = 0
+        blur_kernel = getattr(self.canvas, 'blur_kernel', 151)
+        w_frame = self.canvas.pixmap.width() if self.canvas.pixmap else 1920
+        h_frame = self.canvas.pixmap.height() if self.canvas.pixmap else 1080
+        
+        for i, f_idx in enumerate(frames_to_process):
+            if progress.wasCanceled():
+                break
+            progress.setValue(i)
+            
+            if f_idx not in self.frame_annotations:
+                continue
+                
+            annots = self.frame_annotations[f_idx]
+            to_blur = []
+            
+            for ann in annots:
+                rect = ann.rect
+                area = rect.width() * rect.height()
+                
+                if settings["small"]["enabled"] and area <= settings["small"]["max_area"]:
+                    to_blur.append(ann)
+                    continue
+                if settings["big"]["enabled"] and area >= settings["big"]["min_area"]:
+                    to_blur.append(ann)
+                    continue
+                    
+                if settings["aspect_ratio"]["enabled"]:
+                    if rect.height() > 0:
+                        ar = rect.width() / float(rect.height())
+                        if ar < settings["aspect_ratio"]["min"] or ar > settings["aspect_ratio"]["max"]:
+                            to_blur.append(ann)
+                            continue
+                            
+                if settings["corner"]["enabled"]:
+                    dist = settings["corner"]["dist"]
+                    if rect.left() <= dist or rect.right() >= (w_frame - dist) or rect.top() <= dist or rect.bottom() >= (h_frame - dist):
+                        to_blur.append(ann)
+                        continue
+                        
+                if settings["occluded"]:
+                    is_occ = False
+                    for k, v in ann.attributes.items():
+                        if str(k).lower() in ["occluded", "occlusion"]:
+                            if str(v).lower() in ["true", "1", "yes"]:
+                                is_occ = True
+                                break
+                    if is_occ:
+                        to_blur.append(ann)
+                        continue
+                        
+            if settings["recursive"] and to_blur:
+                added_new = True
+                while added_new:
+                    added_new = False
+                    for ann in annots:
+                        if ann not in to_blur:
+                            for b_ann in to_blur:
+                                if ann.rect.intersects(b_ann.rect):
+                                    to_blur.append(ann)
+                                    added_new = True
+                                    break
+                                    
+            if to_blur:
+                if not hasattr(self, 'blur_manager') or self.blur_manager is None:
+                    from viat.utils.blur_manager import BlurManager
+                    self.blur_manager = BlurManager()
+                    
+                for ann in to_blur:
+                    self.blur_manager.add_bbox_region(f_idx, ann.rect, blur_kernel)
+                    blurred_count += 1
+                    
+                if settings["remove_bbox"]:
+                    new_annots = [a for a in annots if a not in to_blur]
+                    removed_count += (len(annots) - len(new_annots))
+                    self.frame_annotations[f_idx] = new_annots
+                    if f_idx == self.current_frame:
+                        self.canvas.annotations = new_annots
+                        
+        progress.setValue(len(frames_to_process))
+        if blurred_count > 0:
+            self.project_modified = True
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            self.canvas.update()
+            if settings["remove_bbox"]:
+                self.update_annotation_list()
+            QMessageBox.information(self, "Auto Blur Complete", f"Blurred {blurred_count} objects.\\nRemoved {removed_count} bounding boxes.")
+        else:
+            QMessageBox.information(self, "Auto Blur Complete", "No objects matched the criteria.")
 
     @log_exceptions
     def viat_launch_integration_wizard(self):
@@ -1610,13 +1791,16 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.sam_prompt_points = []
         self.canvas.sam_prompt_labels = []
         self.canvas.sam_prompt_box = None
+        self.canvas.sam_preview_polygon = None
+        self.canvas.sam_preview_rect = None
+        self.canvas.sam_preview_class = None
         
         if hasattr(self.canvas, 'annotations'):
             self.canvas.annotations = [a for a in self.canvas.annotations if getattr(a, 'is_sam_preview', False) == False]
             
         self.sam_interactive_dock.update_status(0, 0, False)
         
-        # Clear sessions in both managers
+        # Clear sessions in all managers
         if hasattr(self, 'sam3_native_manager') and self.sam3_native_manager is not None:
             try:
                 self.sam3_native_manager.clear_session()
@@ -1640,9 +1824,11 @@ class VideoAnnotationTool(QMainWindow):
                 print(f"Failed to clear Fast Tracker session: {e}")
                 
         self.canvas.update()
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.setFocus()
 
     def on_sam_preview_requested(self):
-        if not self.canvas.current_frame_array is not None:
+        if self.canvas.current_frame_array is None:
             return
         points = [[p.x(), p.y()] for p in self.canvas.sam_prompt_points
             ] if self.canvas.sam_prompt_points else None
@@ -1665,33 +1851,35 @@ class VideoAnnotationTool(QMainWindow):
         else:
             manager = self.sam_manager
         QApplication.setOverrideCursor(Qt.WaitCursor)
-        polygon = manager.predict_mask_from_prompt(self.canvas.
-            current_frame_array, points=points, labels=labels, box=box,
-            text_prompt=text_prompt)
-        QApplication.restoreOverrideCursor()
+        try:
+            polygon = manager.predict_mask_from_prompt(self.canvas.
+                current_frame_array, points=points, labels=labels, box=box,
+                text_prompt=text_prompt)
+        finally:
+            QApplication.restoreOverrideCursor()
         if polygon:
-            self.canvas.annotations = [a for a in self.canvas.annotations if
-                getattr(a, 'is_sam_preview', False) == False]
-            ann = BoundingBox(QRect(0, 0, 0, 0), self.canvas.current_class,
-                color=self.canvas.class_colors.get(self.canvas.
-                current_class, QColor(0, 255, 0)), attributes={'source':
-                'sam_preview'})
             x_coords = [p[0] for p in polygon]
             y_coords = [p[1] for p in polygon]
+            preview_rect = None
             if x_coords and y_coords:
-                ann.rect = QRect(int(min(x_coords)), int(min(y_coords)),
+                preview_rect = QRect(int(min(x_coords)), int(min(y_coords)),
                     int(max(x_coords) - min(x_coords)), int(max(y_coords) -
                     min(y_coords)))
-            if self.sam_interactive_dock.get_save_segmentation():
-                ann.segmentation = polygon
-            else:
-                ann.segmentation = None
-            ann.is_sam_preview = True
-            self.canvas.annotations.append(ann)
+            self.canvas.sam_preview_polygon = polygon
+            self.canvas.sam_preview_rect = preview_rect
+            self.canvas.sam_preview_class = self.canvas.current_class
+            # Remove any lingering preview from canvas annotations
+            self.canvas.annotations = [a for a in self.canvas.annotations if getattr(a, 'is_sam_preview', False) == False]
             self.canvas.update()
             self.statusBar.showMessage('Preview generated successfully.', 3000)
         else:
+            self.canvas.sam_preview_polygon = None
+            self.canvas.sam_preview_rect = None
+            self.canvas.sam_preview_class = None
+            self.canvas.update()
             self.statusBar.showMessage('No mask generated.', 3000)
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.setFocus()
 
     def on_sam_track_requested(self, strategy, start_f, end_f, direction="forward"):
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
@@ -1768,10 +1956,14 @@ class VideoAnnotationTool(QMainWindow):
             sam_prompt_box.height()] if self.canvas.sam_prompt_box else None
             
         if not box:
-            for ann in self.canvas.annotations:
-                if getattr(ann, 'is_sam_preview', False):
-                    box = [ann.rect.left(), ann.rect.top(), ann.rect.right(), ann.rect.bottom()]
-                    break
+            if getattr(self.canvas, 'sam_preview_rect', None):
+                pr = self.canvas.sam_preview_rect
+                box = [pr.left(), pr.top(), pr.right(), pr.bottom()]
+            else:
+                for ann in self.canvas.annotations:
+                    if getattr(ann, 'is_sam_preview', False):
+                        box = [ann.rect.left(), ann.rect.top(), ann.rect.right(), ann.rect.bottom()]
+                        break
         text_prompt = self.sam_interactive_dock.get_text_prompt()
         if not points and not box and not text_prompt:
             QMessageBox.warning(self, 'No Prompts',
@@ -1867,322 +2059,351 @@ class VideoAnnotationTool(QMainWindow):
         progress_label = ('Detecting object frame by frame...' if strategy ==
             'detect' else ('Tracking object backward...' if is_backward else 'Tracking object...'))
         
-        total_steps = abs(end_f - start_f) + 1
-        progress = QProgressDialog(progress_label, 'Cancel', 0, total_steps, self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.show()
+        progress = None
+        cancelled = False
+        try:
+            total_steps = abs(end_f - start_f) + 1
+            progress = QProgressDialog(progress_label, 'Cancel', 0, total_steps, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.show()
+            QApplication.processEvents()
 
-        if start_f == end_f:
-            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
-                if tracker_engine == 'ettrack':
-                    tracker_title = "E.T.Track"
-                elif tracker_engine == 'ostrack_engine':
-                    tracker_title = "OSTrack Native TRT"
-                elif tracker_engine == 'ostrack_trt':
-                    tracker_title = "OSTrack TRT"
-                else:
-                    tracker_title = "OSTrack"
-                QMessageBox.warning(self, 'Invalid Scope', f'{tracker_title} cannot be used for a single frame. Please select a range or Whole Video.')
-                return
-            self.statusBar.showMessage('Generating mask for single frame...')
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            frame = None
-            if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                if 0 <= start_f < len(self.image_files):
-                    frame_bgr = cv2.imread(self.image_files[start_f])
-                    if frame_bgr is not None:
-                        frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            else:
-                cap = cv2.VideoCapture(self.video_filename)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
-                ret, frame_bgr = cap.read()
-                if ret:
-                    frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                cap.release()
-            QApplication.restoreOverrideCursor()
-            if frame is None:
-                QMessageBox.warning(self, 'Error', 'Could not read the frame.')
-                return
-            polygon = manager.predict_mask_from_prompt(frame, points=points,
-                labels=labels, box=box, text_prompt=text_prompt)
-            if polygon:
-                if start_f not in self.frame_annotations:
-                    self.frame_annotations[start_f] = []
-                ann_rect = QRect(0, 0, 0, 0)
-                if box:
-                    ann_rect = QRect(box[0], box[1], box[2] - box[0], box[3
-                        ] - box[1])
-                else:
-                    x_coords = [p[0] for p in polygon]
-                    y_coords = [p[1] for p in polygon]
-                    if x_coords and y_coords:
-                        ann_rect = QRect(int(min(x_coords)), int(min(
-                            y_coords)), int(max(x_coords) - min(x_coords)),
-                            int(max(y_coords) - min(y_coords)))
-                default_attributes = {'Size': -1, 'Quality': -1}
-                if hasattr(self, 'get_default_attributes_for_class'):
-                    default_attributes = self.get_default_attributes_for_class(
-                        target_class)
-                ann = BoundingBox(ann_rect, target_class, attributes=
-                    default_attributes, color=self.canvas.class_colors.get(
-                    target_class, QColor(0, 255, 0)), source='sam_tracked',
-                    segmentation=polygon if self.sam_interactive_dock.
-                    get_save_segmentation() else None)
-                if should_blur:
-                    self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
-                    if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                        self.remove_annotations_under_blur(start_f)
-                else:
-                    self.frame_annotations[start_f].append(ann)
-            else:
-                QMessageBox.warning(self, 'Tracking Error',
-                    'No object detected.')
-            self.on_sam_clear_requested()
-            self.seek_to_frame(self.current_frame)
-            self.statusBar.showMessage('SAM processing completed.', 5000)
-            return
-        if strategy == 'detect':
-            if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
-                if tracker_engine == 'ettrack':
-                    tracker_title = "E.T.Track"
-                elif tracker_engine == 'ostrack_engine':
-                    tracker_title = "OSTrack Native TRT"
-                elif tracker_engine == 'ostrack_trt':
-                    tracker_title = "OSTrack TRT"
-                else:
-                    tracker_title = "OSTrack"
-                QMessageBox.warning(self, 'Invalid Strategy', f'{tracker_title} is a temporal tracker and cannot be used for frame-by-frame detection.')
-                return
-            det_model_type = self.sam_interactive_dock.get_det_model_type()
-            zero_shot_model = None
-            if det_model_type:
-                if not hasattr(self, 'zero_shot_manager'
-                    ) or self.zero_shot_manager is None:
-                    from .utils.zero_shot_manager import ZeroShotManager
-                    self.zero_shot_manager = ZeroShotManager()
-                prog_load = QProgressDialog(f'Loading {det_model_type}...',
-                    'Cancel', 0, 0, self)
-                prog_load.setWindowModality(Qt.WindowModal)
-                prog_load.show()
-                QApplication.processEvents()
-                checkpoints_dir = os.path.join(os.path.dirname(os.path.
-                    abspath(__file__)), '..', 'checkpoints')
-                success, msg = self.zero_shot_manager.load_model(det_model_type
-                    , checkpoints_dir)
-                prog_load.close()
-                if not success:
-                    QMessageBox.warning(self, 'Error',
-                        f'Failed to load Zero-Shot Model:\n{msg}')
+            if start_f == end_f:
+                if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
+                    if tracker_engine == 'ettrack':
+                        tracker_title = "E.T.Track"
+                    elif tracker_engine == 'ostrack_engine':
+                        tracker_title = "OSTrack Native TRT"
+                    elif tracker_engine == 'ostrack_trt':
+                        tracker_title = "OSTrack TRT"
+                    else:
+                        tracker_title = "OSTrack"
+                    QMessageBox.warning(self, 'Invalid Scope', f'{tracker_title} cannot be used for a single frame. Please select a range or Whole Video.')
                     return
-                zero_shot_model = self.zero_shot_manager.detector
-                if text_prompt:
-                    zero_shot_model.set_classes([text_prompt])
-            self.statusBar.showMessage(
-                f'Frame-by-Frame Detection using {model_type}...')
-            detected_count = 0
-            source_iter = list(range(start_f, end_f - 1, -1)) if is_backward else list(range(start_f, end_f + 1))
-            if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                def _read_frame_detect(f_idx):
-                    if 0 <= f_idx < len(self.image_files):
-                        bgr = cv2.imread(self.image_files[f_idx])
-                        if bgr is not None:
-                            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    return None
-            else:
-                _detect_cap = cv2.VideoCapture(self.video_filename)
-
-                def _read_frame_detect(f_idx):
-                    _detect_cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                    ret, bgr = _detect_cap.read()
-                    if ret:
-                        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    return None
-            processed_count = 0
-            for f_idx in source_iter:
-                if progress.wasCanceled():
-                    break
-                processed_count += 1
-                progress.setValue(processed_count)
-                self.set_current_frame(f_idx)
-                QApplication.processEvents()
-                frame = _read_frame_detect(f_idx)
-                if frame is None:
-                    continue
+                self.statusBar.showMessage('Generating mask for single frame...')
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                frame = None
                 try:
-                    current_box = box
-                    if zero_shot_model:
-                        visual_prompts = None
-                        if box and not text_prompt:
-                            visual_prompts = {'bboxes': [[box[0], box[1],
-                                box[2], box[3]]], 'cls': [0]}
-                        detections = zero_shot_model.predict(frame,
-                            visual_prompts=visual_prompts)
-                        if not detections:
-                            continue
-                        best_det = max(detections, key=lambda x: x['score'])
-                        current_box = best_det['box']
-                    polygon = manager.predict_mask_from_prompt(frame,
-                        points=points, labels=labels, box=current_box,
-                        text_prompt=text_prompt)
-                except Exception:
-                    continue
-                if not polygon:
-                    continue
-                x_coords = [p[0] for p in polygon]
-                y_coords = [p[1] for p in polygon]
-                ann_rect = QRect(int(min(x_coords)), int(min(y_coords)),
-                    int(max(x_coords) - min(x_coords)), int(max(y_coords) -
-                    min(y_coords)))
-                if f_idx not in self.frame_annotations:
-                    self.frame_annotations[f_idx] = []
-                default_attributes = {'Size': -1, 'Quality': -1}
-                if hasattr(self, 'get_default_attributes_for_class'):
-                    default_attributes = self.get_default_attributes_for_class(
-                        target_class)
-                ann = BoundingBox(ann_rect, target_class, attributes=
-                    default_attributes, color=self.canvas.class_colors.get(
-                    target_class, QColor(0, 255, 0)), source='sam_detected',
-                    segmentation=polygon if self.sam_interactive_dock.
-                    get_save_segmentation() else None)
-                if should_blur:
-                    self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
-                    if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                        self.remove_annotations_under_blur(f_idx)
-                else:
-                    self.frame_annotations[f_idx].append(ann)
-                detected_count += 1
-                self.load_current_frame_annotations()
-                self.update_frame_display()
-            if not (hasattr(self, 'is_image_dataset') and self.is_image_dataset
-                ):
-                _detect_cap.release()
-            progress.close()
-            self.on_sam_clear_requested()
-            self.seek_to_frame(self.current_frame)
-            self.statusBar.showMessage(
-                f'Frame-by-Frame Detection completed. {detected_count} frame(s) annotated.'
-                , 5000)
-            return
-        self.statusBar.showMessage(f'Tracking using {model_type}...')
-        
-        is_sam_tracker = manager in [getattr(self, 'sam_manager', None), getattr(self, 'sam2_trt_manager', None)]
-        CHUNK_SIZE = 400 if is_sam_tracker else (abs(end_f - start_f) + 1)
-        
-        current_chunk_start = start_f
-        chunk_points = points
-        chunk_labels = labels
-        chunk_box = box
-        chunk_text_prompt = text_prompt
-
-        def _has_more_chunks():
-            return current_chunk_start >= end_f if is_backward else current_chunk_start <= end_f
-
-        processed_count = 0
-        
-        while _has_more_chunks():
-            if is_backward:
-                current_chunk_end = max(current_chunk_start - CHUNK_SIZE + 1, end_f)
-            else:
-                current_chunk_end = min(current_chunk_start + CHUNK_SIZE - 1, end_f)
-
-            if progress.wasCanceled():
-                break
-                
-            if manager == getattr(self, 'sam3_native_manager', None):
-                res_path = getattr(self, 'video_filename', None)
-                if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                    res_path = os.path.dirname(self.image_files[0]) if self.image_files else None
-                results_generator = manager.track_video_from_prompt(
-                    resource_path=res_path, start_f=current_chunk_start, end_f=current_chunk_end, 
-                    points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt)
-            else:
-                def chunk_frame_generator():
                     if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                        end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
-                        for f_idx in range(current_chunk_start, end_bound, step):
-                            if 0 <= f_idx < len(self.image_files):
-                                frame = cv2.imread(self.image_files[f_idx])
-                                if frame is not None:
-                                    yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        if 0 <= start_f < len(self.image_files):
+                            frame_bgr = cv2.imread(self.image_files[start_f])
+                            if frame_bgr is not None:
+                                frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                     else:
                         cap = cv2.VideoCapture(self.video_filename)
-                        end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
-                        for f_idx in range(current_chunk_start, end_bound, step):
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                            ret, frame = cap.read()
-                            if not ret:
-                                break
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            yield frame_rgb
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+                        ret, frame_bgr = cap.read()
+                        if ret:
+                            frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                         cap.release()
+                finally:
+                    QApplication.restoreOverrideCursor()
 
-                source_input = chunk_frame_generator()
-                if not is_backward and not getattr(self, 'is_image_dataset', False) and hasattr(self, 'video_filename') and self.video_filename:
-                    if manager == getattr(self, 'fast_tracker_manager', None) or current_chunk_start == 0:
-                        source_input = self.video_filename
-
-                if manager == getattr(self, 'fast_tracker_manager', None):
-                    results_generator = manager.track_video_from_prompt(source_input, points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt, model_type=model_type, initial_polygon=initial_polygon, start_f=current_chunk_start, end_f=current_chunk_end)
-                else:
-                    results_generator = manager.track_video_from_prompt(source_input, points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt, model_type=model_type, start_f=current_chunk_start, end_f=current_chunk_end)
-            
-            current_f = current_chunk_start
-            last_box = None
-            
-            for success, track_res in results_generator:
-                if progress.wasCanceled():
-                    break
-                self.set_current_frame(current_f)
-                QApplication.processEvents()
-                if not success:
-                    QMessageBox.warning(self, 'Tracking Error', track_res)
-                    break
-                tracked_boxes = track_res['boxes']
-                tracked_polygons = track_res['polygons']
-                if len(tracked_boxes) > 0:
-                    t_box = tracked_boxes[0]
-                    last_box = t_box
-                    polygon = tracked_polygons[0] if len(tracked_polygons) > 0 else None
-                    rect = QRect(t_box[0], t_box[1], t_box[2] - t_box[0], t_box[3] - t_box[1])
-                    if current_f not in self.frame_annotations:
-                        self.frame_annotations[current_f] = []
+                if frame is None:
+                    QMessageBox.warning(self, 'Error', 'Could not read the frame.')
+                    return
+                polygon = manager.predict_mask_from_prompt(frame, points=points,
+                    labels=labels, box=box, text_prompt=text_prompt)
+                if polygon:
+                    if start_f not in self.frame_annotations:
+                        self.frame_annotations[start_f] = []
+                    ann_rect = QRect(0, 0, 0, 0)
+                    if box:
+                        ann_rect = QRect(box[0], box[1], box[2] - box[0], box[3
+                            ] - box[1])
+                    else:
+                        x_coords = [p[0] for p in polygon]
+                        y_coords = [p[1] for p in polygon]
+                        if x_coords and y_coords:
+                            ann_rect = QRect(int(min(x_coords)), int(min(
+                                y_coords)), int(max(x_coords) - min(x_coords)),
+                                int(max(y_coords) - min(y_coords)))
                     default_attributes = {'Size': -1, 'Quality': -1}
                     if hasattr(self, 'get_default_attributes_for_class'):
-                        default_attributes = self.get_default_attributes_for_class(target_class)
-                    ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if self.sam_interactive_dock.get_save_segmentation() else None)
+                        default_attributes = self.get_default_attributes_for_class(
+                            target_class)
+                    ann = BoundingBox(ann_rect, target_class, attributes=
+                        default_attributes, color=self.canvas.class_colors.get(
+                        target_class, QColor(0, 255, 0)), source='sam_tracked',
+                        segmentation=polygon if self.sam_interactive_dock.
+                        get_save_segmentation() else None)
                     if should_blur:
-                        self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
+                        if polygon:
+                            self.blur_manager.add_polygon_region(start_f, polygon, self.canvas.blur_kernel)
+                        else:
+                            self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
                         if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                            self.remove_annotations_under_blur(current_f)
+                            self.remove_annotations_under_blur(start_f)
                     else:
-                        self.frame_annotations[current_f].append(ann)
-                self.load_current_frame_annotations()
-                self.update_frame_display()
-                processed_count += 1
-                progress.setValue(processed_count)
-                current_f += step
-
-            if progress.wasCanceled():
-                break
-                
-            chunk_done = (current_chunk_end <= end_f) if is_backward else (current_chunk_end >= end_f)
-            if is_sam_tracker and not chunk_done:
-                if hasattr(manager, 'clear_session'):
-                    manager.clear_session()
-                if last_box:
-                    chunk_box = [last_box[0], last_box[1], last_box[2], last_box[3]]
-                    chunk_points = None
-                    chunk_labels = None
-                    chunk_text_prompt = None
+                        self.frame_annotations[start_f].append(ann)
                 else:
-                    QMessageBox.warning(self, 'Tracking Lost', f'Lost object at frame {current_f-step}. Aborting remaining frames.')
+                    QMessageBox.warning(self, 'Tracking Error',
+                        'No object detected.')
+                return
+            if strategy == 'detect':
+                if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
+                    if tracker_engine == 'ettrack':
+                        tracker_title = "E.T.Track"
+                    elif tracker_engine == 'ostrack_engine':
+                        tracker_title = "OSTrack Native TRT"
+                    elif tracker_engine == 'ostrack_trt':
+                        tracker_title = "OSTrack TRT"
+                    else:
+                        tracker_title = "OSTrack"
+                    QMessageBox.warning(self, 'Invalid Strategy', f'{tracker_title} is a temporal tracker and cannot be used for frame-by-frame detection.')
+                    return
+                det_model_type = self.sam_interactive_dock.get_det_model_type()
+                zero_shot_model = None
+                if det_model_type:
+                    if not hasattr(self, 'zero_shot_manager'
+                        ) or self.zero_shot_manager is None:
+                        from .utils.zero_shot_manager import ZeroShotManager
+                        self.zero_shot_manager = ZeroShotManager()
+                    prog_load = QProgressDialog(f'Loading {det_model_type}...',
+                        'Cancel', 0, 0, self)
+                    prog_load.setWindowModality(Qt.WindowModal)
+                    prog_load.show()
+                    QApplication.processEvents()
+                    checkpoints_dir = os.path.join(os.path.dirname(os.path.
+                        abspath(__file__)), '..', 'checkpoints')
+                    success, msg = self.zero_shot_manager.load_model(det_model_type
+                        , checkpoints_dir)
+                    prog_load.close()
+                    if not success:
+                        QMessageBox.warning(self, 'Error',
+                            f'Failed to load Zero-Shot Model:\n{msg}')
+                        return
+                    zero_shot_model = self.zero_shot_manager.detector
+                    if text_prompt:
+                        zero_shot_model.set_classes([text_prompt])
+                self.statusBar.showMessage(
+                    f'Frame-by-Frame Detection using {model_type}...')
+                detected_count = 0
+                source_iter = list(range(start_f, end_f - 1, -1)) if is_backward else list(range(start_f, end_f + 1))
+                if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                    def _read_frame_detect(f_idx):
+                        if 0 <= f_idx < len(self.image_files):
+                            bgr = cv2.imread(self.image_files[f_idx])
+                            if bgr is not None:
+                                return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        return None
+                else:
+                    _detect_cap = cv2.VideoCapture(self.video_filename)
+
+                    def _read_frame_detect(f_idx):
+                        _detect_cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                        ret, bgr = _detect_cap.read()
+                        if ret:
+                            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        return None
+                try:
+                    processed_count = 0
+                    for f_idx in source_iter:
+                        if progress.wasCanceled():
+                            cancelled = True
+                            break
+                        processed_count += 1
+                        progress.setValue(processed_count)
+                        self.set_current_frame(f_idx)
+                        QApplication.processEvents()
+                        frame = _read_frame_detect(f_idx)
+                        if frame is None:
+                            continue
+                        try:
+                            current_box = box
+                            if zero_shot_model:
+                                visual_prompts = None
+                                if box and not text_prompt:
+                                    visual_prompts = {'bboxes': [[box[0], box[1],
+                                        box[2], box[3]]], 'cls': [0]}
+                                detections = zero_shot_model.predict(frame,
+                                    visual_prompts=visual_prompts)
+                                if not detections:
+                                    continue
+                                best_det = max(detections, key=lambda x: x['score'])
+                                current_box = best_det['box']
+                            polygon = manager.predict_mask_from_prompt(frame,
+                                points=points, labels=labels, box=current_box,
+                                text_prompt=text_prompt)
+                        except Exception:
+                            continue
+                        if not polygon:
+                            continue
+                        x_coords = [p[0] for p in polygon]
+                        y_coords = [p[1] for p in polygon]
+                        ann_rect = QRect(int(min(x_coords)), int(min(y_coords)),
+                            int(max(x_coords) - min(x_coords)), int(max(y_coords) -
+                            min(y_coords)))
+                        if f_idx not in self.frame_annotations:
+                            self.frame_annotations[f_idx] = []
+                        default_attributes = {'Size': -1, 'Quality': -1}
+                        if hasattr(self, 'get_default_attributes_for_class'):
+                            default_attributes = self.get_default_attributes_for_class(
+                                target_class)
+                        ann = BoundingBox(ann_rect, target_class, attributes=
+                            default_attributes, color=self.canvas.class_colors.get(
+                            target_class, QColor(0, 255, 0)), source='sam_detected',
+                            segmentation=polygon if self.sam_interactive_dock.
+                            get_save_segmentation() else None)
+                        if should_blur:
+                            if polygon:
+                                self.blur_manager.add_polygon_region(f_idx, polygon, self.canvas.blur_kernel)
+                            else:
+                                self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
+                            if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                                self.remove_annotations_under_blur(f_idx)
+                        else:
+                            self.frame_annotations[f_idx].append(ann)
+                        detected_count += 1
+                        self.load_current_frame_annotations()
+                        self.update_frame_display()
+                finally:
+                    if not (hasattr(self, 'is_image_dataset') and self.is_image_dataset):
+                        _detect_cap.release()
+                return
+            self.statusBar.showMessage(f'Tracking using {model_type}...')
+            
+            is_sam_tracker = manager in [getattr(self, 'sam_manager', None), getattr(self, 'sam2_trt_manager', None)]
+            CHUNK_SIZE = 400 if is_sam_tracker else (abs(end_f - start_f) + 1)
+            
+            current_chunk_start = start_f
+            chunk_points = points
+            chunk_labels = labels
+            chunk_box = box
+            chunk_text_prompt = text_prompt
+
+            def _has_more_chunks():
+                return current_chunk_start >= end_f if is_backward else current_chunk_start <= end_f
+
+            processed_count = 0
+            
+            while _has_more_chunks():
+                if is_backward:
+                    current_chunk_end = max(current_chunk_start - CHUNK_SIZE + 1, end_f)
+                else:
+                    current_chunk_end = min(current_chunk_start + CHUNK_SIZE - 1, end_f)
+
+                if progress.wasCanceled():
+                    cancelled = True
                     break
                     
-            current_chunk_start = current_chunk_end + step
-        progress.close()
-        self.on_sam_clear_requested()
-        self.seek_to_frame(self.current_frame)
-        self.statusBar.showMessage('SAM Tracking completed.', 5000)
+                if manager == getattr(self, 'sam3_native_manager', None):
+                    res_path = getattr(self, 'video_filename', None)
+                    if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                        res_path = os.path.dirname(self.image_files[0]) if self.image_files else None
+                    results_generator = manager.track_video_from_prompt(
+                        resource_path=res_path, start_f=current_chunk_start, end_f=current_chunk_end, 
+                        points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt)
+                else:
+                    def chunk_frame_generator():
+                        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                            end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
+                            for f_idx in range(current_chunk_start, end_bound, step):
+                                if 0 <= f_idx < len(self.image_files):
+                                    frame = cv2.imread(self.image_files[f_idx])
+                                    if frame is not None:
+                                        yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        else:
+                            cap = cv2.VideoCapture(self.video_filename)
+                            end_bound = current_chunk_end - 1 if is_backward else current_chunk_end + 1
+                            for f_idx in range(current_chunk_start, end_bound, step):
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                                ret, frame = cap.read()
+                                if not ret:
+                                    break
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                yield frame_rgb
+                            cap.release()
+
+                    source_input = chunk_frame_generator()
+                    if not is_backward and not getattr(self, 'is_image_dataset', False) and hasattr(self, 'video_filename') and self.video_filename:
+                        if manager == getattr(self, 'fast_tracker_manager', None) or current_chunk_start == 0:
+                            source_input = self.video_filename
+
+                    if manager == getattr(self, 'fast_tracker_manager', None):
+                        results_generator = manager.track_video_from_prompt(source_input, points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt, model_type=model_type, initial_polygon=initial_polygon, start_f=current_chunk_start, end_f=current_chunk_end)
+                    else:
+                        results_generator = manager.track_video_from_prompt(source_input, points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt, model_type=model_type, start_f=current_chunk_start, end_f=current_chunk_end)
+                
+                current_f = current_chunk_start
+                last_box = None
+                
+                for success, track_res in results_generator:
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+                    self.set_current_frame(current_f)
+                    QApplication.processEvents()
+                    if not success:
+                        QMessageBox.warning(self, 'Tracking Error', track_res)
+                        break
+                    tracked_boxes = track_res['boxes']
+                    tracked_polygons = track_res['polygons']
+                    if len(tracked_boxes) > 0:
+                        t_box = tracked_boxes[0]
+                        last_box = t_box
+                        polygon = tracked_polygons[0] if len(tracked_polygons) > 0 else None
+                        rect = QRect(t_box[0], t_box[1], t_box[2] - t_box[0], t_box[3] - t_box[1])
+                        if current_f not in self.frame_annotations:
+                            self.frame_annotations[current_f] = []
+                        default_attributes = {'Size': -1, 'Quality': -1}
+                        if hasattr(self, 'get_default_attributes_for_class'):
+                            default_attributes = self.get_default_attributes_for_class(target_class)
+                        ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if self.sam_interactive_dock.get_save_segmentation() else None)
+                        if should_blur:
+                            if polygon:
+                                self.blur_manager.add_polygon_region(current_f, polygon, self.canvas.blur_kernel)
+                            else:
+                                self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
+                            if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                                self.remove_annotations_under_blur(current_f)
+                        else:
+                            self.frame_annotations[current_f].append(ann)
+                    self.load_current_frame_annotations()
+                    self.update_frame_display()
+                    processed_count += 1
+                    progress.setValue(processed_count)
+                    current_f += step
+
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                    
+                chunk_done = (current_chunk_end <= end_f) if is_backward else (current_chunk_end >= end_f)
+                if is_sam_tracker and not chunk_done:
+                    if hasattr(manager, 'clear_session'):
+                        manager.clear_session()
+                    if last_box:
+                        chunk_box = [last_box[0], last_box[1], last_box[2], last_box[3]]
+                        chunk_points = None
+                        chunk_labels = None
+                        chunk_text_prompt = None
+                    else:
+                        QMessageBox.warning(self, 'Tracking Lost', f'Lost object at frame {current_f-step}. Aborting remaining frames.')
+                        break
+                        
+                current_chunk_start = current_chunk_end + step
+        except Exception as e:
+            logger.error(f"Error during SAM tracking: {e}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Tracking Error", f"An error occurred during tracking:\n{e}")
+        finally:
+            if progress is not None:
+                try:
+                    progress.close()
+                    progress.deleteLater()
+                except Exception:
+                    pass
+            QApplication.restoreOverrideCursor()
+            self.on_sam_clear_requested()
+            self.seek_to_frame(self.current_frame)
+            if cancelled:
+                self.statusBar.showMessage('SAM Tracking cancelled by user.', 4000)
+            else:
+                self.statusBar.showMessage('SAM processing completed.', 5000)
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.setFocus()
 
     @log_exceptions
     def viat_finish_integration(self):
@@ -2442,19 +2663,7 @@ class VideoAnnotationTool(QMainWindow):
             self.duplicate_frames_cache = {}
             self.load_video_file(next_video_path)
         else:
-            filename, _ = QFileDialog.getOpenFileName(self, 'Open Video', default_dir, 'Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)')
-            if filename:
-                self.project_file = None
-                self.image_dataset_info = None
-                self.is_image_dataset = False
-                self.canvas.annotations = []
-                self.frame_annotations = {}
-                self.deleted_frames = set()
-                self.deleted_annotations = {}
-                self.current_frame = 0
-                self.frame_hashes = {}
-                self.duplicate_frames_cache = {}
-                self.load_video_file(filename)
+            self._prompt_merge_and_open_next(default_dir)
 
     @log_exceptions
     def delete_video_and_next(self):
@@ -2528,12 +2737,62 @@ class VideoAnnotationTool(QMainWindow):
         if next_video_path:
             self.load_video_file(next_video_path)
         else:
-            filename, _ = QFileDialog.getOpenFileName(
-                self, 'Open Video', default_dir,
-                'Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)'
-            )
-            if filename:
-                self.load_video_file(filename)
+            self._prompt_merge_and_open_next(default_dir)
+
+    @log_exceptions
+    def _prompt_merge_and_open_next(self, default_dir):
+        reply = QMessageBox.question(self, 'End of Folder',
+            'No more unannotated videos found in this folder.\nDo you want to merge all annotated videos in this folder?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        
+        if reply == QMessageBox.Yes:
+            # Release current video capture to free resources
+            if getattr(self, 'cap', None):
+                self.cap.release()
+                self.cap = None
+
+            try:
+                import sys
+                from pathlib import Path
+                
+                # Make sure the root directory is in sys.path
+                root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                if root_path not in sys.path:
+                    sys.path.insert(0, root_path)
+                    
+                from many2single import merge_dataset_programmatic
+                
+                folder = Path(default_dir)
+                out_video = folder / 'outvideo.mp4'
+                out_labels = folder / 'outvideo.txt'
+                
+                self.statusBar.showMessage('Merging videos... This may take a while.')
+                QApplication.processEvents()
+                
+                success, msg = merge_dataset_programmatic(folder, out_video, out_labels)
+                
+                if success:
+                    QMessageBox.information(self, "Merge Successful", msg)
+                self.statusBar.showMessage('Merge complete', 5000)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                QMessageBox.critical(self, "Merge Error", f"Failed to merge videos:\n{e}")
+
+        # Ask for a new video
+        filename, _ = QFileDialog.getOpenFileName(self, 'Open Video', default_dir, 'Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)')
+        if filename:
+            self.project_file = None
+            self.image_dataset_info = None
+            self.is_image_dataset = False
+            self.canvas.annotations = []
+            self.frame_annotations = {}
+            self.deleted_frames = set()
+            self.deleted_annotations = {}
+            self.current_frame = 0
+            self.frame_hashes = {}
+            self.duplicate_frames_cache = {}
+            self.load_video_file(filename)
 
     @log_exceptions
     def open_scene_detect_for_video(self):
@@ -3772,11 +4031,13 @@ Would you like to load it?"""
     def update_frame_annotations(self):
         """Update annotations for the current frame."""
         if hasattr(self.canvas, 'annotations') and self.canvas.annotations:
-            self.frame_annotations[self.current_frame
-                ] = self.canvas.annotations.copy()
+            valid_annots = [a for a in self.canvas.annotations if not getattr(a, 'is_sam_preview', False)]
+            if valid_annots:
+                self.frame_annotations[self.current_frame] = valid_annots.copy()
+            elif self.current_frame in self.frame_annotations:
+                del self.frame_annotations[self.current_frame]
         if self.current_frame in self.frame_annotations:
-            self.canvas.annotations = self.frame_annotations[self.current_frame
-                ]
+            self.canvas.annotations = self.frame_annotations[self.current_frame]
         else:
             self.canvas.annotations = []
         self.update_annotation_list()
@@ -3785,6 +4046,10 @@ Would you like to load it?"""
     @log_exceptions
     def load_current_frame_annotations(self):
         """Load annotations for the current frame into the canvas."""
+        if hasattr(self.canvas, 'sam_preview_polygon'):
+            self.canvas.sam_preview_polygon = None
+            self.canvas.sam_preview_rect = None
+            self.canvas.sam_preview_class = None
         mgr = getattr(self, 'object_visibility_manager', None)
         if mgr and getattr(mgr, 'auto_erase_mode', False) and not getattr(self,
             '_in_auto_erase', False):
@@ -7404,10 +7669,9 @@ Do you want to scan the entire video now for duplicate frames?
         and keyPressEvent.
         """
         if event.type() == QEvent.KeyPress:
-            from PyQt5.QtWidgets import QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox
+            from PyQt5.QtWidgets import QLineEdit, QPlainTextEdit, QTextEdit
             focused = QApplication.focusWidget()
-            typing = isinstance(focused, (QLineEdit, QPlainTextEdit,
-                QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox))
+            typing = isinstance(focused, (QLineEdit, QPlainTextEdit, QTextEdit))
             mods = QApplication.keyboardModifiers()
             if event.key(
                 ) == Qt.Key_Right and not typing and not mods & Qt.ControlModifier:
@@ -9340,9 +9604,17 @@ Extracted {stats['boxes_extracted']} bounding boxes."""
     @log_exceptions
     def open_evaluation_dialog(self):
         """Open the Model & Dataset Evaluation Dialog."""
-        from viat.widgets.evaluation_dialog import EvaluationDialog
-        dlg = EvaluationDialog(self)
-        dlg.exec_()
+        try:
+            from viat.widgets.evaluation_dialog import EvaluationDialog
+            dlg = EvaluationDialog(self)
+            dlg.exec_()
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(
+                self,
+                "Evaluation Panel Error",
+                f"Failed to open Evaluation Dialog:\n{str(e)}\n\nDetails:\n{traceback.format_exc()}"
+            )
 
     @log_exceptions
     def view_labeler_analytics(self):

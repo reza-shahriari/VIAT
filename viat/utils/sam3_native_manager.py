@@ -116,8 +116,8 @@ class Sam3NativeManager:
         box_tuple = tuple(box) if box is not None else None
         prompt_changed = (box_tuple != self.current_box) or (text_prompt != self.current_text_prompt)
 
-        if self.current_session_id is None or img_hash != self.current_img_hash or prompt_changed:
-            # New image or new prompt, start new session to prevent prompt accumulation
+        if self.current_session_id is None or img_hash != self.current_img_hash:
+            # New image, start new session
             if self.current_session_id is not None:
                 try:
                     self.video_predictor.handle_request({"type": "close_session", "session_id": self.current_session_id})
@@ -135,8 +135,10 @@ class Sam3NativeManager:
             self.current_box = box_tuple
             self.current_text_prompt = text_prompt
         else:
-            # Same image and same box/text prompt (adding/refining points), clear points in the session
+            # Same image. Clear previous prompts in the session before adding new ones
             self.video_predictor.handle_request({"type": "reset_session", "session_id": self.current_session_id})
+            self.current_box = box_tuple
+            self.current_text_prompt = text_prompt
 
         IMG_HEIGHT, IMG_WIDTH = image_array.shape[:2]
 
@@ -297,6 +299,8 @@ class Sam3NativeManager:
         Tracks an object in video using SAM3.
         Yields (success_bool, {"polygons": [...], "boxes": [...]}) for each frame.
         """
+        import torch
+        
         if not self.video_predictor:
             yield False, "SAM3 Video Predictor not loaded."
             return

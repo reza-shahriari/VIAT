@@ -126,6 +126,9 @@ class VideoCanvas(QWidget):
         self.sam_prompt_points = []
         self.sam_prompt_labels = []
         self.sam_prompt_box = None
+        self.sam_preview_polygon = None
+        self.sam_preview_rect = None
+        self.sam_preview_class = None
 
         # Blur pen tool state
         self.blur_pen_active = False   # True when Blur Mode + Pen are both on
@@ -550,6 +553,38 @@ class VideoCanvas(QWidget):
                         painter.setBrush(Qt.NoBrush)
                         painter.drawRect(d_rect)
 
+                    # Draw SAM Preview Mask & Box Overlay
+                    if getattr(self, "sam_preview_polygon", None):
+                        from PyQt5.QtGui import QPolygonF
+                        from PyQt5.QtCore import QPointF
+                        poly = QPolygonF()
+                        for pt in self.sam_preview_polygon:
+                            disp_pt = self.image_to_display_point(pt[0], pt[1])
+                            if disp_pt:
+                                poly.append(QPointF(disp_pt))
+                        if not poly.isEmpty():
+                            preview_cls = getattr(self, "sam_preview_class", self.current_class)
+                            cls_color = self.class_colors.get(preview_cls, QColor(0, 255, 255))
+                            fill_color = QColor(cls_color.red(), cls_color.green(), cls_color.blue(), 110)
+                            painter.setBrush(QBrush(fill_color))
+                            painter.setPen(QPen(cls_color, 2, Qt.DashLine))
+                            painter.drawPolygon(poly)
+
+                    if getattr(self, "sam_preview_rect", None):
+                        d_rect = self.image_to_display_rect(self.sam_preview_rect)
+                        preview_cls = getattr(self, "sam_preview_class", self.current_class)
+                        cls_color = self.class_colors.get(preview_cls, QColor(0, 255, 255))
+                        pen = QPen(cls_color, 2, Qt.DashLine)
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(d_rect)
+                        # Draw preview badge
+                        painter.setPen(QPen(Qt.white))
+                        painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+                        badge_rect = QRect(d_rect.left(), max(0, d_rect.top() - 18), 90, 16)
+                        painter.drawRect(badge_rect)
+                        painter.drawText(badge_rect, int(Qt.AlignCenter), "SAM Preview")
+
                 # Draw REMOVED overlay banner if current frame is marked as deleted/removed
                 if hasattr(self, 'main_window') and self.main_window:
                     cur_frame = getattr(self.main_window, 'current_frame', -1)
@@ -589,6 +624,21 @@ class VideoCanvas(QWidget):
                             painter.setPen(QPen(QColor(255, 220, 220)))
                             sub_rect = QRect(banner_rect.left(), banner_rect.top() + 36, banner_rect.width(), 20)
                             painter.drawText(sub_rect, int(Qt.AlignCenter), "Press Shift+X to restore frame to dataset")
+
+                # Draw blur pen cursor if active and mouse is over canvas
+                if getattr(self, 'blur_pen_active', False) and getattr(self, 'blur_last_pos', None) and self.pixmap:
+                    display_rect = self.get_display_rect()
+                    if display_rect.width() > 0 and self.pixmap.width() > 0:
+                        scale_factor = display_rect.width() / self.pixmap.width()
+                        radius = int(self.blur_pen_size * scale_factor)
+                        
+                        painter.setPen(QPen(QColor(255, 255, 255, 200), 2, Qt.DashLine))
+                        painter.setBrush(QBrush(QColor(255, 255, 255, 40)))
+                        painter.drawEllipse(self.blur_last_pos, radius, radius)
+                        # Center dot
+                        painter.setBrush(QBrush(QColor(255, 255, 255, 200)))
+                        painter.setPen(Qt.NoPen)
+                        painter.drawEllipse(self.blur_last_pos, 2, 2)
             finally:
                 painter.end()
 
@@ -1108,6 +1158,17 @@ class VideoCanvas(QWidget):
                 self.update()
                 return
 
+            if is_sam_mode:
+                self.setFocus()
+                self.is_drawing = True
+                self.start_point = img_pos
+                self.current_point = img_pos
+                self.selected_annotation = None
+                if hasattr(self.main_window, "annotation_dock"):
+                    self.main_window.annotation_dock.select_annotation_in_list(None)
+                self.update()
+                return
+
             if self.is_auto_bbox_active():
                 self.is_drawing = True
                 self.start_point = img_pos
@@ -1377,31 +1438,45 @@ class VideoCanvas(QWidget):
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(0, lambda: self.main_window.edit_annotation(annotation_to_edit, focus_first_field=True))
 
+    def leaveEvent(self, event):
+        """Handle mouse leave events"""
+        if getattr(self, 'blur_pen_active', False):
+            self.blur_last_pos = None
+            self.update()
+        super().leaveEvent(event)
+
     def mouseMoveEvent(self, event):
         """Handle mouse move events"""
         if not self.pixmap:
             return
 
-        # Blur pen mode — drag to paint/erase
-        if getattr(self, 'blur_pen_active', False) and getattr(self, 'blur_drawing', False):
-            img_pos = self.display_to_image_pos(event.pos())
-            if img_pos and self.main_window:
-                blur_mgr = getattr(self.main_window, 'blur_manager', None)
-                cur_frame = getattr(self.main_window, 'current_frame', 0)
-                if blur_mgr is not None:
-                    if int(event.buttons()) & int(Qt.LeftButton):
-                        blur_mgr.add_pen_stroke(
-                            cur_frame, img_pos.x(), img_pos.y(),
-                            self.blur_pen_size, self.blur_kernel
-                        )
-                    elif int(event.buttons()) & int(Qt.RightButton):
-                        self._erase_blur_at(blur_mgr, cur_frame, img_pos)
-                    
-                    if hasattr(self.main_window, '_refresh_blur_display'):
-                        self.main_window._refresh_blur_display()
-                    else:
-                        self.update()
-            return
+        # Always track mouse position for blur pen cursor
+        if getattr(self, 'blur_pen_active', False):
+            self.blur_last_pos = event.pos()
+            # If not drawing, just update to show the cursor
+            if not getattr(self, 'blur_drawing', False):
+                self.update()
+                # Do not return here, we might want to check edges or hover effects
+            else:
+                # Blur pen mode — drag to paint/erase
+                img_pos = self.display_to_image_pos(event.pos())
+                if img_pos and self.main_window:
+                    blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                    cur_frame = getattr(self.main_window, 'current_frame', 0)
+                    if blur_mgr is not None:
+                        if int(event.buttons()) & int(Qt.LeftButton):
+                            blur_mgr.add_pen_stroke(
+                                cur_frame, img_pos.x(), img_pos.y(),
+                                self.blur_pen_size, self.blur_kernel
+                            )
+                        elif int(event.buttons()) & int(Qt.RightButton):
+                            self._erase_blur_at(blur_mgr, cur_frame, img_pos)
+                        
+                        if hasattr(self.main_window, '_refresh_blur_display'):
+                            self.main_window._refresh_blur_display()
+                        else:
+                            self.update()
+                return
 
         # Handle panning
         if self.panning and self.pan_start_pos:
@@ -1707,6 +1782,7 @@ class VideoCanvas(QWidget):
                         self.main_window.sam_interactive_dock.update_status(num_pos, num_neg, self.sam_prompt_box is not None)
                 self.start_point = None
                 self.current_point = None
+                self.setFocus()
                 return
 
             if event.button() == Qt.LeftButton and self.is_auto_bbox_active() and self.is_drawing:
@@ -2145,12 +2221,24 @@ class VideoCanvas(QWidget):
         self.update()
 
     def wheelEvent(self, event):
-        """Handle mouse wheel events for zooming"""
+        """Handle mouse wheel events for zooming and changing pen size"""
         if not self.pixmap:
             return
 
         # Get the amount of scroll
         delta = event.angleDelta().y()
+
+        modifiers = QApplication.keyboardModifiers()
+        if getattr(self, 'blur_pen_active', False) and (modifiers & Qt.ControlModifier or modifiers & Qt.ShiftModifier):
+            if delta > 0:
+                self.blur_pen_size = min(300, self.blur_pen_size + 5)
+            else:
+                self.blur_pen_size = max(5, self.blur_pen_size - 5)
+            
+            if hasattr(self.main_window, 'statusBar'):
+                self.main_window.statusBar.showMessage(f"Blur Pen Size: {self.blur_pen_size}", 2000)
+            self.update()
+            return
 
         # Calculate zoom factor based on scroll direction
         zoom_factor = 1.1 if delta > 0 else 0.9
