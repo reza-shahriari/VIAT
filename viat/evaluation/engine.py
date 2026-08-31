@@ -3,11 +3,13 @@
 import glob
 import os
 import csv
+import json
 import shutil
 import pathlib
 import time
 import re
 import copy
+from collections import defaultdict
 import cv2
 import numpy as np
 
@@ -268,6 +270,200 @@ class Evaluate():
                 shutil.rmtree(self.gt_path[0] +'/Track')
             cons.print('[bold cyan] tracker evaluated successfully :smiley:')
     
+    def _get_category_id_to_name(self):
+        """Build the real class-id -> class-name mapping from the COCO jsons
+        written by convert_to_json (falls back to target_classes order)."""
+        id_to_name = {}
+        for folder in list(self.gt_path) + list(self.det_path):
+            if not folder or not os.path.isdir(folder):
+                continue
+            for j_path in glob.glob(os.path.join(folder, '*.json')):
+                try:
+                    with open(j_path, 'r') as f:
+                        cats = json.load(f).get('categories', [])
+                except Exception:
+                    continue
+                for c in cats:
+                    try:
+                        cid = int(c.get('id'))
+                    except (TypeError, ValueError):
+                        continue
+                    name = c.get('name')
+                    if name is None:
+                        continue
+                    name = str(name)
+                    # Prefer a real (non-numeric) name over a str(id) fallback
+                    if cid not in id_to_name or id_to_name[cid].isdigit():
+                        id_to_name[cid] = name
+        if not id_to_name and isinstance(self.target_classes, list):
+            id_to_name = {i: str(n) for i, n in enumerate(self.target_classes)}
+        return id_to_name
+
+    def _compute_detection_diagnostics(self, out_folder, iou_thr=0.5):
+        """Match detections against GT over the per-video jsons and persist
+        per-detection records (confusion matrix, IoUs, calibration sweep,
+        aspect-ratio bias, spatial error coords) for the diagnostic plots."""
+        gt_paths = [self.gt_path] if isinstance(self.gt_path, str) else self.gt_path
+        det_paths = [self.det_path] if isinstance(self.det_path, str) else self.det_path
+        id_to_name = self._get_category_id_to_name()
+
+        # Only per-video jsons: aggregates would double-count detections
+        skip_names = {'all_video'}
+        skip_names.update(self.category_names or [])
+        if self.video_category_mappings:
+            skip_names.update(self.video_category_mappings.keys())
+
+        def _is_aggregate(name):
+            return (name in skip_names or name.endswith('_all_video')
+                    or name.endswith(('_slow', '_medium', '_fast')))
+
+        matched_records = []
+        fp_records = []
+        fn_records = []
+        canvas = [0, 0]
+
+        for det_dir in det_paths:
+            for gt_dir in gt_paths:
+                for det_json_path in glob.glob(os.path.join(det_dir, '*.json')):
+                    name = os.path.splitext(os.path.split(det_json_path)[1])[0]
+                    if _is_aggregate(name):
+                        continue
+                    gt_json_path = os.path.join(gt_dir, name + '.json')
+                    if not os.path.exists(gt_json_path):
+                        continue
+                    try:
+                        with open(gt_json_path, 'r') as f:
+                            gt_data = json.load(f)
+                        with open(det_json_path, 'r') as f:
+                            det_data = json.load(f)
+                    except Exception:
+                        continue
+
+                    for img in det_data.get('images', []) + gt_data.get('images', []):
+                        canvas[0] = max(canvas[0], int(img.get('width') or 0))
+                        canvas[1] = max(canvas[1], int(img.get('height') or 0))
+
+                    gts_by_img = defaultdict(list)
+                    for ann in gt_data.get('annotations', []):
+                        if ann.get('ignore'):
+                            continue
+                        gts_by_img[ann.get('image_id')].append(ann)
+
+                    dets_by_img = defaultdict(list)
+                    for ann in det_data.get('annotations', []):
+                        dets_by_img[ann.get('image_id')].append(ann)
+
+                    for img_id, dets in dets_by_img.items():
+                        gts = gts_by_img.get(img_id, [])
+                        gt_boxes = [a['bbox'] for a in gts]
+                        gt_xy = [[b[0], b[1], b[0] + b[2], b[1] + b[3]] for b in gt_boxes]
+                        gt_used = [False] * len(gts)
+
+                        for d in sorted(dets, key=lambda a: a.get('score', 0), reverse=True):
+                            db = d['bbox']
+                            dxy = [db[0], db[1], db[0] + db[2], db[1] + db[3]]
+                            d_cls = id_to_name.get(d.get('category_id'), str(d.get('category_id')))
+                            cx = db[0] + db[2] / 2.0
+                            cy = db[1] + db[3] / 2.0
+                            best_iou, best_g = 0.0, -1
+                            for gi, gxy in enumerate(gt_xy):
+                                if gt_used[gi]:
+                                    continue
+                                iou = jaccard(dxy, gxy)
+                                if iou > best_iou:
+                                    best_iou, best_g = iou, gi
+                            if best_g >= 0 and best_iou >= iou_thr:
+                                gt_used[best_g] = True
+                                g_cls = id_to_name.get(gts[best_g].get('category_id'),
+                                                       str(gts[best_g].get('category_id')))
+                                matched_records.append({'gt': g_cls, 'det': d_cls,
+                                                        'iou': float(best_iou),
+                                                        'score': float(d.get('score', 0)),
+                                                        'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3]})
+                            else:
+                                fp_records.append({'det': d_cls, 'score': float(d.get('score', 0)),
+                                                   'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3]})
+                        for gi, used in enumerate(gt_used):
+                            if not used:
+                                gb = gt_boxes[gi]
+                                g_cls = id_to_name.get(gts[gi].get('category_id'),
+                                                       str(gts[gi].get('category_id')))
+                                fn_records.append({'gt': g_cls, 'cx': gb[0] + gb[2] / 2.0,
+                                                   'cy': gb[1] + gb[3] / 2.0, 'w': gb[2], 'h': gb[3]})
+
+        if not (matched_records or fp_records or fn_records):
+            return
+
+        # Confusion matrix: rows = GT class, cols = predicted class, extra Background row/col
+        classes = sorted({r['gt'] for r in matched_records} | {r['gt'] for r in fn_records}
+                         | {r['det'] for r in matched_records} | {r['det'] for r in fp_records})
+        cls_idx = {c: i for i, c in enumerate(classes)}
+        n = len(classes)
+        cm = np.zeros((n + 1, n + 1))
+        for r in matched_records:
+            cm[cls_idx[r['gt']], cls_idx[r['det']]] += 1
+        for r in fp_records:
+            cm[n, cls_idx[r['det']]] += 1
+        for r in fn_records:
+            cm[cls_idx[r['gt']], n] += 1
+
+        # Confidence sweep: precision/recall per threshold + ECE + best-F1 threshold
+        all_dets = matched_records + fp_records
+        total_gt = len(matched_records) + len(fn_records)
+        confs = np.array([r['score'] for r in all_dets]) if all_dets else np.array([])
+        is_tp = np.array([True] * len(matched_records) + [False] * len(fp_records))
+        thresholds = np.round(np.arange(0.05, 1.0, 0.05), 2)
+        precisions, recalls, f1s = [], [], []
+        for t in thresholds:
+            sel = confs >= t
+            tp_sel = int(is_tp[sel].sum())
+            n_sel = int(sel.sum())
+            p = tp_sel / n_sel if n_sel else 0.0
+            rc = tp_sel / total_gt if total_gt else 0.0
+            precisions.append(p)
+            recalls.append(rc)
+            f1s.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
+        optimal_thr = float(thresholds[int(np.argmax(f1s))]) if f1s else 0.5
+        ece = 0.0
+        if len(confs):
+            for lo in np.arange(0.0, 1.0, 0.1):
+                hi = lo + 0.1
+                in_bin = (confs >= lo) & (confs < hi) if hi < 1.0 else (confs >= lo) & (confs <= 1.0)
+                if in_bin.any():
+                    ece += abs(float(is_tp[in_bin].mean()) - float(confs[in_bin].mean())) \
+                           * (int(in_bin.sum()) / len(confs))
+
+        # Aspect-ratio bias: error (FP) rate per W/H bin
+        ratio_edges = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, np.inf]
+        ratio_mids = [0.125, 0.375, 0.625, 0.875, 1.25, 1.75, 2.5, 3.5, 6.0]
+        ar_ratios, ar_errors = [], []
+        if all_dets:
+            ratios = np.array([r['w'] / r['h'] if r['h'] else 0.0 for r in all_dets])
+            for bi in range(len(ratio_edges) - 1):
+                in_bin = (ratios >= ratio_edges[bi]) & (ratios < ratio_edges[bi + 1])
+                if in_bin.any():
+                    ar_ratios.append(ratio_mids[bi])
+                    ar_errors.append(float((is_tp[in_bin] == 0).mean() * 100))
+
+        diag = {
+            'classes': classes,
+            'confusion': cm.tolist(),
+            'ious': [r['iou'] for r in matched_records],
+            'calibration': {
+                'confidences': thresholds.tolist(),
+                'precisions': precisions,
+                'recalls': recalls,
+                'ece_score': float(ece),
+                'optimal_thr': optimal_thr,
+            },
+            'aspect_ratio': {'ratios': ar_ratios, 'error_rates': ar_errors},
+            'fp_coords': [[r['cx'], r['cy']] for r in fp_records],
+            'fn_coords': [[r['cx'], r['cy']] for r in fn_records],
+            'canvas_size': [canvas[0] or 1920, canvas[1] or 1080],
+        }
+        with open(os.path.join(out_folder, 'diagnostics.json'), 'w') as f:
+            json.dump(diag, f)
+
     def eval_detect(self):
         def evaluate_detector(dets_path, gt_path):
             dets = coco2bb(dets_path, BBType.DETECTED)
@@ -345,20 +541,27 @@ class Evaluate():
         out_folder = self.det_path[0]+'/evaluation_result'
         pathlib.Path(out_folder).mkdir(parents=True, exist_ok=True)
 
+        # Persist real per-detection diagnostics for the advanced diagnostic plots
+        try:
+            self._compute_detection_diagnostics(out_folder)
+        except Exception as diag_err:
+            cons.print(f"[yellow]Warning: detection diagnostics failed: {diag_err}[/yellow]")
+
         # Generate per-class and per-size mAP plots from summary data
         target_summary_data = all_data if len(all_data) > 0 else (new_list[0] if len(new_list) > 0 else {})
         if target_summary_data:
             per_class_m = target_summary_data.get('per_class_metrics', {})
             per_size_m = target_summary_data.get('per_size_metrics', {})
 
-            # Map numeric category IDs to category names if available
+            # Map numeric category IDs to the real class names from the COCO categories
+            class_id_to_name = self._get_category_id_to_name()
             named_class_m = {}
             for c_id, metrics in per_class_m.items():
-                if isinstance(c_id, int) and 0 <= c_id - 1 < len(self.category_names):
-                    c_name = self.category_names[c_id - 1]
-                else:
-                    c_name = str(c_id)
-                named_class_m[c_name] = metrics
+                try:
+                    c_key = int(c_id)
+                except (TypeError, ValueError):
+                    c_key = c_id
+                named_class_m[class_id_to_name.get(c_key, str(c_id))] = metrics
 
             if named_class_m:
                 try:
@@ -370,6 +573,37 @@ class Evaluate():
                     plot_map_by_size(per_size_m, os.path.join(out_folder, 'map_by_size.png'))
                 except Exception:
                     pass
+
+            # Persist named per-class & per-size metrics for the UI analytics view
+            def _clean(v):
+                if v is None:
+                    return None
+                if isinstance(v, np.generic):
+                    v = v.item()
+                try:
+                    if np.isnan(v):
+                        return None
+                except (TypeError, ValueError):
+                    pass
+                return v
+
+            named_per_class = {
+                c_name: {
+                    'AP50': _clean(m.get('AP50')),
+                    'AP': _clean(m.get('AP')),
+                    'TP': _clean(m.get('TP')),
+                    'FP': _clean(m.get('FP')),
+                    'FN': _clean(m.get('FN')),
+                }
+                for c_name, m in named_class_m.items()
+            }
+            named_sizes = {s_name: _clean(s_val) for s_name, s_val in per_size_m.items()}
+            try:
+                with open(os.path.join(out_folder, 'per_class_metrics.json'), 'w') as f:
+                    json.dump({'per_class_metrics': named_per_class,
+                               'per_size_metrics': named_sizes}, f, indent=2)
+            except Exception as e:
+                cons.print(f"[yellow]Warning: could not save per-class metrics: {e}[/yellow]")
 
         if HAS_PANDAS and pd is not None:
             df = pd.DataFrame(new_list)

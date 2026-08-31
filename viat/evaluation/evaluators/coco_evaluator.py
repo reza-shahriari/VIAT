@@ -139,12 +139,15 @@ def get_coco_summary(groundtruth_bbs, detected_bbs):
         FN = FN[0]-TP
     else:
         FN =0
-    TPs = [x['TPs'] for x in full[0.50]][0]
-    FPs = [x['FPs'] for x in full[0.50]][0]
-    FNs = [x['FNs'] for x in full[0.50]][0]
-    F1 = [x['F1'] for x in full[0.50]][0]
-    score = [x['score'] for x in full[0.50]][0]
-    argmax = [x['argmax'] for x in full[0.50]][0]
+    # Max-F1 stats are None for classes with no ground-truth positives or no
+    # valid detections; use the first class that has them, else fall back
+    rep = next((x for x in full[0.50] if x.get('argmax') is not None), None)
+    TPs = rep['TPs'] if rep is not None else 0
+    FPs = rep['FPs'] if rep is not None else 0
+    FNs = rep['FNs'] if rep is not None else 0
+    F1 = rep['F1'] if rep is not None else None
+    score = rep['score'] if rep is not None else None
+    argmax = rep['argmax'] if rep is not None else None
     # score = [x['Scores'] for x in full[0.50] if x['Scores'] is not None][0][argmax]
     AP75 = np.mean([x['AP'] for x in full[0.75] if x['AP'] is not None])
     AP = np.mean([x['AP'] for k in full for x in full[k] if x['AP'] is not None])
@@ -287,7 +290,13 @@ def get_coco_summary(groundtruth_bbs, detected_bbs):
         c_ap50 = x['AP']
         c_ap_list = [entry['AP'] for k in full for entry in full[k] if entry['class'] == c_id and entry['AP'] is not None]
         c_ap = np.mean(c_ap_list) if len(c_ap_list) > 0 else np.nan
-        per_class_metrics[c_id] = {'AP50': c_ap50, 'AP': c_ap}
+        per_class_metrics[c_id] = {
+            'AP50': c_ap50,
+            'AP': c_ap,
+            'TP': x.get('TPs'),
+            'FP': x.get('FPs'),
+            'FN': x.get('FNs'),
+        }
 
     per_size_metrics = {
         'Small (<32²)': APsmall,
@@ -296,8 +305,8 @@ def get_coco_summary(groundtruth_bbs, detected_bbs):
     }
 
     return {
-        "Precision": full[0.5][0]["precision"][argmax] if argmax is not None and len(full[0.5]) > 0 else 0.0,
-        "Recall": full[0.5][0]["recall"][argmax] if argmax is not None and len(full[0.5]) > 0 else 0.0,
+        "Precision": rep["precision"][rep["argmax"]] if rep is not None else 0.0,
+        "Recall": rep["recall"][rep["argmax"]] if rep is not None else 0.0,
         "F1": F1,
         "AP": AP,
         "AP40": AP40,
@@ -592,7 +601,15 @@ def _compute_ap_recall(scores, matched, NP, recall_thresholds=None):
             "interpolated recall": None,
             "total positives": None,
             "TP": None,
-            "FP": None
+            "FP": None,
+            "F1": None,
+            "Matched": [],
+            "Scores": [],
+            "TPs": None,
+            "FPs": None,
+            "FNs": None,
+            "score": None,
+            "argmax": None,
         }
 
     # by default evaluate on 101 recall levels

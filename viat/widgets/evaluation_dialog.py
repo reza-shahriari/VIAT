@@ -43,7 +43,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QFont, QTextCursor, QPixmap
 
-# Remove the sys.path.insert for the old evaluation folder
 from viat.evaluation.utils.yaml_parser import parse_yolo_yaml, scan_dataset_classes
 from viat.evaluation.utils.class_merger import DetailedAnalyticsEngine
 from viat.evaluation.utils.advanced_diagnostics import AdvancedDiagnosticsEngine
@@ -108,7 +107,7 @@ class EvaluateWorkerThread(QThread):
             results['unmerged_mAP'] = 0.0
             results['merged_mAP'] = 0.0
             results['class_metrics'] = {}
-            
+
             results['size_metrics'] = {
                 'Small': {'ap50': 0.0},
                 'Medium': {'ap50': 0.0},
@@ -117,10 +116,11 @@ class EvaluateWorkerThread(QThread):
 
             video_metrics = []
             det_dir = self.evaluate_instance.det_path[0] if hasattr(self.evaluate_instance, 'det_path') and self.evaluate_instance.det_path else ""
-            eval_det_csv = os.path.join(det_dir, 'evaluation_result', 'eval_detection.csv')
-            
+            eval_result_dir = os.path.join(det_dir, 'evaluation_result') if det_dir else ""
+            eval_det_csv = os.path.join(eval_result_dir, 'eval_detection.csv')
+
             if os.path.exists(eval_det_csv):
-                self.results_dir = os.path.join(det_dir, 'evaluation_result', 'plots')
+                self.results_dir = os.path.join(eval_result_dir, 'plots')
                 import csv
                 with open(eval_det_csv, 'r') as f:
                     reader = csv.reader(f)
@@ -131,36 +131,58 @@ class EvaluateWorkerThread(QThread):
                         metrics = dict(zip(headers[1:], row[1:]))
                         try:
                             ap50 = float(metrics.get('AP50', 0) or 0)
-                            ap75 = float(metrics.get('AP75', 0) or 0)
-                            tp = int(float(metrics.get('TP', 0) or 0))
-                            fp = int(float(metrics.get('FP', 0) or 0))
-                            fn = int(float(metrics.get('FN', 0) or 0))
                         except Exception:
-                            ap50, ap75, tp, fp, fn = 0, 0, 0, 0, 0
+                            ap50 = 0
 
                         if name == 'all_video':
                             results['unmerged_mAP'] = ap50
                             results['merged_mAP'] = ap50
-                            if not self.evaluate_instance.category_names:
-                                results['class_metrics']['object'] = {
-                                    'ap50': ap50, 'ap75': ap75, 'small_ap': ap50, 'med_ap': ap50, 'large_ap': ap50, 'tp': tp, 'fp': fp, 'fn': fn
-                                }
                             continue
                         elif name.endswith('_all_video'):
-                            # size_metrics can be updated if we had small/med/large overall video
                             continue
-                        
-                        if self.evaluate_instance.category_names and name in self.evaluate_instance.category_names:
-                            results['class_metrics'][name] = {
-                                'ap50': ap50, 'ap75': ap75, 'small_ap': ap50, 'med_ap': ap50, 'large_ap': ap50, 'tp': tp, 'fp': fp, 'fn': fn
-                            }
+
                         video_metrics.append({'name': name, 'metrics': metrics})
 
-            # If no classes found (e.g. tracking only), fallback gracefully
+            # Real per-class & per-size metrics written by the engine
+            per_class_file = os.path.join(eval_result_dir, 'per_class_metrics.json') if eval_result_dir else ""
+            if per_class_file and os.path.exists(per_class_file):
+                try:
+                    import json as _json
+                    with open(per_class_file, 'r') as f:
+                        pc_data = _json.load(f)
+                    results['class_metrics'] = {
+                        c_name: {
+                            'ap50': float(c.get('AP50') or 0),
+                            'ap': float(c.get('AP') or 0),
+                            'tp': int(c.get('TP') or 0),
+                            'fp': int(c.get('FP') or 0),
+                            'fn': int(c.get('FN') or 0),
+                        }
+                        for c_name, c in pc_data.get('per_class_metrics', {}).items()
+                    }
+                    size_by_prefix = {}
+                    for s_name, s_val in pc_data.get('per_size_metrics', {}).items():
+                        prefix = str(s_name).split(' ')[0]
+                        if s_val is not None:
+                            try:
+                                size_by_prefix[prefix] = float(s_val)
+                            except (TypeError, ValueError):
+                                pass
+                    if size_by_prefix:
+                        results['size_metrics'] = {
+                            'Small': {'ap50': size_by_prefix.get('Small', 0.0)},
+                            'Medium': {'ap50': size_by_prefix.get('Medium', 0.0)},
+                            'Large': {'ap50': size_by_prefix.get('Large', 0.0)},
+                        }
+                except Exception as parse_err:
+                    self.log_signal.emit(f"\n[WARNING] Could not parse per_class_metrics.json: {parse_err}\n")
+
+            # Graceful fallback only if the engine produced no per-class data
             if not results['class_metrics']:
-                cats = self.evaluate_instance.category_names or ['object']
+                cats = [c for c in (self.evaluate_instance.target_classes or ['object'])
+                        if c != '__IGNORE__'] or ['object']
                 for cat in cats:
-                    results['class_metrics'][cat] = {'ap50': 0, 'ap75': 0, 'small_ap': 0, 'med_ap': 0, 'large_ap': 0, 'tp': 0, 'fp': 0, 'fn': 0}
+                    results['class_metrics'][cat] = {'ap50': 0, 'ap': 0, 'tp': 0, 'fp': 0, 'fn': 0}
 
             results['video_metrics'] = video_metrics
 
@@ -184,46 +206,61 @@ class EvaluateWorkerThread(QThread):
             except Exception as chart_err:
                 self.log_signal.emit(f"\n[WARNING] Could not generate basic analytics charts: {str(chart_err)}\n")
 
-            # Generate 6 Advanced Diagnostic Plots
+            # Generate Advanced Diagnostic Plots from the engine's real per-detection data
             try:
                 import numpy as np
-                cats = list(results['class_metrics'].keys()) if results['class_metrics'] else ['object']
-                num_classes = len(cats)
-                dummy_cm = np.random.randint(5, 100, size=(num_classes + 1, num_classes + 1))
-                np.fill_diagonal(dummy_cm, np.random.randint(100, 300, size=num_classes + 1))
-                dummy_cm[-1, -1] = 0
-                AdvancedDiagnosticsEngine.generate_confusion_matrix_plot(
-                    cm=dummy_cm,
-                    class_names=cats,
-                    save_path=cm_path
-                )
-                AdvancedDiagnosticsEngine.generate_calibration_plot(
-                    confidences=np.linspace(0.1, 0.95, 10),
-                    precisions=np.array([0.45, 0.58, 0.68, 0.76, 0.82, 0.88, 0.91, 0.94, 0.96, 0.98]),
-                    recalls=np.array([0.95, 0.92, 0.88, 0.82, 0.75, 0.68, 0.58, 0.45, 0.32, 0.18]),
-                    ece_score=0.042,
-                    optimal_thr=0.48,
-                    save_path=calib_path
-                )
-                AdvancedDiagnosticsEngine.generate_iou_distribution_plot(
-                    ious=np.random.beta(8, 2, 400) * 0.5 + 0.5,
-                    save_path=iou_path
-                )
-                AdvancedDiagnosticsEngine.generate_aspect_ratio_plot(
-                    aspect_ratios=[0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 2.8, 3.5],
-                    error_rates=[32, 18, 12, 9, 11, 15, 24, 38, 48],
-                    save_path=ar_path
-                )
-                AdvancedDiagnosticsEngine.generate_tracking_error_plot(
-                    tracking_counts={'id_swaps': 14, 'track_loss': 32, 'fragmentation': 21, 'false_inceptions': 9},
-                    save_path=track_path
-                )
-                AdvancedDiagnosticsEngine.generate_spatial_error_heatmap(
-                    fp_coords=list(zip(np.random.randint(100, 1800, 120), np.random.randint(50, 1000, 120))),
-                    fn_coords=list(zip(np.random.randint(100, 1800, 90), np.random.randint(50, 1000, 90))),
-                    canvas_size=(1920, 1080),
-                    save_path=spatial_path
-                )
+                diag_file = os.path.join(eval_result_dir, 'diagnostics.json') if eval_result_dir else ""
+                diag = None
+                if diag_file and os.path.exists(diag_file):
+                    try:
+                        import json as _json
+                        with open(diag_file, 'r') as f:
+                            diag = _json.load(f)
+                    except Exception as diag_parse_err:
+                        self.log_signal.emit(f"\n[WARNING] Could not parse diagnostics.json: {str(diag_parse_err)}\n")
+
+                if diag:
+                    classes = diag.get('classes', [])
+                    cm = np.array(diag.get('confusion', []), dtype=float)
+                    if len(classes) and cm.size:
+                        AdvancedDiagnosticsEngine.generate_confusion_matrix_plot(
+                            cm=cm,
+                            class_names=classes,
+                            save_path=cm_path
+                        )
+                    calib = diag.get('calibration', {})
+                    if calib.get('confidences'):
+                        AdvancedDiagnosticsEngine.generate_calibration_plot(
+                            confidences=np.array(calib['confidences']),
+                            precisions=np.array(calib['precisions']),
+                            recalls=np.array(calib['recalls']),
+                            ece_score=calib.get('ece_score', 0.0),
+                            optimal_thr=calib.get('optimal_thr', 0.5),
+                            save_path=calib_path
+                        )
+                    if diag.get('ious'):
+                        AdvancedDiagnosticsEngine.generate_iou_distribution_plot(
+                            ious=np.array(diag['ious']),
+                            save_path=iou_path
+                        )
+                    ar = diag.get('aspect_ratio', {})
+                    if ar.get('ratios'):
+                        AdvancedDiagnosticsEngine.generate_aspect_ratio_plot(
+                            aspect_ratios=ar['ratios'],
+                            error_rates=ar['error_rates'],
+                            save_path=ar_path
+                        )
+                    fp_coords = diag.get('fp_coords', [])
+                    fn_coords = diag.get('fn_coords', [])
+                    if fp_coords or fn_coords:
+                        AdvancedDiagnosticsEngine.generate_spatial_error_heatmap(
+                            fp_coords=fp_coords,
+                            fn_coords=fn_coords,
+                            canvas_size=tuple(diag.get('canvas_size', (1920, 1080))),
+                            save_path=spatial_path
+                        )
+                else:
+                    self.log_signal.emit("\n[WARNING] No diagnostics.json produced by the engine; advanced diagnostic plots were skipped.\n")
             except Exception as diag_err:
                 self.log_signal.emit(f"\n[WARNING] Could not generate advanced diagnostic charts: {str(diag_err)}\n")
 
@@ -237,7 +274,7 @@ class EvaluateWorkerThread(QThread):
             results['track_path'] = track_path
             results['spatial_path'] = spatial_path
 
-            self.log_signal.emit("\n[SUCCESS] Evaluation & All 6 Diagnostic Analytics Finished Successfully!\n")
+            self.log_signal.emit("\n[SUCCESS] Evaluation & Analytics Finished Successfully!\n")
             self.finished_signal.emit(True, "Evaluation completed!", results)
 
 
@@ -769,8 +806,8 @@ class EvaluationDialog(QDialog):
 
         # Detailed Stats Table
         layout.addWidget(QLabel("<b>3. Detailed Per-Class Performance Summary Table:</b>"))
-        self.table_stats = QTableWidget(0, 8)
-        self.table_stats.setHorizontalHeaderLabels(["Class Name", "AP50", "AP75", "Small AP", "Medium AP", "Large AP", "TP", "FP"])
+        self.table_stats = QTableWidget(0, 6)
+        self.table_stats.setHorizontalHeaderLabels(["Class Name", "AP50", "AP", "TP", "FP", "FN"])
         self.table_stats.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_stats.setMinimumHeight(200)
         layout.addWidget(self.table_stats)
@@ -1226,12 +1263,10 @@ class EvaluationDialog(QDialog):
                 self.table_stats.insertRow(r)
                 self.table_stats.setItem(r, 0, QTableWidgetItem(c_name))
                 self.table_stats.setItem(r, 1, QTableWidgetItem(f"{c_data.get('ap50', 0)*100:.1f}%"))
-                self.table_stats.setItem(r, 2, QTableWidgetItem(f"{c_data.get('ap75', 0)*100:.1f}%"))
-                self.table_stats.setItem(r, 3, QTableWidgetItem(f"{c_data.get('small_ap', 0)*100:.1f}%"))
-                self.table_stats.setItem(r, 4, QTableWidgetItem(f"{c_data.get('med_ap', 0)*100:.1f}%"))
-                self.table_stats.setItem(r, 5, QTableWidgetItem(f"{c_data.get('large_ap', 0)*100:.1f}%"))
-                self.table_stats.setItem(r, 6, QTableWidgetItem(str(c_data.get('tp', 0))))
-                self.table_stats.setItem(r, 7, QTableWidgetItem(str(c_data.get('fp', 0))))
+                self.table_stats.setItem(r, 2, QTableWidgetItem(f"{c_data.get('ap', 0)*100:.1f}%"))
+                self.table_stats.setItem(r, 3, QTableWidgetItem(str(c_data.get('tp', 0))))
+                self.table_stats.setItem(r, 4, QTableWidgetItem(str(c_data.get('fp', 0))))
+                self.table_stats.setItem(r, 5, QTableWidgetItem(str(c_data.get('fn', 0))))
 
             # Populate Video Stats Table
             video_metrics = results.get('video_metrics', [])
