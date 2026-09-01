@@ -1,5 +1,6 @@
-﻿import os
+import os
 import cv2
+import numpy as np
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QMessageBox, QGroupBox, QLineEdit, QProgressBar,

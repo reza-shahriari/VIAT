@@ -12,6 +12,7 @@ Supports:
 import os
 import sys
 import glob
+import numpy as np
 from PyQt5.QtWidgets import (
     QDialog,
     QVBoxLayout,
