@@ -126,9 +126,44 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.chk_save_seg)
 
         # Blur Tracked Objects
+        self.blur_group = QGroupBox("Blur Options")
+        blur_layout = QVBoxLayout()
+        blur_layout.setContentsMargins(5, 5, 5, 5)
+        
         self.chk_blur_tracked = QCheckBox("Automatically Blur Tracked Objects")
         self.chk_blur_tracked.setChecked(False)
-        self.layout.addWidget(self.chk_blur_tracked)
+        blur_layout.addWidget(self.chk_blur_tracked)
+
+        self.blur_options_widget = QWidget()
+        blur_options_layout = QVBoxLayout(self.blur_options_widget)
+        blur_options_layout.setContentsMargins(15, 0, 0, 0)
+        
+        # Blur Shape: Segmentation vs Bounding Box
+        shape_layout = QHBoxLayout()
+        shape_layout.addWidget(QLabel("Blur Shape:"))
+        self.cmb_blur_shape = QComboBox()
+        self.cmb_blur_shape.addItems(["Segmentation Mask", "Bounding Box (Rectangle)"])
+        self.cmb_blur_shape.setToolTip("Choose whether to blur according to the exact polygon mask or rectangular bounding box.")
+        shape_layout.addWidget(self.cmb_blur_shape)
+        blur_options_layout.addLayout(shape_layout)
+        
+        # Blur Margin
+        margin_layout = QHBoxLayout()
+        margin_layout.addWidget(QLabel("Blur Margin:"))
+        self.spin_blur_margin = QSpinBox()
+        self.spin_blur_margin.setRange(0, 500)
+        self.spin_blur_margin.setValue(0)
+        self.spin_blur_margin.setSuffix(" px")
+        self.spin_blur_margin.setToolTip("Additional margin in pixels to expand the blur mask or rectangle.")
+        margin_layout.addWidget(self.spin_blur_margin)
+        blur_options_layout.addLayout(margin_layout)
+        
+        self.blur_options_widget.setVisible(False)
+        self.chk_blur_tracked.toggled.connect(self.blur_options_widget.setVisible)
+        
+        blur_layout.addWidget(self.blur_options_widget)
+        self.blur_group.setLayout(blur_layout)
+        self.layout.addWidget(self.blur_group)
 
         # Custom Range
         self.range_widget = QWidget()
@@ -289,22 +324,14 @@ class SAMInteractiveDock(QDockWidget):
                         e_val = self.spin_end.value() - 1
                 
             if direction == "backward":
-                start_f = self.current_frame
+                start_f = e_val
                 end_f = s_val
-                if start_f < end_f:
-                    QMessageBox.warning(self, "Invalid Backward Range", 
-                        f"Current frame ({self.current_frame + 1}) must be >= range start ({s_val + 1}) for backward tracking.")
-                    return
             elif direction == "bidirectional":
                 start_f = s_val
                 end_f = e_val
             else: # forward
-                start_f = self.current_frame
+                start_f = s_val
                 end_f = e_val
-                if start_f > end_f:
-                    QMessageBox.warning(self, "Invalid Forward Range", 
-                        f"Current frame ({self.current_frame + 1}) must be <= range end ({e_val + 1}) for forward tracking.")
-                    return
 
         self.track_requested.emit(strategy, start_f, end_f, direction)
 
@@ -313,6 +340,18 @@ class SAMInteractiveDock(QDockWidget):
 
     def get_blur_tracked_objects(self):
         return self.chk_blur_tracked.isChecked()
+
+    def get_blur_shape(self):
+        """Returns 'segmentation' or 'bbox'."""
+        if not hasattr(self, 'cmb_blur_shape'):
+            return "segmentation"
+        return "bbox" if "Bounding Box" in self.cmb_blur_shape.currentText() else "segmentation"
+
+    def get_blur_margin(self):
+        """Returns blur margin in pixels."""
+        if not hasattr(self, 'spin_blur_margin'):
+            return 0
+        return self.spin_blur_margin.value()
 
     def get_text_prompt(self):
         return self.txt_prompt.text().strip()

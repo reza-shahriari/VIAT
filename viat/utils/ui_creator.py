@@ -34,6 +34,8 @@ from viat.widgets.class_frames_dock import ClassFramesManagerDock
 from viat.widgets.video_manager_dock import VideoManagerDock
 from viat.widgets.crop_settings_dock import CropSettingsDock
 from viat.widgets.clip_cuts_dock import ClipCutsDock
+from viat.widgets.evaluation_inspector_dock import EvaluationInspectorDock
+
 
 
 class UICreator:
@@ -338,6 +340,14 @@ class UICreator:
         )
         view_menu.addAction(self.toggle_crop_settings_action)
 
+        # Evaluation Inspector Dock
+        self.toggle_eval_inspector_action = QAction("Evaluation Inspector Panel", self.main_window, checkable=True)
+        self.toggle_eval_inspector_action.setChecked(False)
+        self.toggle_eval_inspector_action.triggered.connect(
+            _make_right_dock_toggler('evaluation_inspector_dock')
+        )
+        view_menu.addAction(self.toggle_eval_inspector_action)
+
         view_menu.addSeparator()
 
         # Toggle Video Manager (Left Area)
@@ -465,7 +475,7 @@ class UICreator:
 
         auto_remove_blur_action = QAction("Auto-Remove BBoxes Under Blur (>70%)", self.main_window, checkable=True)
         auto_remove_blur_action.setToolTip("Automatically remove bounding boxes that are more than 70% covered by a blur region")
-        auto_remove_blur_action.setChecked(getattr(self.main_window, 'auto_remove_under_blur', False))
+        auto_remove_blur_action.setChecked(getattr(self.main_window, 'auto_remove_under_blur', True))
         auto_remove_blur_action.triggered.connect(
             lambda checked: setattr(self.main_window, 'auto_remove_under_blur', checked)
         )
@@ -793,11 +803,18 @@ class UICreator:
         )
         self.main_window.visual_inspector_dock.hide() # Hidden by default
 
+        # Evaluation Inspector dock
+        self.main_window.evaluation_inspector_dock = EvaluationInspectorDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.evaluation_inspector_dock
+        )
+        self.main_window.evaluation_inspector_dock.hide() # Hidden by default
 
         # Tabify all right side docks together so they share a single tabbed container
         right_docks = [
             self.main_window.annotation_dock,
             self.main_window.class_dock,
+            self.main_window.evaluation_inspector_dock,
             self.main_window.sam_interactive_dock,
             self.main_window.empty_frames_dock,
             self.main_window.class_frames_dock,
@@ -825,6 +842,7 @@ class UICreator:
         mappings = [
             (getattr(self.main_window, 'annotation_dock', None), getattr(self, 'toggle_annotations_action', None)),
             (getattr(self.main_window, 'class_dock', None), getattr(self, 'toggle_classes_action', None)),
+            (getattr(self.main_window, 'evaluation_inspector_dock', None), getattr(self, 'toggle_eval_inspector_action', None)),
             (getattr(self.main_window, 'sam_interactive_dock', None), getattr(self, 'toggle_sam_action', None)),
             (getattr(self.main_window, 'empty_frames_dock', None), getattr(self, 'toggle_empty_frames_action', None)),
             (getattr(self.main_window, 'class_frames_dock', None), getattr(self, 'toggle_class_frames_action', None)),

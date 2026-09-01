@@ -1,4 +1,4 @@
-﻿"""Label-format plugin registry for VIAT.
+"""Label-format plugin registry for VIAT.
 
 To add a new format:
   1. Create ``your_format.py`` with a subclass of :class:`LabelFormat`.
@@ -15,10 +15,12 @@ from .coco import CocoLabelFormat
 from .pascal_voc import PascalVocLabelFormat
 from .createml import CreateMlLabelFormat
 from .viat_json import ViatJsonLabelFormat
+from .visdrone import VisDroneLabelFormat, VISDRONE_CLASSES, VISDRONE_TARGET_CLASSES
 
 # Registry: name -> class. Order here is the default detection priority.
 FORMATS = {
     YoloLabelFormat.name: YoloLabelFormat,
+    VisDroneLabelFormat.name: VisDroneLabelFormat,
     PascalVocLabelFormat.name: PascalVocLabelFormat,
     CocoLabelFormat.name: CocoLabelFormat,
     CreateMlLabelFormat.name: CreateMlLabelFormat,
@@ -28,7 +30,7 @@ FORMATS = {
 # Detection priority: when scanning a folder for the format, try these first.
 # YOLO is the Roboflow default, so it gets top priority.
 # viat_json is last (it's for video, not image datasets).
-PRIORITY = ["yolo", "pascal_voc", "coco", "createml", "viat_json"]
+PRIORITY = ["yolo", "visdrone", "pascal_voc", "coco", "createml", "viat_json"]
 
 
 def get_format(name):

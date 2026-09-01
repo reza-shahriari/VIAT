@@ -137,22 +137,22 @@ def detect_folder_type(folder_path: str) -> str:
                             return "dataset"
                 except Exception:
                     pass
-    # images/labels split
-    if "images" in entries and "labels" in entries:
+    # images/labels or images/annotations split
+    if "images" in entries and ("labels" in entries or "annotations" in entries):
         return "dataset"
     # splits
     lower = {e.lower() for e in entries}
-    if any(s in lower for s in ("train", "valid", "val", "test")):
+    if any(s in lower or any(k in e.lower() for k in ("train", "valid", "val", "test")) for s in ("train", "valid", "val", "test") for e in entries):
         # but only treat as dataset if at least one split has images or
-        # an images/labels structure
-        for s in ("train", "valid", "val", "test"):
-            sp = os.path.join(folder_path, s)
+        # an images/labels/annotations structure
+        for e in entries:
+            sp = os.path.join(folder_path, e)
             if os.path.isdir(sp):
                 try:
                     sub = set(os.listdir(sp))
                 except OSError:
                     continue
-                if sub & {"images", "labels"} or any(
+                if sub & {"images", "labels", "annotations"} or any(
                     f.lower().endswith(IMAGE_EXTENSIONS) for f in sub
                 ):
                     return "dataset"
@@ -193,6 +193,12 @@ def scan_dataset(folder_path: str) -> DatasetInfo:
             fmt_votes[s.label_format] = fmt_votes.get(s.label_format, 0) + len(s.images)
     if fmt_votes:
         info.label_format = max(fmt_votes, key=fmt_votes.get)
+
+    # Fallback to standard VisDrone classes if format is visdrone and no custom classes were parsed
+    if not info.classes and info.label_format == "visdrone":
+        from .label_formats.visdrone import VISDRONE_CLASSES
+        info.classes = list(VISDRONE_CLASSES)
+        info.classes_source = "visdrone"
 
     return info
 
@@ -658,22 +664,26 @@ def _detect_layout_and_splits(info: DatasetInfo) -> None:
         entries = set()
     lower = {e.lower() for e in entries}
 
-    # Case 1: explicit train/valid/test subfolders
+    # Case 1: explicit train/valid/test subfolders or named splits (e.g. VisDrone2019-DET-train)
     split_dirs = []
-    for s in ("train", "valid", "val", "test", "validation"):
-        if s in lower:
-            sp = os.path.join(root, s)
-            if os.path.isdir(sp):
-                split_dirs.append(sp)
+    for e in entries:
+        sp = os.path.join(root, e)
+        if not os.path.isdir(sp):
+            continue
+        elower = e.lower()
+        if elower in ("train", "valid", "val", "test", "validation") or any(
+            k in elower for k in ("-train", "_train", "-val", "_val", "-test", "_test", "-dev", "_dev")
+        ):
+            split_dirs.append(sp)
 
     if split_dirs:
-        # Determine per-split layout (mixed or images/labels)
+        # Determine per-split layout (mixed or images/labels/annotations)
         any_sep = False
         any_mixed = False
         for sp in split_dirs:
             sub = set(os.listdir(sp)) if os.path.isdir(sp) else set()
             sub_lower = {e.lower() for e in sub}
-            if "images" in sub_lower and "labels" in sub_lower:
+            if "images" in sub_lower and ("labels" in sub_lower or "annotations" in sub_lower):
                 any_sep = True
             else:
                 any_mixed = True
@@ -681,21 +691,27 @@ def _detect_layout_and_splits(info: DatasetInfo) -> None:
             "splits_single" if any_mixed and not any_sep else "splits_mixed"
         )
         for sp in split_dirs:
-            name = os.path.basename(sp).lower()
-            name = SPLIT_ALIASES.get(name, name)
-            split = _build_split(name, sp)
+            name = os.path.basename(sp)
+            name_lower = name.lower()
+            canonical_name = SPLIT_ALIASES.get(name_lower, name)
+            split = _build_split(canonical_name, sp)
             info.splits.append(split)
         return
 
-    # Case 2: images/ + labels/ at root
-    if "images" in lower and "labels" in lower:
+    # Case 2: images/ + labels/ or annotations/ at root
+    if "images" in lower and ("labels" in lower or "annotations" in lower):
         info.layout = "images_labels"
+        label_dirs = []
+        if "labels" in lower:
+            label_dirs.append(os.path.join(root, "labels"))
+        if "annotations" in lower:
+            label_dirs.append(os.path.join(root, "annotations"))
         info.splits.append(
             SplitInfo(
                 name="root",
                 path=root,
                 image_dir=os.path.join(root, "images"),
-                label_dirs=[os.path.join(root, "labels")],
+                label_dirs=label_dirs,
             )
         )
         return
@@ -715,19 +731,20 @@ def _detect_layout_and_splits(info: DatasetInfo) -> None:
 def _build_split(name: str, sp: str) -> SplitInfo:
     sub = set(os.listdir(sp)) if os.path.isdir(sp) else set()
     sub_lower = {e.lower() for e in sub}
-    if "images" in sub_lower and "labels" in sub_lower:
-        return SplitInfo(
-            name=name,
-            path=sp,
-            image_dir=os.path.join(sp, "images"),
-            label_dirs=[os.path.join(sp, "labels")],
-        )
-    # mixed: images and labels together
+    label_dirs = []
+    if "labels" in sub_lower:
+        label_dirs.append(os.path.join(sp, "labels"))
+    if "annotations" in sub_lower:
+        label_dirs.append(os.path.join(sp, "annotations"))
+    if not label_dirs:
+        label_dirs = [sp]
+
+    img_dir = os.path.join(sp, "images") if "images" in sub_lower else sp
     return SplitInfo(
         name=name,
         path=sp,
-        image_dir=sp,
-        label_dirs=[sp],
+        image_dir=img_dir,
+        label_dirs=label_dirs,
     )
 
 

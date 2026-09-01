@@ -146,6 +146,18 @@ class VideoCanvas(QWidget):
         self.crop_start_pos = None
         self.original_crop_rect = None
 
+        # Evaluation Inspection Mode State
+        self.eval_mode = False
+        self.eval_predictions = {}       # frame_idx (int) -> list of dicts: {'bbox': [x, y, w, h], 'score': float, 'class_name': str, 'class_id': int}
+        self.eval_filter = "ALL"          # "ALL", "ERRORS", "FP", "FN", "TP"
+        self.eval_conf_thr = 0.50
+        self.eval_iou_thr = 0.50
+        self.eval_error_frames = set()   # set of frame_idx with FP or FN
+        self.eval_matched_frames = {}    # frame_idx -> {'tps': [...], 'fps': [...], 'fns': [...]}
+        self.eval_selected_prediction = None
+        self.eval_hovered_prediction = None
+
+
 
     def set_pan_mode(self, enabled):
         """Enable or disable pan mode"""
@@ -293,226 +305,231 @@ class VideoCanvas(QWidget):
                     painter.drawText(
                         display_rect.right() - 120, display_rect.top() + 20, "Smart Edge ON"
                     )
-                # Draw annotations
-                for annotation in self.annotations:
-                    # Skip if object_filter is set and this annotation doesn't match
-                    if getattr(self, 'object_filter', None):
-                        _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
-                        if _aid != self.object_filter:
+                # Draw Evaluation Inspection Overlay if Evaluation Mode is active
+                if getattr(self, "eval_mode", False):
+                    self.draw_evaluation_overlay(painter, update_rect)
+                else:
+                    # Draw annotations
+                    for annotation in self.annotations:
+                        # Skip if object_filter is set and this annotation doesn't match
+                        if getattr(self, 'object_filter', None):
+                            _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
+                            if _aid != self.object_filter:
+                                continue
+                        # Convert annotation rectangle to display coordinates
+                        display_rect = self.image_to_display_rect(annotation.rect)
+
+                        # Skip if the rectangle is invalid or too small
+                        if display_rect.width() <= 0 or display_rect.height() <= 0:
                             continue
-                    # Convert annotation rectangle to display coordinates
-                    display_rect = self.image_to_display_rect(annotation.rect)
 
-                    # Skip if the rectangle is invalid or too small
-                    if display_rect.width() <= 0 or display_rect.height() <= 0:
-                        continue
+                        # Set pen based on selection status and source
+                        if annotation == self.selected_annotation or annotation in self.selected_annotations:
+                            pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
+                        else:
+                            # Get base color for the class
+                            base_color = annotation.color
 
-                    # Set pen based on selection status and source
-                    if annotation == self.selected_annotation or annotation in self.selected_annotations:
-                        pen = QPen(QColor(255, 255, 0), 2)  # Yellow for selected
-                    else:
-                        # Get base color for the class
-                        base_color = annotation.color
-
-                        # Check if annotation has a track_id and modify color slightly based on it
-                        if hasattr(annotation, 'attributes') and 'track_id' in annotation.attributes:
-                            track_id = annotation.attributes['track_id']
-                            if isinstance(track_id, int):
-                                # Use the track_id to create a slight variation of the base color
-                                # This ensures different tracks of the same class have slightly different colors
-                                h, s, v, _ = base_color.getHsvF()
-                                # Modify hue based on track_id, keeping it within the same general color family
-                                h_offset = (track_id * 0.05) % 0.2  # Small offset to keep colors similar but distinct
-                                new_h = (h + h_offset) % 1.0
-                                # Create a new color with the modified hue
-                                modified_color = QColor.fromHsvF(new_h, s, v)
-                                base_color = modified_color
-                        # Determine pen style based on source
-                        if hasattr(annotation, 'source'):
-                            if annotation.source == "manual":
-                                pen = QPen(base_color, 2, Qt.SolidLine)
-                            elif annotation.source == "interpolated":
-                                pen = QPen(base_color, 2, Qt.DashLine)
-                            elif annotation.source == "tracked":
-                                pen = QPen(base_color, 2, Qt.DotLine)
-                            elif annotation.source == "detected":
-                                pen = QPen(base_color, 2, Qt.DashDotLine)
+                            # Check if annotation has a track_id and modify color slightly based on it
+                            if hasattr(annotation, 'attributes') and 'track_id' in annotation.attributes:
+                                track_id = annotation.attributes['track_id']
+                                if isinstance(track_id, int):
+                                    # Use the track_id to create a slight variation of the base color
+                                    # This ensures different tracks of the same class have slightly different colors
+                                    h, s, v, _ = base_color.getHsvF()
+                                    # Modify hue based on track_id, keeping it within the same general color family
+                                    h_offset = (track_id * 0.05) % 0.2  # Small offset to keep colors similar but distinct
+                                    new_h = (h + h_offset) % 1.0
+                                    # Create a new color with the modified hue
+                                    modified_color = QColor.fromHsvF(new_h, s, v)
+                                    base_color = modified_color
+                            # Determine pen style based on source
+                            if hasattr(annotation, 'source'):
+                                if annotation.source == "manual":
+                                    pen = QPen(base_color, 2, Qt.SolidLine)
+                                elif annotation.source == "interpolated":
+                                    pen = QPen(base_color, 2, Qt.DashLine)
+                                elif annotation.source == "tracked":
+                                    pen = QPen(base_color, 2, Qt.DotLine)
+                                elif annotation.source == "detected":
+                                    pen = QPen(base_color, 2, Qt.DashDotLine)
+                                else:
+                                    pen = QPen(base_color, 2)
                             else:
                                 pen = QPen(base_color, 2)
-                        else:
-                            pen = QPen(base_color, 2)
 
-                    painter.setPen(pen)
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(display_rect)
-
-                    # Draw segmentation polygon if enabled and available
-                    if getattr(self, 'show_segmentation', False) and getattr(annotation, 'segmentation', None):
-                        from PyQt5.QtGui import QPolygonF
-                        from PyQt5.QtCore import QPointF
-                        poly = QPolygonF()
-                        for (px, py) in annotation.segmentation:
-                            dp = self.image_to_display_point(px, py)
-                            poly.append(QPointF(dp.x(), dp.y()))
-                        if poly.size() >= 3:
-                            old_pen = painter.pen()
-                            seg_pen = QPen(QColor(0, 255, 0, 200), 1, Qt.DashLine)
-                            painter.setPen(seg_pen)
-                            painter.setBrush(QBrush(QColor(0, 255, 0, 40)))
-                            painter.drawPolygon(poly)
-                            painter.setPen(old_pen)
-                            painter.setBrush(Qt.NoBrush)
-
-                    # Highlight hovered annotation
-                    if annotation == self.selected_annotation and self.underMouse():
-                        painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
+                        painter.setPen(pen)
+                        painter.setBrush(Qt.NoBrush)
                         painter.drawRect(display_rect)
 
-                    # Set up font for labels
-                    font = painter.font()
-                    font.setPointSize(8)
-                    painter.setFont(font)
+                        # Draw segmentation polygon if enabled and available
+                        if getattr(self, 'show_segmentation', False) and getattr(annotation, 'segmentation', None):
+                            from PyQt5.QtGui import QPolygonF
+                            from PyQt5.QtCore import QPointF
+                            poly = QPolygonF()
+                            for (px, py) in annotation.segmentation:
+                                dp = self.image_to_display_point(px, py)
+                                poly.append(QPointF(dp.x(), dp.y()))
+                            if poly.size() >= 3:
+                                old_pen = painter.pen()
+                                seg_pen = QPen(QColor(0, 255, 0, 200), 1, Qt.DashLine)
+                                painter.setPen(seg_pen)
+                                painter.setBrush(QBrush(QColor(0, 255, 0, 40)))
+                                painter.drawPolygon(poly)
+                                painter.setPen(old_pen)
+                                painter.setBrush(Qt.NoBrush)
 
-                    # Standard text height for all labels
-                    text_height = 16
+                        # Highlight hovered annotation
+                        if annotation == self.selected_annotation and self.underMouse():
+                            painter.setPen(QPen(QColor(255, 255, 0, 180), 3))
+                            painter.drawRect(display_rect)
 
-                    # Determine if we should draw the class label above or below the box
-                    # Check if there's more space above than below
-                    space_above = display_rect.top()
-                    space_below = self.height() - display_rect.bottom()
-                    draw_above = space_above >= space_below
+                        # Set up font for labels
+                        font = painter.font()
+                        font.setPointSize(8)
+                        painter.setFont(font)
 
-                    # Calculate class label width and position
-                    text_width = min(
-                        max(60, display_rect.width()), 120
-                    )  # Min 60px, max 120px
+                        # Standard text height for all labels
+                        text_height = 16
 
-                    # Position the class label centered horizontally with the box
-                    text_x = display_rect.left() + (display_rect.width() - text_width) / 2
+                        # Determine if we should draw the class label above or below the box
+                        # Check if there's more space above than below
+                        space_above = display_rect.top()
+                        space_below = self.height() - display_rect.bottom()
+                        draw_above = space_above >= space_below
 
-                    if draw_above:
-                        # Draw above the box with a small gap
-                        text_y = max(0, display_rect.top() - text_height - 2)
-                    else:
-                        # Draw below the box with a small gap
-                        text_y = min(self.height() - text_height, display_rect.bottom() + 2)
+                        # Calculate class label width and position
+                        text_width = min(
+                            max(60, display_rect.width()), 120
+                        )  # Min 60px, max 120px
 
-                    text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
+                        # Position the class label centered horizontally with the box
+                        text_x = display_rect.left() + (display_rect.width() - text_width) / 2
 
-                    # Draw class label with semi-transparent background
-                    # Add visual indicator for verification status
-                    bg_color = QColor(
-                        annotation.color.red(),
-                        annotation.color.green(),
-                        annotation.color.blue(),
-                        180,
-                    )
-
-                    # Add a border to indicate verification status
-                    if hasattr(annotation, 'verified') and not annotation.verified:
-                        # Draw a warning indicator for unverified annotations
-                        painter.fillRect(
-                            text_rect,
-                            QColor(255, 165, 0, 180)  # Orange background for unverified
-                        )
-
-                        # Add a small verification indicator
-                        verify_rect = QRect(
-                            int(text_rect.right() - 16),
-                            int(text_rect.top()),
-                            16,
-                            16
-                        )
-                        painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
-                        painter.setPen(QPen(QColor(255, 255, 255)))
-                        painter.drawText(verify_rect, int(Qt.AlignCenter), "!")
-                    else:
-                        painter.fillRect(text_rect, bg_color)
-
-                    # Draw source indicator if not manual
-                    if hasattr(annotation, 'source') and annotation.source != "manual":
-                        source_text = annotation.source[:1].upper()  # First letter of source
-                        source_rect = QRect(
-                            int(text_rect.left()),
-                            int(text_rect.top()),
-                            16,
-                            16
-                        )
-                        painter.fillRect(source_rect, QColor(0, 0, 0, 180))
-                        painter.setPen(QPen(QColor(255, 255, 255)))
-                        painter.drawText(source_rect, int(Qt.AlignCenter), source_text)
-
-                        # Adjust text rect to make room for source indicator
-                        text_rect.setLeft(text_rect.left() + 16)
-
-                    painter.setPen(QPen(QColor(0, 0, 0)))
-                    painter.drawText(text_rect, int(Qt.AlignCenter), annotation.class_name)
-
-                    # DEBUG: Show score if debug flag is enabled and annotation has a score
-                    if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
-                        score_text = f"{annotation.score:.2f}"
-                        score_rect = QRect(
-                            int(display_rect.right() - 40),
-                            int(display_rect.top() - 16),
-                            40,
-                            16
-                        )
-                        painter.fillRect(score_rect, QColor(0, 0, 0, 180))
-                        painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
-                        painter.drawText(score_rect, int(Qt.AlignCenter), score_text)
-
-                    # Draw attributes to the right of the box if there's space, otherwise to the left
-                    if getattr(self, 'show_attributes', True) and annotation.attributes:
-                        # Calculate the total height needed for all attributes
-                        attr_count = len(annotation.attributes)
-                        attr_total_height = text_height * attr_count
-
-                        # Format each attribute on its own line
-                        attr_lines = []
-                        for key, value in annotation.attributes.items():
-                            attr_lines.append(f"{key}: {value}")
-
-                        # Calculate width needed for the longest attribute
-                        attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
-
-                        # Check if there's enough space to the right
-                        space_right = self.width() - display_rect.right()
-
-                        if space_right >= attr_width + 5:
-                            # Draw to the right
-                            attr_x = display_rect.right() + 5
+                        if draw_above:
+                            # Draw above the box with a small gap
+                            text_y = max(0, display_rect.top() - text_height - 2)
                         else:
-                            # Draw to the left
-                            attr_x = max(0, display_rect.left() - attr_width - 5)
+                            # Draw below the box with a small gap
+                            text_y = min(self.height() - text_height, display_rect.bottom() + 2)
 
-                        # Vertically position attributes centered with the box
-                        # If too many attributes, start higher to fit them all
-                        if attr_total_height > display_rect.height():
-                            attr_y = max(0, display_rect.top())
-                        else:
-                            attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
+                        text_rect = QRect(int(text_x), int(text_y), text_width, text_height)
 
-                        # Draw each attribute on its own line
-                        for i, attr_text in enumerate(attr_lines):
-                            attr_rect = QRect(
-                                int(attr_x),
-                                int(attr_y + i * text_height),
-                                attr_width,
-                                text_height,
+                        # Draw class label with semi-transparent background
+                        # Add visual indicator for verification status
+                        bg_color = QColor(
+                            annotation.color.red(),
+                            annotation.color.green(),
+                            annotation.color.blue(),
+                            180,
+                        )
+
+                        # Add a border to indicate verification status
+                        if hasattr(annotation, 'verified') and not annotation.verified:
+                            # Draw a warning indicator for unverified annotations
+                            painter.fillRect(
+                                text_rect,
+                                QColor(255, 165, 0, 180)  # Orange background for unverified
                             )
 
-                            painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                            # Add a small verification indicator
+                            verify_rect = QRect(
+                                int(text_rect.right() - 16),
+                                int(text_rect.top()),
+                                16,
+                                16
+                            )
+                            painter.fillRect(verify_rect, QColor(255, 0, 0, 200))
                             painter.setPen(QPen(QColor(255, 255, 255)))
-                            painter.drawText(attr_rect, int(Qt.AlignLeft | Qt.AlignVCenter), f" {attr_text}")
-                    # Draw resize handles (corners and edges)
-                    handle_size = 8
-                    for point in self.get_handle_points(display_rect):
-                        # Use class color for handle
-                        handle_fill = QColor(annotation.color)
-                        handle_fill.setAlpha(200)
-                        painter.setBrush(handle_fill)
-                        painter.setPen(QPen(QColor(0, 0, 0), 1))
-                        painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+                            painter.drawText(verify_rect, int(Qt.AlignCenter), "!")
+                        else:
+                            painter.fillRect(text_rect, bg_color)
+
+                        # Draw source indicator if not manual
+                        if hasattr(annotation, 'source') and annotation.source != "manual":
+                            source_text = annotation.source[:1].upper()  # First letter of source
+                            source_rect = QRect(
+                                int(text_rect.left()),
+                                int(text_rect.top()),
+                                16,
+                                16
+                            )
+                            painter.fillRect(source_rect, QColor(0, 0, 0, 180))
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            painter.drawText(source_rect, int(Qt.AlignCenter), source_text)
+
+                            # Adjust text rect to make room for source indicator
+                            text_rect.setLeft(text_rect.left() + 16)
+
+                        painter.setPen(QPen(QColor(0, 0, 0)))
+                        painter.drawText(text_rect, int(Qt.AlignCenter), annotation.class_name)
+
+                        # DEBUG: Show score if debug flag is enabled and annotation has a score
+                        if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:
+                            score_text = f"{annotation.score:.2f}"
+                            score_rect = QRect(
+                                int(display_rect.right() - 40),
+                                int(display_rect.top() - 16),
+                                40,
+                                16
+                            )
+                            painter.fillRect(score_rect, QColor(0, 0, 0, 180))
+                            painter.setPen(QPen(QColor(255, 255, 0)))  # Yellow text for score
+                            painter.drawText(score_rect, int(Qt.AlignCenter), score_text)
+
+                        # Draw attributes to the right of the box if there's space, otherwise to the left
+                        if getattr(self, 'show_attributes', True) and annotation.attributes:
+                            # Calculate the total height needed for all attributes
+                            attr_count = len(annotation.attributes)
+                            attr_total_height = text_height * attr_count
+
+                            # Format each attribute on its own line
+                            attr_lines = []
+                            for key, value in annotation.attributes.items():
+                                attr_lines.append(f"{key}: {value}")
+
+                            # Calculate width needed for the longest attribute
+                            attr_width = min(150, max(80, max([len(line) * 6 for line in attr_lines])))
+
+                            # Check if there's enough space to the right
+                            space_right = self.width() - display_rect.right()
+
+                            if space_right >= attr_width + 5:
+                                # Draw to the right
+                                attr_x = display_rect.right() + 5
+                            else:
+                                # Draw to the left
+                                attr_x = max(0, display_rect.left() - attr_width - 5)
+
+                            # Vertically position attributes centered with the box
+                            # If too many attributes, start higher to fit them all
+                            if attr_total_height > display_rect.height():
+                                attr_y = max(0, display_rect.top())
+                            else:
+                                attr_y = max(0, display_rect.center().y() - attr_total_height // 2)
+
+                            # Draw each attribute on its own line
+                            for i, attr_text in enumerate(attr_lines):
+                                attr_rect = QRect(
+                                    int(attr_x),
+                                    int(attr_y + i * text_height),
+                                    attr_width,
+                                    text_height,
+                                    )
+
+                                painter.fillRect(attr_rect, QColor(40, 40, 40, 180))
+                                painter.setPen(QPen(QColor(255, 255, 255)))
+                                painter.drawText(attr_rect, int(Qt.AlignLeft | Qt.AlignVCenter), f" {attr_text}")
+                        # Draw resize handles (corners and edges)
+                        handle_size = 8
+                        for point in self.get_handle_points(display_rect):
+                            # Use class color for handle
+                            handle_fill = QColor(annotation.color)
+                            handle_fill.setAlpha(200)
+                            painter.setBrush(handle_fill)
+                            painter.setPen(QPen(QColor(0, 0, 0), 1))
+                            painter.drawEllipse(point, handle_size // 2, handle_size // 2)
+
 
                 # Draw the in-progress bounding box (while drawing)
                 if self.is_drawing and self.start_point and self.current_point:
@@ -2554,3 +2571,304 @@ class VideoCanvas(QWidget):
         painter.end()
         self._wand_cursor = QCursor(pixmap, 22, 10) # Hotspot at the tip
         return self._wand_cursor
+
+    # -------------------------------------------------------------------------
+    # Evaluation Inspection Overlay System
+    # -------------------------------------------------------------------------
+
+    def set_eval_mode(self, enabled: bool):
+        """Enables or disables Evaluation Inspection Mode on the canvas."""
+        self.eval_mode = bool(enabled)
+        if self.eval_mode:
+            self.recompute_eval_matches()
+        self.update()
+
+    def set_eval_predictions(self, predictions_dict: dict, conf_thr=0.50, iou_thr=0.50):
+        """
+        Sets the predictions dictionary.
+        predictions_dict: frame_idx (int) -> list of dicts:
+            [{'bbox': [x, y, w, h], 'score': float, 'class_name': str, 'class_id': int}, ...]
+        """
+        self.eval_predictions = predictions_dict or {}
+        self.eval_conf_thr = float(conf_thr)
+        self.eval_iou_thr = float(iou_thr)
+        self.recompute_eval_matches()
+        self.update()
+
+    def set_eval_conf_threshold(self, conf_thr: float):
+        """Updates the active confidence threshold and re-evaluates matches."""
+        self.eval_conf_thr = max(0.0, min(1.0, float(conf_thr)))
+        self.recompute_eval_matches()
+        self.update()
+
+    def set_eval_iou_threshold(self, iou_thr: float):
+        """Updates the IoU matching threshold and re-evaluates matches."""
+        self.eval_iou_thr = max(0.05, min(0.95, float(iou_thr)))
+        self.recompute_eval_matches()
+        self.update()
+
+    def set_eval_filter(self, filter_mode: str):
+        """Sets the error filter mode ('ALL', 'ERRORS', 'FP', 'FN', 'TP')."""
+        self.eval_filter = str(filter_mode).upper()
+        self.update()
+
+    def recompute_eval_matches(self):
+        """
+        Recomputes True Positives, False Positives, and False Negatives across all frames
+        using current eval_conf_thr and eval_iou_thr. Updates eval_error_frames.
+        """
+        self.eval_error_frames = set()
+        self.eval_matched_frames = {}
+
+        total_tp, total_fp, total_fn = 0, 0, 0
+
+        # Get all relevant frame indices
+        all_frames = set(self.eval_predictions.keys())
+        if hasattr(self.main_window, 'frame_annotations') and isinstance(self.main_window.frame_annotations, dict):
+            all_frames.update(self.main_window.frame_annotations.keys())
+        elif hasattr(self.main_window, 'annotation_manager') and hasattr(self.main_window.annotation_manager, 'annotations'):
+            all_frames.update(self.main_window.annotation_manager.annotations.keys())
+
+        # Include current frame
+        curr_frame = getattr(self.main_window, 'current_frame', 0)
+        all_frames.add(curr_frame)
+
+        for f_idx in all_frames:
+            # 1. Get GT boxes for frame
+            gt_boxes = []
+            if hasattr(self.main_window, 'frame_annotations') and f_idx in self.main_window.frame_annotations:
+                anns = self.main_window.frame_annotations[f_idx]
+                for ann in anns:
+                    r = ann.rect
+                    gt_boxes.append({
+                        'bbox': [r.x(), r.y(), r.width(), r.height()],
+                        'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
+                        'ann': ann
+                    })
+            elif f_idx == curr_frame:
+                for ann in self.annotations:
+                    r = ann.rect
+                    gt_boxes.append({
+                        'bbox': [r.x(), r.y(), r.width(), r.height()],
+                        'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
+                        'ann': ann
+                    })
+
+            # 2. Get Predictions for frame above confidence threshold
+            raw_preds = self.eval_predictions.get(f_idx, [])
+            preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
+
+            # 3. Match GT and Predictions
+            gt_matched = [False] * len(gt_boxes)
+            pred_matched = [False] * len(preds)
+
+            # Sort predictions descending by score
+            sorted_pred_indices = sorted(range(len(preds)), key=lambda i: preds[i].get('score', 0), reverse=True)
+
+            for p_i in sorted_pred_indices:
+                p = preds[p_i]
+                pb = p.get('bbox', [0, 0, 0, 0])
+                px1, py1, pw, ph = pb if isinstance(pb, (list, tuple)) else [pb.x(), pb.y(), pb.width(), pb.height()]
+                px2, py2 = px1 + pw, py1 + ph
+
+                best_iou = 0.0
+                best_g = -1
+                for g_i, gt in enumerate(gt_boxes):
+                    if gt_matched[g_i]:
+                        continue
+                    gb = gt['bbox']
+                    gx1, gy1, gw, gh = gb
+                    gx2, gy2 = gx1 + gw, gy1 + gh
+
+                    # Calculate IoU
+                    ix1, iy1 = max(px1, gx1), max(py1, gy1)
+                    ix2, iy2 = min(px2, gx2), min(py2, gy2)
+                    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+                    inter = iw * ih
+                    union = (pw * ph) + (gw * gh) - inter
+                    iou = inter / union if union > 0 else 0.0
+
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_g = g_i
+
+                if best_g >= 0 and best_iou >= self.eval_iou_thr:
+                    gt_matched[best_g] = True
+                    pred_matched[p_i] = True
+
+            frame_tps = [preds[i] for i, m in enumerate(pred_matched) if m]
+            frame_fps = [preds[i] for i, m in enumerate(pred_matched) if not m]
+            frame_fns = [gt_boxes[i] for i, m in enumerate(gt_matched) if not m]
+
+            total_tp += len(frame_tps)
+            total_fp += len(frame_fps)
+            total_fn += len(frame_fns)
+
+            self.eval_matched_frames[f_idx] = {
+                'tps': frame_tps,
+                'fps': frame_fps,
+                'fns': frame_fns,
+                'gt_matched': gt_matched,
+                'pred_matched': pred_matched
+            }
+
+            if len(frame_fps) > 0 or len(frame_fns) > 0:
+                self.eval_error_frames.add(f_idx)
+
+        # Notify dock if available
+        if hasattr(self.main_window, 'evaluation_inspector_dock') and self.main_window.evaluation_inspector_dock:
+            dock = self.main_window.evaluation_inspector_dock
+            dock.update_metrics_display(total_tp, total_fp, total_fn)
+            dock.update_error_frames_list(self.eval_error_frames)
+
+    def get_eval_metrics_summary(self):
+        """Returns aggregate TP, FP, FN, Precision, Recall, F1 for active thresholds."""
+        total_tp, total_fp, total_fn = 0, 0, 0
+        for data in self.eval_matched_frames.values():
+            total_tp += len(data.get('tps', []))
+            total_fp += len(data.get('fps', []))
+            total_fn += len(data.get('fns', []))
+
+        precision = (total_tp / (total_tp + total_fp)) if (total_tp + total_fp) > 0 else 0.0
+        recall = (total_tp / (total_tp + total_fn)) if (total_tp + total_fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        return {
+            'tp': total_tp,
+            'fp': total_fp,
+            'fn': total_fn,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'error_frames_count': len(self.eval_error_frames)
+        }
+
+    def _draw_eval_badge(self, painter, disp_rect, text, bg_color, text_color, is_pred=False):
+        """Renders a prominent, high-contrast label badge on a bounding box."""
+        font = painter.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+
+        fm = painter.fontMetrics()
+        text_w = fm.horizontalAdvance(text) + 12
+        text_h = fm.height() + 6
+
+        # Position above or below box depending on space
+        if disp_rect.top() - text_h - 2 >= 0:
+            badge_y = disp_rect.top() - text_h - 2
+        else:
+            badge_y = min(self.height() - text_h, disp_rect.bottom() + 2)
+
+        # Center horizontally on box
+        badge_x = max(0, min(self.width() - text_w, disp_rect.left()))
+        badge_rect = QRect(int(badge_x), int(badge_y), int(text_w), int(text_h))
+
+        # Background badge pill
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(bg_color))
+        painter.drawRoundedRect(badge_rect, 3, 3)
+
+        # Text with shadow/outline
+        painter.setPen(QPen(text_color))
+        painter.drawText(badge_rect, int(Qt.AlignCenter), text)
+
+    def draw_evaluation_overlay(self, painter, update_rect):
+        """
+        Draws Ground Truth and Model Predictions in Evaluation Inspection Mode.
+        Clearly annotates every bounding box with its CLASS NAME and EVALUATION STATUS.
+        """
+        curr_frame = getattr(self.main_window, 'current_frame', 0)
+
+        # Get precomputed matches for this frame
+        frame_match_data = self.eval_matched_frames.get(curr_frame)
+        if not frame_match_data:
+            self.recompute_eval_matches()
+            frame_match_data = self.eval_matched_frames.get(curr_frame, {})
+
+        gt_matched = frame_match_data.get('gt_matched', [])
+        pred_matched = frame_match_data.get('pred_matched', [])
+
+        # 1. Collect Ground Truth annotations
+        gt_boxes = []
+        for ann in self.annotations:
+            r = ann.rect
+            gt_boxes.append({
+                'rect': r,
+                'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
+                'ann': ann
+            })
+
+        # 2. Collect Predictions above confidence threshold
+        raw_preds = self.eval_predictions.get(curr_frame, [])
+        active_preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
+
+        # 3. Draw Ground Truths
+        for g_idx, gt in enumerate(gt_boxes):
+            is_tp = gt_matched[g_idx] if g_idx < len(gt_matched) else False
+            disp_rect = self.image_to_display_rect(gt['rect'])
+            if disp_rect.width() <= 0 or disp_rect.height() <= 0:
+                continue
+
+            cls_name = gt.get('class_name', 'Object')
+
+            if is_tp:
+                # True Positive Ground Truth (Vibrant Green)
+                if self.eval_filter in ["FP", "FN", "ERRORS"]:
+                    continue
+                border_color = QColor(0, 230, 118)  # Green
+                bg_badge = QColor(0, 180, 80, 220)
+                badge_text = f"[GT: TP] {cls_name}"
+                pen = QPen(border_color, 2, Qt.SolidLine)
+            else:
+                # False Negative / Missed Object (Vibrant Orange)
+                if self.eval_filter in ["FP", "TP"]:
+                    continue
+                border_color = QColor(255, 152, 0)  # Orange
+                bg_badge = QColor(230, 100, 0, 230)
+                badge_text = f"[FN: MISSED] {cls_name}"
+                pen = QPen(border_color, 3, Qt.DashLine)
+
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(disp_rect)
+            self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255))
+
+        # 4. Draw Predictions
+        for p_idx, p in enumerate(active_preds):
+            is_tp = pred_matched[p_idx] if p_idx < len(pred_matched) else False
+            pb = p.get('bbox', [0, 0, 0, 0])
+            px1, py1, pw, ph = pb if isinstance(pb, (list, tuple)) else [pb.x(), pb.y(), pb.width(), pb.height()]
+            q_rect = QRect(int(px1), int(py1), int(pw), int(ph))
+            disp_rect = self.image_to_display_rect(q_rect)
+            if disp_rect.width() <= 0 or disp_rect.height() <= 0:
+                continue
+
+            score = p.get('score', 1.0)
+            cls_name = p.get('class_name', str(p.get('class_id', 'Object')))
+            is_selected = (p == self.eval_selected_prediction)
+
+            if is_tp:
+                # True Positive Prediction (Cyan)
+                if self.eval_filter in ["FP", "FN", "ERRORS"]:
+                    continue
+                border_color = QColor(0, 229, 255)  # Cyan
+                bg_badge = QColor(0, 160, 200, 230)
+                badge_text = f"[TP] {cls_name} ({score:.2f})"
+                pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.SolidLine)
+                fill_color = QColor(0, 229, 255, 20)
+            else:
+                # False Positive Prediction (Vibrant Red)
+                if self.eval_filter in ["FN", "TP"]:
+                    continue
+                border_color = QColor(255, 45, 85)  # Red
+                bg_badge = QColor(220, 20, 60, 235)
+                badge_text = f"[FP] {cls_name} ({score:.2f})"
+                pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.DashLine)
+                fill_color = QColor(255, 45, 85, 30)
+
+            painter.setPen(pen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawRect(disp_rect)
+            self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255), is_pred=True)
+

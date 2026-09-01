@@ -1,4 +1,4 @@
-﻿from PyQt5.QtWidgets import (
+from PyQt5.QtWidgets import (
     QDockWidget,
     QWidget,
     QVBoxLayout,
@@ -196,6 +196,11 @@ class ClassDock(QDockWidget):
         if hasattr(self.main_window, "delete_selected_class"):
             self.main_window.delete_selected_class()
 
+    def blur_and_delete_class(self):
+        """Blur all bounding boxes of the selected class and delete the class"""
+        if hasattr(self.main_window, "blur_and_delete_selected_class"):
+            self.main_window.blur_and_delete_selected_class()
+
     def show_context_menu(self, position):
         """Show context menu for the selected class"""
         selected_items = self.classes_list.selectedItems()
@@ -205,6 +210,7 @@ class ClassDock(QDockWidget):
         menu = QMenu()
         edit_action = menu.addAction("Edit")
         delete_action = menu.addAction("Delete")
+        blur_delete_action = menu.addAction("Blur & Delete")
 
         action = menu.exec_(self.classes_list.mapToGlobal(position))
 
@@ -212,6 +218,8 @@ class ClassDock(QDockWidget):
             self.edit_class()
         elif action == delete_action:
             self.delete_class()
+        elif action == blur_delete_action:
+            self.blur_and_delete_class()
 
     def show_class_info(self):
         """Show information and images for the selected class."""

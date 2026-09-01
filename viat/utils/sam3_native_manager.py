@@ -146,74 +146,46 @@ class Sam3NativeManager:
         has_box = box is not None
         has_text = bool(text_prompt)
 
+        prompt_req = {
+            "type": "add_prompt",
+            "session_id": self.current_session_id,
+            "frame_index": 0,
+            "obj_id": 1,
+            "output_prob_thresh": 0.1,
+        }
+        if has_text:
+            prompt_req["text"] = text_prompt
+        if has_box:
+            # Convert absolute xyxy → normalized xywh
+            x1n = box[0] / IMG_WIDTH
+            y1n = box[1] / IMG_HEIGHT
+            wn  = (box[2] - box[0]) / IMG_WIDTH
+            hn  = (box[3] - box[1]) / IMG_HEIGHT
+            x1n = max(0.0, min(1.0, x1n))
+            y1n = max(0.0, min(1.0, y1n))
+            wn  = max(0.0, min(1.0, wn))
+            hn  = max(0.0, min(1.0, hn))
+            prompt_req["bounding_boxes"] = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
+            prompt_req["bounding_box_labels"] = torch.tensor([1], dtype=torch.int32)
         if has_points:
-            # SAM3 requires points to be sent in a SEPARATE call, exclusive of text/box.
-            # First send text/box as a VG prompt (if any), then add points as a SAM2 instance prompt.
-            if has_text or has_box:
-                vg_req = {
-                    "type": "add_prompt",
-                    "session_id": self.current_session_id,
-                    "frame_index": 0,
-                    "obj_id": 1
-                }
-                if has_text:
-                    vg_req["text"] = text_prompt
-                if has_box:
-                    box_rel = abs_to_rel_coords(np.array([box]), IMG_WIDTH, IMG_HEIGHT, coord_type="box")
-                    vg_req["box"] = torch.tensor(box_rel, dtype=torch.float32)
-                self.video_predictor.handle_request(vg_req)
-
-            # Points-only prompt
             rel_points = [[p[0] / IMG_WIDTH, p[1] / IMG_HEIGHT] for p in points]
-            pt_req = {
-                "type": "add_prompt",
-                "session_id": self.current_session_id,
-                "frame_index": 0,
-                "obj_id": 1,
-                "points": rel_points,
-                "point_labels": labels,
-            }
-            self.video_predictor.handle_request(pt_req)
-        else:
-            # Text and/or box only
-            # SAM3 handle_request maps:
-            #   "bounding_boxes"       → add_prompt(bounding_boxes=...) → model(boxes_xywh=...)
-            #   "bounding_box_labels"  → required companion (1=fg per box)
-            prompt_req = {
-                "type": "add_prompt",
-                "session_id": self.current_session_id,
-                "frame_index": 0,
-                "obj_id": 1,
-                # Use a lower threshold for text prompts to detect objects more leniently
-                "output_prob_thresh": 0.1,
-            }
-            if has_text:
-                prompt_req["text"] = text_prompt
-            if has_box:
-                # Convert absolute xyxy → normalized xywh
-                x1n = box[0] / IMG_WIDTH
-                y1n = box[1] / IMG_HEIGHT
-                wn  = (box[2] - box[0]) / IMG_WIDTH
-                hn  = (box[3] - box[1]) / IMG_HEIGHT
-                x1n = max(0.0, min(1.0, x1n))
-                y1n = max(0.0, min(1.0, y1n))
-                wn  = max(0.0, min(1.0, wn))
-                hn  = max(0.0, min(1.0, hn))
-                prompt_req["bounding_boxes"] = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
-                prompt_req["bounding_box_labels"] = torch.tensor([1], dtype=torch.int32)
-                
-            print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
-            if has_text:
-                print(f"[SAM3 Debug] Text prompt: {text_prompt}")
-            if has_box:
-                print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
+            prompt_req["points"] = torch.tensor(rel_points, dtype=torch.float32)
+            prompt_req["point_labels"] = torch.tensor(labels, dtype=torch.int32)
+            
+        print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
+        if has_text:
+            print(f"[SAM3 Debug] Text prompt: {text_prompt}")
+        if has_box:
+            print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
+        if has_points:
+            print(f"[SAM3 Debug] Points prompt count: {len(rel_points)}")
 
-            res = self.video_predictor.handle_request(prompt_req)
-            print(f"[SAM3 Native] add_prompt returned dict keys: {res.keys()}")
-            if "outputs" in res:
-                print(f"[SAM3 Native] add_prompt outputs keys: {res['outputs'].keys() if res['outputs'] else 'None'}")
-                if res['outputs'] and "out_binary_masks" in res['outputs']:
-                    print(f"[SAM3 Native] add_prompt out_binary_masks shape: {res['outputs']['out_binary_masks'].shape}")
+        res = self.video_predictor.handle_request(prompt_req)
+        print(f"[SAM3 Native] add_prompt returned dict keys: {res.keys()}")
+        if "outputs" in res:
+            print(f"[SAM3 Native] add_prompt outputs keys: {res['outputs'].keys() if res['outputs'] else 'None'}")
+            if res['outputs'] and "out_binary_masks" in res['outputs']:
+                print(f"[SAM3 Native] add_prompt out_binary_masks shape: {res['outputs']['out_binary_masks'].shape}")
         
         # Propagate to get mask
         outputs = res.get("outputs") if 'res' in locals() and res.get("outputs") is not None else None
@@ -353,50 +325,27 @@ class Sam3NativeManager:
                     if img is not None:
                         H, W = img.shape[:2]
 
+            prompt_req = dict(
+                type="add_prompt",
+                session_id=session_id,
+                frame_index=start_f,
+                obj_id=obj_id,
+            )
             if text_prompt:
-                self.video_predictor.handle_request(
-                    request=dict(
-                        type="add_prompt",
-                        session_id=session_id,
-                        frame_index=start_f,
-                        text=text_prompt,
-                        obj_id=obj_id,
-                    )
-                )
-                
+                prompt_req["text"] = text_prompt
             if box:
-                # Convert absolute xyxy → normalized xywh for SAM3 API
                 x1n = max(0.0, min(1.0, box[0] / W))
                 y1n = max(0.0, min(1.0, box[1] / H))
                 wn  = max(0.0, min(1.0, (box[2] - box[0]) / W))
                 hn  = max(0.0, min(1.0, (box[3] - box[1]) / H))
-                box_tensor = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
-                box_labels = torch.tensor([1], dtype=torch.int32)
-                self.video_predictor.handle_request(
-                    request=dict(
-                        type="add_prompt",
-                        session_id=session_id,
-                        frame_index=start_f,
-                        bounding_boxes=box_tensor,
-                        bounding_box_labels=box_labels,
-                        obj_id=obj_id,
-                    )
-                )
-                    
+                prompt_req["bounding_boxes"] = torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32)
+                prompt_req["bounding_box_labels"] = torch.tensor([1], dtype=torch.int32)
             if points and labels:
                 pts_rel = abs_to_rel_coords(np.array(points), W, H, coord_type="point")
-                pts_tensor = torch.tensor(pts_rel, dtype=torch.float32)
-                lbl_tensor = torch.tensor(labels, dtype=torch.int32)
-                self.video_predictor.handle_request(
-                    request=dict(
-                        type="add_prompt",
-                        session_id=session_id,
-                        frame_index=start_f,
-                        points=pts_tensor,
-                        point_labels=lbl_tensor,
-                        obj_id=obj_id,
-                    )
-                )
+                prompt_req["points"] = torch.tensor(pts_rel, dtype=torch.float32)
+                prompt_req["point_labels"] = torch.tensor(labels, dtype=torch.int32)
+
+            self.video_predictor.handle_request(request=prompt_req)
 
             # Propagate in chunks to avoid VRAM exhaustion on large videos
             CHUNK_SIZE = 50  # process 50 frames at a time

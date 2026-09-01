@@ -129,10 +129,22 @@ class EvaluateWorkerThread(QThread):
                         if not row: continue
                         name = row[0]
                         metrics = dict(zip(headers[1:], row[1:]))
-                        try:
-                            ap50 = float(metrics.get('AP50', 0) or 0)
-                        except Exception:
-                            ap50 = 0
+
+                        # Robust case-insensitive metric extraction
+                        def _get_val(keys, default=0.0):
+                            for k in keys:
+                                for mk, mv in metrics.items():
+                                    if mk.lower().replace('@', '').replace('_', '').replace(' ', '') == k.lower().replace('@', '').replace('_', '').replace(' ', ''):
+                                        try:
+                                            return float(mv) if mv not in (None, '', '-') else default
+                                        except (ValueError, TypeError):
+                                            pass
+                            return default
+
+                        ap50 = _get_val(['ap50', 'map50', 'map050', 'ap'])
+                        f1 = _get_val(['f1', 'f1score', 'fscore'])
+                        p_val = _get_val(['precision', 'prec', 'p'])
+                        r_val = _get_val(['recall', 'rec', 'r'])
 
                         if name == 'all_video':
                             results['unmerged_mAP'] = ap50
@@ -141,7 +153,15 @@ class EvaluateWorkerThread(QThread):
                         elif name.endswith('_all_video'):
                             continue
 
-                        video_metrics.append({'name': name, 'metrics': metrics})
+                        video_metrics.append({
+                            'name': name,
+                            'video': name,
+                            'metrics': metrics,
+                            'ap50': ap50,
+                            'f1': f1,
+                            'precision': p_val,
+                            'recall': r_val
+                        })
 
             # Real per-class & per-size metrics written by the engine
             per_class_file = os.path.join(eval_result_dir, 'per_class_metrics.json') if eval_result_dir else ""
@@ -191,10 +211,15 @@ class EvaluateWorkerThread(QThread):
             bar_path = os.path.join(self.results_dir, "class_ap50_bar.png")
             size_path = os.path.join(self.results_dir, "size_breakdown_bar.png")
             merge_path = os.path.join(self.results_dir, "class_merge_comparison.png")
+            pr_path = os.path.join(self.results_dir, "diag_pr_curves.png")
+            f1_path = os.path.join(self.results_dir, "diag_f1_vs_confidence.png")
+            conf_dist_path = os.path.join(self.results_dir, "diag_confidence_distribution.png")
+            err_breakdown_path = os.path.join(self.results_dir, "diag_error_breakdown.png")
             cm_path = os.path.join(self.results_dir, "diag_confusion_matrix.png")
             calib_path = os.path.join(self.results_dir, "diag_calibration_ece.png")
             iou_path = os.path.join(self.results_dir, "diag_iou_distribution.png")
             ar_path = os.path.join(self.results_dir, "diag_aspect_ratio_bias.png")
+            per_video_path = os.path.join(self.results_dir, "diag_per_video_comparison.png")
             track_path = os.path.join(self.results_dir, "diag_tracking_taxonomy.png")
             spatial_path = os.path.join(self.results_dir, "diag_spatial_error_map.png")
 
@@ -238,6 +263,26 @@ class EvaluateWorkerThread(QThread):
                             optimal_thr=calib.get('optimal_thr', 0.5),
                             save_path=calib_path
                         )
+                    if diag.get('per_class_curves'):
+                        AdvancedDiagnosticsEngine.generate_pr_curves_plot(
+                            per_class_curves=diag['per_class_curves'],
+                            save_path=pr_path
+                        )
+                        AdvancedDiagnosticsEngine.generate_f1_confidence_plot(
+                            per_class_curves=diag['per_class_curves'],
+                            save_path=f1_path
+                        )
+                    if diag.get('conf_tp') or diag.get('conf_fp'):
+                        AdvancedDiagnosticsEngine.generate_confidence_distribution_plot(
+                            conf_tp=diag.get('conf_tp', []),
+                            conf_fp=diag.get('conf_fp', []),
+                            save_path=conf_dist_path
+                        )
+                    if diag.get('error_breakdown'):
+                        AdvancedDiagnosticsEngine.generate_error_breakdown_plot(
+                            error_breakdown=diag['error_breakdown'],
+                            save_path=err_breakdown_path
+                        )
                     if diag.get('ious'):
                         AdvancedDiagnosticsEngine.generate_iou_distribution_plot(
                             ious=np.array(diag['ious']),
@@ -259,20 +304,31 @@ class EvaluateWorkerThread(QThread):
                             canvas_size=tuple(diag.get('canvas_size', (1920, 1080))),
                             save_path=spatial_path
                         )
+                    if results.get('video_metrics'):
+                        AdvancedDiagnosticsEngine.generate_per_video_comparison_plot(
+                            video_metrics=results['video_metrics'],
+                            save_path=per_video_path
+                        )
                 else:
                     self.log_signal.emit("\n[WARNING] No diagnostics.json produced by the engine; advanced diagnostic plots were skipped.\n")
             except Exception as diag_err:
                 self.log_signal.emit(f"\n[WARNING] Could not generate advanced diagnostic charts: {str(diag_err)}\n")
 
-            results['bar_path'] = bar_path
-            results['size_path'] = size_path
-            results['merge_path'] = merge_path if self.merge_groups else None
-            results['cm_path'] = cm_path
-            results['calib_path'] = calib_path
-            results['iou_path'] = iou_path
-            results['ar_path'] = ar_path
-            results['track_path'] = track_path
-            results['spatial_path'] = spatial_path
+            results['bar_path'] = bar_path if os.path.exists(bar_path) else None
+            results['size_path'] = size_path if os.path.exists(size_path) else None
+            results['merge_path'] = merge_path if (self.merge_groups and os.path.exists(merge_path)) else None
+            results['pr_path'] = pr_path if os.path.exists(pr_path) else None
+            results['f1_path'] = f1_path if os.path.exists(f1_path) else None
+            results['conf_dist_path'] = conf_dist_path if os.path.exists(conf_dist_path) else None
+            results['err_breakdown_path'] = err_breakdown_path if os.path.exists(err_breakdown_path) else None
+            results['cm_path'] = cm_path if os.path.exists(cm_path) else None
+            results['calib_path'] = calib_path if os.path.exists(calib_path) else None
+            results['iou_path'] = iou_path if os.path.exists(iou_path) else None
+            results['ar_path'] = ar_path if os.path.exists(ar_path) else None
+            results['per_video_path'] = per_video_path if os.path.exists(per_video_path) else None
+            results['track_path'] = track_path if os.path.exists(track_path) else None
+            results['spatial_path'] = spatial_path if os.path.exists(spatial_path) else None
+            results['diagnostics_data'] = diag
 
             self.log_signal.emit("\n[SUCCESS] Evaluation & Analytics Finished Successfully!\n")
             self.finished_signal.emit(True, "Evaluation completed!", results)
@@ -474,6 +530,10 @@ class SingleSetWidget(QFrame):
     def get_category(self):
         return self.edit_cat.text().strip()
 
+    def get_paths(self):
+        """Returns tuple of (gt_path, dt_path, category) for this bundle."""
+        return self.get_gt_path(), self.get_dt_path(), self.get_category()
+
 
 class EvaluationDialog(QDialog):
     """Multi-Tab Advanced Evaluation Dialog."""
@@ -563,15 +623,17 @@ class EvaluationDialog(QDialog):
         bottom_layout.addStretch()
 
         btn_layout = QHBoxLayout()
-        self.btn_evaluate = QPushButton("Evaluate")
+        self.btn_evaluate = QPushButton("▶ Run Evaluation")
         self.btn_evaluate.setMinimumHeight(40)
+        self.btn_evaluate.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; font-size: 13px;")
         self.btn_evaluate.clicked.connect(self.start_evaluation)
         btn_layout.addWidget(self.btn_evaluate)
         
-        self.btn_visualize = QPushButton("Advanced Visualizer")
-        self.btn_visualize.setMinimumHeight(40)
-        self.btn_visualize.clicked.connect(self.open_advanced_visualizer)
-        btn_layout.addWidget(self.btn_visualize)
+        self.btn_inspect_main = QPushButton("👁️ Inspect in Main Canvas")
+        self.btn_inspect_main.setMinimumHeight(40)
+        self.btn_inspect_main.setStyleSheet("background-color: #2e5b38; color: white; font-weight: bold; font-size: 13px;")
+        self.btn_inspect_main.clicked.connect(self.inspect_in_main_canvas)
+        btn_layout.addWidget(self.btn_inspect_main)
         
         main_layout.addLayout(btn_layout)
 
@@ -756,9 +818,60 @@ class EvaluationDialog(QDialog):
         scroll.setWidgetResizable(True)
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setSpacing(12)
 
-        # Basic Charts Group
+        # 1. Aesthetic & Replot Toolbar
+        aesthetic_box = QGroupBox("🎨 Chart Aesthetics & Theme Customization")
+        aesthetic_box.setStyleSheet("QGroupBox { font-weight: bold; }")
+        a_layout = QHBoxLayout(aesthetic_box)
+        a_layout.setContentsMargins(10, 10, 10, 10)
+        a_layout.setSpacing(12)
+
+        a_layout.addWidget(QLabel("<b>Theme:</b>"))
+        self.combo_theme = QComboBox()
+        self.combo_theme.addItems(["Dark", "Light", "Publication"])
+        a_layout.addWidget(self.combo_theme)
+
+        a_layout.addWidget(QLabel("<b>Palette:</b>"))
+        self.combo_palette = QComboBox()
+        self.combo_palette.addItems(["Vibrant", "Viridis", "Cool Ocean", "Warm Sunset", "Monochrome"])
+        a_layout.addWidget(self.combo_palette)
+
+        a_layout.addWidget(QLabel("<b>DPI:</b>"))
+        self.combo_dpi = QComboBox()
+        self.combo_dpi.addItem("100 DPI (Standard)", 100)
+        self.combo_dpi.addItem("150 DPI (Crisp HD)", 150)
+        self.combo_dpi.addItem("300 DPI (Ultra / Print)", 300)
+        self.combo_dpi.setCurrentIndex(1)
+        a_layout.addWidget(self.combo_dpi)
+
+        self.chk_show_grid = QCheckBox("Show Grid")
+        self.chk_show_grid.setChecked(True)
+        a_layout.addWidget(self.chk_show_grid)
+
+        self.btn_replot = QPushButton("🔄 Re-plot & Refresh Charts")
+        self.btn_replot.setStyleSheet("""
+            QPushButton {
+                background-color: #007acc;
+                color: white;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 6px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0098ff;
+            }
+        """)
+        self.btn_replot.clicked.connect(self.replot_diagnostics_with_aesthetics)
+        a_layout.addWidget(self.btn_replot)
+        a_layout.addStretch()
+
+        layout.addWidget(aesthetic_box)
+
+        # 2. Basic Charts Group
         group_basic = QGroupBox("1. Class AP50 & Size Breakdown Diagnostics")
+        group_basic.setStyleSheet("QGroupBox { font-weight: bold; }")
         layout_basic = QHBoxLayout(group_basic)
 
         self.lbl_plot_bar = QLabel("Run evaluation to generate per-class AP50 bar chart.")
@@ -774,37 +887,65 @@ class EvaluationDialog(QDialog):
         layout_basic.addWidget(self.lbl_plot_merge)
         layout.addWidget(group_basic)
 
-        # Advanced Diagnostic Plots Grid (6 Plots)
-        group_diag = QGroupBox("2. Advanced Model Diagnostic Dashboard (6 Deep Analytics)")
+        # 3. Advanced Diagnostic Plots Grid (11 Comprehensive Deep Analytics)
+        group_diag = QGroupBox("2. Comprehensive Model Diagnostics Dashboard (11 Deep Analytics)")
+        group_diag.setStyleSheet("QGroupBox { font-weight: bold; }")
         diag_grid = QGridLayout(group_diag)
+        diag_grid.setSpacing(12)
 
+        # Row 0: PR Curves & F1 vs Confidence
+        self.lbl_diag_pr = QLabel("Precision-Recall Curves (AUC)")
+        self.lbl_diag_pr.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_pr, 0, 0)
+
+        self.lbl_diag_f1 = QLabel("F1-Score vs Confidence Threshold")
+        self.lbl_diag_f1.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_f1, 0, 1)
+
+        # Row 1: Confusion Matrix & Calibration Curve
         self.lbl_diag_cm = QLabel("Confusion Matrix Heatmap")
         self.lbl_diag_cm.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_cm, 0, 0)
+        diag_grid.addWidget(self.lbl_diag_cm, 1, 0)
 
         self.lbl_diag_calib = QLabel("Confidence Calibration Curve")
         self.lbl_diag_calib.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_calib, 0, 1)
+        diag_grid.addWidget(self.lbl_diag_calib, 1, 1)
 
+        # Row 2: TP vs FP Confidence Separation & Error Breakdown Donut
+        self.lbl_diag_conf_dist = QLabel("TP vs FP Confidence Distribution")
+        self.lbl_diag_conf_dist.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_conf_dist, 2, 0)
+
+        self.lbl_diag_err_breakdown = QLabel("Error Taxonomy Breakdown Donut")
+        self.lbl_diag_err_breakdown.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_err_breakdown, 2, 1)
+
+        # Row 3: Localization IoU Histogram & Aspect Ratio Bias
         self.lbl_diag_iou = QLabel("Localization IoU Histogram")
         self.lbl_diag_iou.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_iou, 1, 0)
+        diag_grid.addWidget(self.lbl_diag_iou, 3, 0)
 
         self.lbl_diag_ar = QLabel("Aspect Ratio Geometry Bias")
         self.lbl_diag_ar.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_ar, 1, 1)
+        diag_grid.addWidget(self.lbl_diag_ar, 3, 1)
 
-        self.lbl_diag_track = QLabel("MOT Tracking Error Taxonomy")
-        self.lbl_diag_track.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_track, 2, 0)
-
+        # Row 4: Spatial 2D Error Heatmap & Cross-Video Comparison
         self.lbl_diag_spatial = QLabel("Spatial 2D Error Heatmap")
         self.lbl_diag_spatial.setAlignment(Qt.AlignCenter)
-        diag_grid.addWidget(self.lbl_diag_spatial, 2, 1)
+        diag_grid.addWidget(self.lbl_diag_spatial, 4, 0)
+
+        self.lbl_diag_per_video = QLabel("Multi-Video Performance Comparison")
+        self.lbl_diag_per_video.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_per_video, 4, 1)
+
+        # Row 5: MOT Tracking Failure Taxonomy
+        self.lbl_diag_track = QLabel("MOT Tracking Error Taxonomy")
+        self.lbl_diag_track.setAlignment(Qt.AlignCenter)
+        diag_grid.addWidget(self.lbl_diag_track, 5, 0)
 
         layout.addWidget(group_diag)
 
-        # Detailed Stats Table
+        # 4. Detailed Stats Table
         layout.addWidget(QLabel("<b>3. Detailed Per-Class Performance Summary Table:</b>"))
         self.table_stats = QTableWidget(0, 6)
         self.table_stats.setHorizontalHeaderLabels(["Class Name", "AP50", "AP", "TP", "FP", "FN"])
@@ -812,7 +953,7 @@ class EvaluationDialog(QDialog):
         self.table_stats.setMinimumHeight(200)
         layout.addWidget(self.table_stats)
 
-        # Add Per-Video Table
+        # 5. Per-Video Table
         layout.addWidget(QLabel("<b>4. Per-Video Detection Metrics:</b>"))
         self.table_video_stats = QTableWidget(0, 6)
         self.table_video_stats.setHorizontalHeaderLabels(["Video", "Precision", "Recall", "F1", "AP", "AP50"])
@@ -1034,10 +1175,67 @@ class EvaluationDialog(QDialog):
             f.writelines(lines)
         return out_dir
 
+    def inspect_in_main_canvas(self):
+        """Loads evaluated video and predictions directly into the main VIAT canvas."""
+        main_win = self.parent() or getattr(self, 'main_window', None)
+        if not main_win:
+            QMessageBox.warning(self, "No Main Window", "Main VIAT application window was not found.")
+            return
+
+        gt_paths = []
+        dt_paths = []
+        for b in self.bundle_widgets:
+            if hasattr(b, 'get_paths'):
+                gt, dt, _ = b.get_paths()
+            else:
+                gt = b.get_gt_path() if hasattr(b, 'get_gt_path') else ""
+                dt = b.get_dt_path() if hasattr(b, 'get_dt_path') else ""
+            if gt and os.path.exists(gt):
+                gt_paths.append(gt)
+            if dt and os.path.exists(dt):
+                dt_paths.append(dt)
+
+        if not dt_paths and hasattr(self, 'last_results_dir') and self.last_results_dir:
+            parent_det = os.path.dirname(os.path.abspath(self.last_results_dir))
+            if os.path.basename(parent_det) == 'evaluation_result':
+                parent_det = os.path.dirname(parent_det)
+            if os.path.exists(parent_det):
+                dt_paths.append(parent_det)
+
+        if not dt_paths:
+            QMessageBox.information(self, "No Detections", "Please set or run an evaluation first to load predictions.")
+            return
+
+        det_dir = dt_paths[0]
+        gt_dir = gt_paths[0] if gt_paths else ""
+
+        pred_files = glob.glob(os.path.join(det_dir, "*.txt")) + glob.glob(os.path.join(det_dir, "*.json"))
+        # Exclude summary jsons
+        pred_files = [p for p in pred_files if not os.path.basename(p).startswith(('per_class', 'diagnostics', 'combined'))]
+        if not pred_files:
+            QMessageBox.warning(self, "No Predictions", f"No .txt or .json prediction files found in:\n{det_dir}")
+            return
+
+        pred_file = pred_files[0]
+        video_name = os.path.splitext(os.path.basename(pred_file))[0]
+        video_names = [os.path.splitext(os.path.basename(p))[0] for p in pred_files]
+
+        if hasattr(main_win, 'load_evaluation_dataset_into_inspector'):
+            main_win.load_evaluation_dataset_into_inspector(gt_dir, det_dir, video_names, initial_video=video_name)
+            self.hide()
+        elif hasattr(main_win, 'load_predictions_file_into_inspector'):
+            exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV']
+            for ext in exts:
+                candidate = os.path.join(gt_dir, video_name + ext)
+                if os.path.exists(candidate) and hasattr(main_win, 'open_video'):
+                    main_win.open_video(candidate)
+                    break
+            main_win.load_predictions_file_into_inspector(pred_file, video_name)
+            self.hide()
+
     def open_advanced_visualizer(self):
         try:
             import viat.widgets.visualizer as vis
-            # Keep reference to avoid garbage collection
             self.vis_window = vis.EvaluatorVisualizer()
             self.vis_window.show()
         except Exception as e:
@@ -1226,33 +1424,172 @@ class EvaluationDialog(QDialog):
             self.btn_evaluate.setEnabled(True)
             self.progress_bar.setVisible(False)
 
+    def refresh_plot_displays(self, results=None):
+        """Updates all 11 chart labels from results dictionary."""
+        if not results:
+            results = getattr(self, 'last_eval_results', {})
+        if not results:
+            return
+
+        # Basic Charts
+        if results.get('bar_path') and os.path.exists(results['bar_path']):
+            self.lbl_plot_bar.setPixmap(QPixmap(results['bar_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if results.get('size_path') and os.path.exists(results['size_path']):
+            self.lbl_plot_size.setPixmap(QPixmap(results['size_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if results.get('merge_path') and os.path.exists(results['merge_path']):
+            self.lbl_plot_merge.setPixmap(QPixmap(results['merge_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        # Advanced Diagnostic Plots (11 Plots)
+        diag_mappings = [
+            ('pr_path', self.lbl_diag_pr, 500, 340),
+            ('f1_path', self.lbl_diag_f1, 500, 340),
+            ('cm_path', self.lbl_diag_cm, 480, 360),
+            ('calib_path', self.lbl_diag_calib, 550, 320),
+            ('conf_dist_path', self.lbl_diag_conf_dist, 500, 320),
+            ('err_breakdown_path', self.lbl_diag_err_breakdown, 480, 340),
+            ('iou_path', self.lbl_diag_iou, 480, 320),
+            ('ar_path', self.lbl_diag_ar, 480, 320),
+            ('spatial_path', self.lbl_diag_spatial, 550, 320),
+            ('per_video_path', self.lbl_diag_per_video, 520, 320),
+            ('track_path', self.lbl_diag_track, 480, 320),
+        ]
+        for key, label_widget, w, h in diag_mappings:
+            path = results.get(key)
+            if path and os.path.exists(path):
+                label_widget.setPixmap(QPixmap(path).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def replot_diagnostics_with_aesthetics(self):
+        """Re-plots all active charts with the user-selected theme, palette, and DPI."""
+        results = getattr(self, 'last_eval_results', None)
+        if not results:
+            QMessageBox.information(self, "No Evaluation Data", "Please run an evaluation first before customizing charts.")
+            return
+
+        theme = self.combo_theme.currentText()
+        palette = self.combo_palette.currentText()
+        dpi = self.combo_dpi.currentData() or 150
+        show_grid = self.chk_show_grid.isChecked()
+
+        results_dir = getattr(self, 'results_dir', None) or getattr(self, 'last_results_dir', None)
+        if not results_dir:
+            return
+
+        # 1. Re-plot basic charts
+        if 'class_metrics' in results and results['class_metrics']:
+            bar_path = os.path.join(results_dir, "class_ap50_bar.png")
+            from viat.evaluation.utils.plotter import plot_map_by_class, plot_map_by_size
+            named_m = {c: {'AP50': v.get('ap50', 0), 'AP': v.get('ap', 0)} for c, v in results['class_metrics'].items()}
+            plot_map_by_class(named_m, bar_path, theme, palette, dpi)
+            results['bar_path'] = bar_path
+
+        if 'size_metrics' in results and results['size_metrics']:
+            size_path = os.path.join(results_dir, "size_breakdown_bar.png")
+            from viat.evaluation.utils.plotter import plot_map_by_size
+            named_s = {k: v.get('ap50', 0) for k, v in results['size_metrics'].items()}
+            plot_map_by_size(named_s, size_path, theme, palette, dpi)
+            results['size_path'] = size_path
+
+        # 2. Re-plot advanced diagnostic charts from diagnostics_data
+        diag = results.get('diagnostics_data')
+        if not diag:
+            diag_file = os.path.join(results_dir, 'diagnostics.json')
+            if os.path.exists(diag_file):
+                import json as _json
+                with open(diag_file, 'r') as f:
+                    diag = _json.load(f)
+
+        if diag:
+            classes = diag.get('classes', [])
+            cm = np.array(diag.get('confusion', []), dtype=float)
+            if len(classes) and cm.size:
+                cm_path = os.path.join(results_dir, "diag_confusion_matrix.png")
+                AdvancedDiagnosticsEngine.generate_confusion_matrix_plot(cm, classes, cm_path, theme, palette, dpi)
+                results['cm_path'] = cm_path
+
+            calib = diag.get('calibration', {})
+            if calib.get('confidences'):
+                calib_path = os.path.join(results_dir, "diag_calibration_ece.png")
+                AdvancedDiagnosticsEngine.generate_calibration_plot(
+                    np.array(calib['confidences']), np.array(calib['precisions']), np.array(calib['recalls']),
+                    calib.get('ece_score', 0.0), calib.get('optimal_thr', 0.5), calib_path,
+                    theme, palette, dpi, show_grid=show_grid
+                )
+                results['calib_path'] = calib_path
+
+            if diag.get('per_class_curves'):
+                pr_path = os.path.join(results_dir, "diag_pr_curves.png")
+                AdvancedDiagnosticsEngine.generate_pr_curves_plot(
+                    diag['per_class_curves'], pr_path, theme, palette, dpi, show_grid=show_grid
+                )
+                results['pr_path'] = pr_path
+
+                f1_path = os.path.join(results_dir, "diag_f1_vs_confidence.png")
+                AdvancedDiagnosticsEngine.generate_f1_confidence_plot(
+                    diag['per_class_curves'], f1_path, theme, palette, dpi, show_grid=show_grid
+                )
+                results['f1_path'] = f1_path
+
+            if diag.get('conf_tp') or diag.get('conf_fp'):
+                conf_dist_path = os.path.join(results_dir, "diag_confidence_distribution.png")
+                AdvancedDiagnosticsEngine.generate_confidence_distribution_plot(
+                    diag.get('conf_tp', []), diag.get('conf_fp', []), conf_dist_path,
+                    theme, palette, dpi, show_grid=show_grid
+                )
+                results['conf_dist_path'] = conf_dist_path
+
+            if diag.get('error_breakdown'):
+                err_breakdown_path = os.path.join(results_dir, "diag_error_breakdown.png")
+                AdvancedDiagnosticsEngine.generate_error_breakdown_plot(
+                    diag['error_breakdown'], err_breakdown_path, theme, palette, dpi
+                )
+                results['err_breakdown_path'] = err_breakdown_path
+
+            if diag.get('ious'):
+                iou_path = os.path.join(results_dir, "diag_iou_distribution.png")
+                AdvancedDiagnosticsEngine.generate_iou_distribution_plot(
+                    diag['ious'], iou_path, theme, palette, dpi, show_grid=show_grid
+                )
+                results['iou_path'] = iou_path
+
+            ar = diag.get('aspect_ratio', {})
+            if ar.get('ratios'):
+                ar_path = os.path.join(results_dir, "diag_aspect_ratio_bias.png")
+                AdvancedDiagnosticsEngine.generate_aspect_ratio_plot(
+                    ar['ratios'], ar['error_rates'], ar_path, theme, palette, dpi, show_grid=show_grid
+                )
+                results['ar_path'] = ar_path
+
+            fp_coords = diag.get('fp_coords', [])
+            fn_coords = diag.get('fn_coords', [])
+            if fp_coords or fn_coords:
+                spatial_path = os.path.join(results_dir, "diag_spatial_error_map.png")
+                AdvancedDiagnosticsEngine.generate_spatial_error_heatmap(
+                    fp_coords, fn_coords, tuple(diag.get('canvas_size', (1920, 1080))), spatial_path,
+                    theme, palette, dpi
+                )
+            v_metrics = results.get('video_metrics') or diag.get('video_metrics')
+            if v_metrics:
+                per_video_path = os.path.join(results_dir, "diag_per_video_comparison.png")
+                AdvancedDiagnosticsEngine.generate_per_video_comparison_plot(
+                    v_metrics, per_video_path, theme, palette, dpi
+                )
+                results['per_video_path'] = per_video_path
+
+        # 3. Refresh UI displays
+        self.refresh_plot_displays(results)
+        QMessageBox.information(self, "Plots Updated", f"Successfully re-rendered all diagnostic charts with '{theme}' theme and '{palette}' palette at {dpi} DPI.")
+
     def on_evaluation_finished(self, success, msg, results):
         self.btn_evaluate.setEnabled(True)
         self.progress_bar.setVisible(False)
 
         if success and results:
+            self.last_eval_results = results
+            self.results_dir = self.last_results_dir
             self.btn_open_results.setEnabled(True)
 
             # Update Analytics Plots
-            if 'bar_path' in results and os.path.exists(results['bar_path']):
-                self.lbl_plot_bar.setPixmap(QPixmap(results['bar_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            if 'size_path' in results and os.path.exists(results['size_path']):
-                self.lbl_plot_size.setPixmap(QPixmap(results['size_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            if results.get('merge_path') and os.path.exists(results['merge_path']):
-                self.lbl_plot_merge.setPixmap(QPixmap(results['merge_path']).scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-
-            # Set 6 Advanced Diagnostic Pixmaps
-            diag_mappings = [
-                ('cm_path', self.lbl_diag_cm, 450, 350),
-                ('calib_path', self.lbl_diag_calib, 550, 320),
-                ('iou_path', self.lbl_diag_iou, 450, 320),
-                ('ar_path', self.lbl_diag_ar, 450, 320),
-                ('track_path', self.lbl_diag_track, 450, 320),
-                ('spatial_path', self.lbl_diag_spatial, 550, 320),
-            ]
-            for key, label_widget, w, h in diag_mappings:
-                if key in results and os.path.exists(results[key]):
-                    label_widget.setPixmap(QPixmap(results[key]).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.refresh_plot_displays(results)
 
 
             # Populate Stats Table

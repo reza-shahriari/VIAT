@@ -17,13 +17,15 @@ except ImportError:
     HAS_MATPLOTLIB = False
 
 
-def plot_map_by_class(class_metrics_dict, output_path):
+def plot_map_by_class(class_metrics_dict, output_path, theme='Dark', palette='Vibrant', dpi=150):
     """
     Plots mAP by Class as a bar chart.
     class_metrics_dict: dict like {'Soldier': {'AP50': 0.85, 'AP': 0.62}, 'Human': {'AP50': 0.78, 'AP': 0.55}}
     """
     if not HAS_MATPLOTLIB or not class_metrics_dict:
         return
+
+    from viat.evaluation.utils.advanced_diagnostics import AestheticConfig
 
     classes = list(class_metrics_dict.keys())
     ap50_vals = [class_metrics_dict[c].get('AP50', 0.0) or 0.0 for c in classes]
@@ -38,44 +40,53 @@ def plot_map_by_class(class_metrics_dict, output_path):
     x = np.arange(len(classes))
     width = 0.35
 
-    plt.figure(figsize=(max(8, len(classes) * 1.5), 6), dpi=150)
-    plt.style.use('dark_background')
+    colors = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
+    theme_cfg = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
 
-    bars1 = plt.bar(x - width/2, ap50_vals, width, label='mAP@0.50', color='#4CAF50')
-    bars2 = plt.bar(x + width/2, ap_vals, width, label='mAP@[0.4:0.95]', color='#2196F3')
+    fig, ax = plt.subplots(figsize=(max(8, len(classes) * 1.5), 5.5), dpi=dpi)
 
-    plt.ylabel('mAP (%)', fontsize=12, fontweight='bold')
-    plt.title('mAP Performance by Class', fontsize=14, fontweight='bold', pad=15)
-    plt.xticks(x, classes, fontsize=11, fontweight='bold')
-    plt.ylim(0, 105)
-    plt.legend(fontsize=11)
-    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    bars1 = ax.bar(x - width/2, ap50_vals, width, label='mAP@0.50', color=colors[2], alpha=0.85)
+    bars2 = ax.bar(x + width/2, ap_vals, width, label='mAP@[0.40:0.95]', color=colors[0], alpha=0.85)
+
+    ax.set_ylabel('mAP (%)', fontsize=12, fontweight='bold')
+    ax.set_title('mAP Performance by Class', fontsize=14, fontweight='bold', pad=15)
+    ax.set_xticks(x)
+    ax.set_xticklabels(classes, fontsize=11, fontweight='bold')
+    ax.set_ylim(0, 105)
+
+    leg = ax.legend(fontsize=11, frameon=True)
+    leg.get_frame().set_facecolor(theme_cfg['legend_bg'])
+    leg.get_frame().set_edgecolor(theme_cfg['legend_edge'])
+    for text in leg.get_texts():
+        text.set_color(theme_cfg['text'])
 
     for bar in bars1:
         yval = bar.get_height()
         if yval > 0:
-            plt.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
-                     ha='center', va='bottom', fontsize=9, color='#81C784')
+            ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
+                    ha='center', va='bottom', fontsize=9, color=theme_cfg['text'], fontweight='bold')
     for bar in bars2:
         yval = bar.get_height()
         if yval > 0:
-            plt.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
-                     ha='center', va='bottom', fontsize=9, color='#64B5F6')
+            ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
+                    ha='center', va='bottom', fontsize=9, color=theme_cfg['text'], fontweight='bold')
 
+    AestheticConfig.apply(fig, ax, theme, show_grid=True)
     plt.tight_layout()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path)
-    plt.close()
-    print(f"Saved Class mAP plot to {output_path}")
+    plt.savefig(output_path, facecolor=fig.get_facecolor(), edgecolor='none')
+    plt.close(fig)
 
 
-def plot_map_by_size(size_metrics_dict, output_path):
+def plot_map_by_size(size_metrics_dict, output_path, theme='Dark', palette='Vibrant', dpi=150):
     """
     Plots mAP by Object Size (Small, Medium, Large) as a bar chart.
     size_metrics_dict: dict like {'Small (<32²)': 0.45, 'Medium (32²-96²)': 0.72, 'Large (>96²)': 0.88}
     """
     if not HAS_MATPLOTLIB or not size_metrics_dict:
         return
+
+    from viat.evaluation.utils.advanced_diagnostics import AestheticConfig
 
     sizes = list(size_metrics_dict.keys())
     vals = [
@@ -85,28 +96,27 @@ def plot_map_by_size(size_metrics_dict, output_path):
         for s in sizes
     ]
 
-    # Convert to percentage if decimal
     if max(vals or [0]) <= 1.0:
         vals = [v * 100 for v in vals]
 
-    plt.figure(figsize=(8, 5), dpi=150)
-    plt.style.use('dark_background')
+    colors = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
+    theme_cfg = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
 
-    colors = ['#FF9800', '#00BCD4', '#E91E63']
-    bars = plt.bar(sizes, vals, color=colors[:len(sizes)], width=0.45)
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
 
-    plt.ylabel('mAP (%)', fontsize=12, fontweight='bold')
-    plt.title('mAP Performance by Object Size', fontsize=14, fontweight='bold', pad=15)
-    plt.ylim(0, 105)
-    plt.grid(axis='y', linestyle='--', alpha=0.3)
+    bars = ax.bar(sizes, vals, color=colors[:len(sizes)], width=0.45, alpha=0.85)
+
+    ax.set_ylabel('mAP (%)', fontsize=12, fontweight='bold')
+    ax.set_title('mAP Performance by Object Size', fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylim(0, 105)
 
     for bar in bars:
         yval = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
-                 ha='center', va='bottom', fontsize=10, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
+                ha='center', va='bottom', fontsize=10, fontweight='bold', color=theme_cfg['text'])
 
+    AestheticConfig.apply(fig, ax, theme, show_grid=True)
     plt.tight_layout()
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path)
-    plt.close()
-    print(f"Saved Size mAP plot to {output_path}")
+    os.makedirs(os.path.dirname(save_path := output_path), exist_ok=True)
+    plt.savefig(save_path, facecolor=fig.get_facecolor(), edgecolor='none')
+    plt.close(fig)

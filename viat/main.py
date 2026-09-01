@@ -637,6 +637,7 @@ class VideoAnnotationTool(QMainWindow):
         self.setup_uncertain_frames_manager()
         self.setup_class_frames_manager()
         self.setup_video_manager()
+        self.setup_evaluation_inspector()
         self.setWindowTitle('VIAT - Video Image Annotation Tool')
         self.setWindowIcon(self.icon_provider.get_icon('app-icon'))
         self.viat_setup_extra_menus()
@@ -1165,6 +1166,325 @@ class VideoAnnotationTool(QMainWindow):
             self.action_sam_interactive.setCheckable(True)
             self.action_sam_interactive.triggered.connect(self.
                 toggle_sam_interactive_mode)
+
+    def setup_evaluation_inspector(self):
+        """Set up Evaluation Inspector Dock signals and menu actions."""
+        if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
+            dock = self.evaluation_inspector_dock
+            dock.eval_mode_toggled.connect(self.on_eval_mode_toggled)
+            dock.conf_threshold_changed.connect(self.on_eval_conf_changed)
+            dock.iou_threshold_changed.connect(self.on_eval_iou_changed)
+            dock.filter_changed.connect(self.on_eval_filter_changed)
+            dock.jump_to_frame_requested.connect(self.set_current_frame)
+            dock.promote_fp_requested.connect(self.on_eval_promote_fp)
+            dock.load_predictions_requested.connect(self.on_eval_load_predictions)
+            dock.video_selected.connect(self.on_eval_video_selected)
+            dock.save_ground_truth_requested.connect(self.save_evaluation_ground_truth)
+
+    def on_eval_mode_toggled(self, checked):
+        """Toggle evaluation overlay on canvas."""
+        if hasattr(self, 'canvas'):
+            self.canvas.set_eval_mode(checked)
+        if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
+            self.evaluation_inspector_dock.btn_toggle_mode.blockSignals(True)
+            self.evaluation_inspector_dock.btn_toggle_mode.setChecked(checked)
+            self.evaluation_inspector_dock.btn_toggle_mode.setText("👁️ Evaluation View ACTIVE" if checked else "👁️ Enable Evaluation View")
+            self.evaluation_inspector_dock.btn_toggle_mode.blockSignals(False)
+        self.statusBar.showMessage(f"Evaluation View Mode {'Enabled' if checked else 'Disabled'}", 4000)
+
+    def on_eval_conf_changed(self, conf):
+        if hasattr(self, 'canvas'):
+            self.canvas.set_eval_conf_threshold(conf)
+
+    def on_eval_iou_changed(self, iou):
+        if hasattr(self, 'canvas'):
+            self.canvas.set_eval_iou_threshold(iou)
+
+    def on_eval_filter_changed(self, filter_mode):
+        if hasattr(self, 'canvas'):
+            self.canvas.set_eval_filter(filter_mode)
+
+    def on_eval_promote_fp(self, pred, frame_idx):
+        """Converts a model prediction into a permanent Ground Truth annotation."""
+        if not pred or 'bbox' not in pred:
+            return
+        pb = pred['bbox']
+        rect = QRect(int(pb[0]), int(pb[1]), int(pb[2]), int(pb[3]))
+        cls_name = pred.get('class_name') or self.canvas.current_class
+
+        self.save_undo_state()
+
+        bbox = BoundingBox(rect, cls_name)
+        bbox.color = self.canvas.class_colors.get(cls_name, QColor(0, 255, 0))
+        bbox.source = "promoted_prediction"
+
+        if hasattr(self, 'frame_annotations'):
+            if frame_idx not in self.frame_annotations:
+                self.frame_annotations[frame_idx] = []
+            self.frame_annotations[frame_idx].append(bbox)
+
+        if frame_idx == self.current_frame:
+            self.canvas.annotations.append(bbox)
+
+        self.canvas.recompute_eval_matches()
+        self.canvas.update()
+        self.statusBar.showMessage(f"Promoted [{cls_name}] prediction to Ground Truth on Frame {frame_idx + 1}", 5000)
+
+    def on_eval_load_predictions(self):
+        """Prompt user to select a prediction file (.txt or .json) and load into Evaluation Inspector."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Model Predictions File", "", "Prediction Files (*.txt *.json);;All Files (*)"
+        )
+        if not file_path:
+            return
+        self.load_predictions_file_into_inspector(file_path)
+
+    def load_predictions_file_into_inspector(self, file_path, video_name=None):
+        """Parses prediction file and loads it into canvas & inspector dock."""
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "File Not Found", f"Prediction file does not exist: {file_path}")
+            return
+
+        if not video_name:
+            video_name = os.path.splitext(os.path.basename(file_path))[0]
+
+        preds_by_frame = {}
+        try:
+            if file_path.endswith('.json'):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                anns = data.get('annotations', data) if isinstance(data, dict) else data
+                images = {img.get('id'): idx for idx, img in enumerate(data.get('images', []))} if isinstance(data, dict) else {}
+                categories = {cat.get('id'): cat.get('name') for cat in data.get('categories', [])} if isinstance(data, dict) else {}
+
+                for ann in anns:
+                    img_id = ann.get('image_id', 1)
+                    frame_idx = images.get(img_id, img_id - 1 if isinstance(img_id, int) and img_id > 0 else 0)
+                    if frame_idx not in preds_by_frame:
+                        preds_by_frame[frame_idx] = []
+                    cat_id = ann.get('category_id', 1)
+                    cls_name = categories.get(cat_id, str(cat_id))
+                    preds_by_frame[frame_idx].append({
+                        'bbox': ann.get('bbox', [0, 0, 0, 0]),
+                        'score': float(ann.get('score', ann.get('confidence', 1.0))),
+                        'class_name': cls_name,
+                        'class_id': cat_id
+                    })
+            else:
+                # Text format (e.g. [[class_id, x1, y1, x2, y2, score]];)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                for f_idx, line in enumerate(lines):
+                    clean = line.strip().rstrip(';').strip()
+                    if not clean:
+                        continue
+                    try:
+                        raw_list = eval(clean)
+                    except Exception:
+                        continue
+                    if not isinstance(raw_list, list):
+                        continue
+                    if len(raw_list) > 0 and not isinstance(raw_list[0], list):
+                        raw_list = [raw_list]
+
+                    frame_preds = []
+                    for box in raw_list:
+                        if len(box) >= 5:
+                            cid = box[0]
+                            cls_name = str(cid)
+                            # Check classes from active GT or class manager
+                            if hasattr(self, 'eval_current_classes') and self.eval_current_classes:
+                                if isinstance(cid, int) and 0 <= cid < len(self.eval_current_classes):
+                                    cls_name = self.eval_current_classes[cid]
+                            elif hasattr(self, 'class_manager') and hasattr(self.class_manager, 'classes'):
+                                if isinstance(cid, int) and 0 <= cid < len(self.class_manager.classes):
+                                    cls_name = self.class_manager.classes[cid]
+
+                            x, y, w, h = box[1], box[2], box[3], box[4]
+                            score = float(box[5]) if len(box) > 5 else 1.0
+                            frame_preds.append({
+                                'bbox': [x, y, w, h],
+                                'score': score,
+                                'class_name': cls_name,
+                                'class_id': cid
+                            })
+                    if frame_preds:
+                        preds_by_frame[f_idx] = frame_preds
+        except Exception as e:
+            QMessageBox.critical(self, "Parse Error", f"Failed to parse predictions file:\n{str(e)}")
+            return
+
+        total_boxes = sum(len(v) for v in preds_by_frame.values())
+        self.activate_evaluation_inspection(video_name, preds_by_frame)
+        self.statusBar.showMessage(f"Loaded {total_boxes} predictions for {video_name}", 5000)
+
+    def activate_evaluation_inspection(self, video_name, predictions_dict, default_conf=0.5, iou_thr=0.5):
+        """Activates inspection mode, sets predictions on canvas, updates dock, and shows dock."""
+        self.eval_current_video_name = video_name
+        if hasattr(self, 'canvas'):
+            self.canvas.set_eval_predictions(predictions_dict, default_conf, iou_thr)
+            self.canvas.set_eval_mode(True)
+
+        if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
+            dock = self.evaluation_inspector_dock
+            total_boxes = sum(len(v) for v in predictions_dict.values())
+            dock.set_evaluation_info(video_name, total_boxes, default_conf)
+            dock.btn_toggle_mode.blockSignals(True)
+            dock.btn_toggle_mode.setChecked(True)
+            dock.btn_toggle_mode.setText("👁️ Evaluation View ACTIVE")
+            dock.btn_toggle_mode.blockSignals(False)
+            dock.show()
+            dock.raise_()
+
+    def load_evaluation_dataset_into_inspector(self, gt_dir, det_dir, video_names, initial_video=None):
+        """Loads a multi-video evaluation dataset into the inspector with full video switching support."""
+        self.eval_dataset_context = {
+            'gt_dir': gt_dir,
+            'det_dir': det_dir,
+            'video_names': list(video_names)
+        }
+        target_video = initial_video or (video_names[0] if video_names else None)
+        if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
+            self.evaluation_inspector_dock.set_dataset_videos(video_names, current_video=target_video)
+
+        if target_video:
+            self.load_eval_video_sequence(target_video)
+
+    def on_eval_video_selected(self, video_name):
+        """Switches to the selected video sequence in Evaluation Inspection Mode."""
+        self.load_eval_video_sequence(video_name)
+
+    def load_eval_video_sequence(self, video_name):
+        """Loads a specific video sequence, its ground truth, and its predictions into VIAT."""
+        if not hasattr(self, 'eval_dataset_context') or not self.eval_dataset_context:
+            return
+
+        gt_dir = self.eval_dataset_context.get('gt_dir', '')
+        det_dir = self.eval_dataset_context.get('det_dir', '')
+        self.eval_current_video_name = video_name
+
+        # 1. Locate and open video file
+        exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV', '.m4v']
+        video_file = None
+        for ext in exts:
+            c1 = os.path.join(gt_dir, video_name + ext)
+            c2 = os.path.join(det_dir, video_name + ext)
+            if os.path.exists(c1):
+                video_file = c1
+                break
+            elif os.path.exists(c2):
+                video_file = c2
+                break
+
+        if video_file and hasattr(self, 'open_video'):
+            self.open_video(video_file)
+
+        # 2. Locate and import Ground Truth
+        self.frame_annotations = {}
+        if hasattr(self, 'canvas'):
+            self.canvas.annotations = []
+
+        gt_candidates = [
+            os.path.join(gt_dir, f"{video_name}.txt"),
+            os.path.join(gt_dir, f"{video_name}.json"),
+        ]
+        self.eval_current_gt_path = None
+        for gtc in gt_candidates:
+            if os.path.exists(gtc):
+                self.eval_current_gt_path = gtc
+                try:
+                    from viat.utils.file_operations import import_annotations as import_annotations_func, detect_annotation_format, extract_raya_classes, import_raya_with_classes_annotations
+                    fmt = detect_annotation_format(gtc)
+                    if fmt == "Raya with classes":
+                        cls_list = extract_raya_classes(gtc) or []
+                        self.eval_current_classes = cls_list
+                        cls_mapping = {i: c for i, c in enumerate(cls_list)}
+                        f_anns, _ = import_raya_with_classes_annotations(gtc, BoundingBox, cls_mapping)
+                        self.frame_annotations = f_anns
+                    else:
+                        self.eval_current_classes = list(getattr(self.canvas, 'class_colors', {}).keys())
+                        f_anns, _ = import_annotations_func(gtc, BoundingBox, class_colors=getattr(self.canvas, 'class_colors', None))
+                        self.frame_annotations = f_anns
+
+                    curr_f = getattr(self, 'current_frame', 0)
+                    if hasattr(self, 'canvas') and curr_f in self.frame_annotations:
+                        self.canvas.annotations = list(self.frame_annotations[curr_f])
+                except Exception as e:
+                    logger.warning(f"Could not import GT file {gtc}: {e}")
+                break
+
+        # 3. Locate and load Predictions
+        det_candidates = [
+            os.path.join(det_dir, f"{video_name}.txt"),
+            os.path.join(det_dir, f"{video_name}.json"),
+        ]
+        for dtc in det_candidates:
+            if os.path.exists(dtc):
+                self.load_predictions_file_into_inspector(dtc, video_name)
+                break
+
+    def save_evaluation_ground_truth(self, show_dialog=True):
+        """Saves current annotations (including promoted FPs and modifications) to the ground truth file."""
+        gt_file = getattr(self, 'eval_current_gt_path', None)
+        if not gt_file:
+            if hasattr(self, 'eval_dataset_context') and self.eval_dataset_context:
+                gt_dir = self.eval_dataset_context.get('gt_dir', '')
+                vid_name = getattr(self, 'eval_current_video_name', '')
+                if gt_dir and vid_name:
+                    candidate = os.path.join(gt_dir, f"{vid_name}.txt")
+                    gt_file = candidate
+
+        if not gt_file:
+            gt_file, _ = QFileDialog.getSaveFileName(
+                self, "Save Ground Truth Annotations", "", "Text Files (*.txt);;JSON Files (*.json);;All Files (*)"
+            )
+            if not gt_file:
+                return
+
+        # Collect all annotations from all frames
+        all_annotations = []
+        for f_idx, anns in self.frame_annotations.items():
+            for ann in anns:
+                import copy
+                c_ann = copy.copy(ann)
+                c_ann.frame = f_idx
+                all_annotations.append(c_ann)
+
+        curr_f = getattr(self, 'current_frame', 0)
+        if curr_f not in self.frame_annotations and self.canvas.annotations:
+            for ann in self.canvas.annotations:
+                import copy
+                c_ann = copy.copy(ann)
+                c_ann.frame = curr_f
+                all_annotations.append(c_ann)
+
+        try:
+            from viat.utils.file_operations import export_raya_with_classes_annotations
+            classes = list(self.canvas.class_colors.keys())
+            deleted = getattr(self, 'deleted_frames', set())
+            total_f = getattr(self, 'total_frames', None)
+
+            export_raya_with_classes_annotations(
+                gt_file,
+                all_annotations,
+                classes=classes,
+                deleted_frames=deleted,
+                total_frames=total_f
+            )
+            self.eval_current_gt_path = gt_file
+            self.statusBar.showMessage(f"Ground truth saved to: {os.path.basename(gt_file)} ({len(all_annotations)} annotations)", 6000)
+            if show_dialog and self.isVisible():
+                QMessageBox.information(
+                    self,
+                    "Ground Truth Saved",
+                    f"Successfully saved {len(all_annotations)} annotations to:\n{gt_file}"
+                )
+        except Exception as e:
+            if show_dialog and self.isVisible():
+                QMessageBox.critical(self, "Save Error", f"Failed to save ground truth annotations:\n{str(e)}")
+            else:
+                logger.error(f"Failed to save ground truth: {e}")
+
 
     def on_dock_item_selected(self, item_data):
         if isinstance(item_data, str):
@@ -1937,6 +2257,17 @@ class VideoAnnotationTool(QMainWindow):
                 should_blur = False
             else:
                 return
+
+        blur_shape = getattr(self.sam_interactive_dock, 'get_blur_shape', lambda: 'segmentation')()
+        blur_margin = getattr(self.sam_interactive_dock, 'get_blur_margin', lambda: 0)()
+
+        def _apply_sam_blur(frame_idx, poly, b_rect):
+            if blur_shape == "segmentation" and poly:
+                self.blur_manager.add_polygon_region(frame_idx, poly, self.canvas.blur_kernel, margin=blur_margin)
+            else:
+                self.blur_manager.add_bbox_region(frame_idx, b_rect, self.canvas.blur_kernel, margin=blur_margin)
+            if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
+                self.remove_annotations_under_blur(frame_idx)
             
         if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
             current_vid = None
@@ -2130,12 +2461,7 @@ class VideoAnnotationTool(QMainWindow):
                         segmentation=polygon if self.sam_interactive_dock.
                         get_save_segmentation() else None)
                     if should_blur:
-                        if polygon:
-                            self.blur_manager.add_polygon_region(start_f, polygon, self.canvas.blur_kernel)
-                        else:
-                            self.blur_manager.add_bbox_region(start_f, ann_rect, self.canvas.blur_kernel)
-                        if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                            self.remove_annotations_under_blur(start_f)
+                        _apply_sam_blur(start_f, polygon, ann_rect)
                     else:
                         self.frame_annotations[start_f].append(ann)
                 else:
@@ -2248,12 +2574,7 @@ class VideoAnnotationTool(QMainWindow):
                             segmentation=polygon if self.sam_interactive_dock.
                             get_save_segmentation() else None)
                         if should_blur:
-                            if polygon:
-                                self.blur_manager.add_polygon_region(f_idx, polygon, self.canvas.blur_kernel)
-                            else:
-                                self.blur_manager.add_bbox_region(f_idx, ann_rect, self.canvas.blur_kernel)
-                            if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                                self.remove_annotations_under_blur(f_idx)
+                            _apply_sam_blur(f_idx, polygon, ann_rect)
                         else:
                             self.frame_annotations[f_idx].append(ann)
                         detected_count += 1
@@ -2353,12 +2674,7 @@ class VideoAnnotationTool(QMainWindow):
                             default_attributes = self.get_default_attributes_for_class(target_class)
                         ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if self.sam_interactive_dock.get_save_segmentation() else None)
                         if should_blur:
-                            if polygon:
-                                self.blur_manager.add_polygon_region(current_f, polygon, self.canvas.blur_kernel)
-                            else:
-                                self.blur_manager.add_bbox_region(current_f, rect, self.canvas.blur_kernel)
-                            if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
-                                self.remove_annotations_under_blur(current_f)
+                            _apply_sam_blur(current_f, polygon, rect)
                         else:
                             self.frame_annotations[current_f].append(ann)
                     self.load_current_frame_annotations()
@@ -2829,8 +3145,9 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'performance_manager') and self.performance_manager:
             self.performance_manager.clear_cache()
             
-        if hasattr(self, 'blur_manager') and self.blur_manager is not None:
-            self.blur_manager.clear_all()
+        if not getattr(self, '_loading_from_project', False):
+            if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+                self.blur_manager.clear_all()
             
         self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
         if not self.cap.isOpened():
@@ -3074,6 +3391,7 @@ Would you like to locate it?"""
         saved_annotations = getattr(self, 'frame_annotations', {})
         saved_class_colors = getattr(self.canvas, 'class_colors', {})
         saved_class_attrs = getattr(self.canvas, 'class_attributes', {})
+        saved_blur_regions = self.blur_manager.to_dict() if hasattr(self, 'blur_manager') and self.blur_manager else None
         self.is_image_dataset = True
         self.current_frame = current_frame
         if hasattr(self, 'chk_video_mode'):
@@ -3088,6 +3406,8 @@ Would you like to locate it?"""
                 self.canvas.class_attributes.update(saved_class_attrs)
                 self.class_colors = self.canvas.class_colors
                 self.class_attributes = self.canvas.class_attributes
+                if saved_blur_regions and hasattr(self, 'blur_manager') and self.blur_manager:
+                    self.blur_manager.from_dict(saved_blur_regions)
                 self.current_frame = min(self.current_frame, max(0, self.
                     total_frames - 1))
                 self.frame_slider.blockSignals(True)
@@ -4482,6 +4802,11 @@ Would you like to load it?"""
         self.class_manager.delete_selected_class()
 
     @log_exceptions
+    def blur_and_delete_selected_class(self):
+        """Blur all bounding boxes of the selected class and delete the class."""
+        self.class_manager.blur_and_delete_selected_class()
+
+    @log_exceptions
     def save_project(self, filename=False):
         """Save the current project."""
         if not filename and self.project_file:
@@ -4599,6 +4924,7 @@ The application has been reset to its initial state."""
                 '', 'JSON Files (*.json);;All Files (*)')
             if not filename:
                 return False
+        self._loading_from_project = True
         try:
             project_data = load_project_with_backup(filename)
             if not project_data:
@@ -4651,22 +4977,48 @@ The application has been reset to its initial state."""
                 "base_annotations": loaded_analytics.get("base_annotations", {})
             }
             
-            if blur_regions and hasattr(self, 'blur_manager') and self.blur_manager:
-                self.blur_manager.from_dict(blur_regions)
-                if hasattr(self, '_refresh_blur_display'):
-                    self._refresh_blur_display()
-            
+            # Load media (video or image dataset)
+            if video_path:
+                if not os.path.exists(video_path):
+                    project_dir = os.path.dirname(filename)
+                    rel_path1 = os.path.join(project_dir, os.path.basename(video_path))
+                    rel_path2 = os.path.join(project_dir, video_path)
+                    if os.path.exists(rel_path1):
+                        video_path = rel_path1
+                    elif os.path.exists(rel_path2):
+                        video_path = rel_path2
+                    else:
+                        reply = QMessageBox.question(
+                            self, 'Video File Not Found',
+                            f"The video file '{video_path}' was not found.\nWould you like to locate it?",
+                            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                        )
+                        if reply == QMessageBox.Yes:
+                            new_video_path, _ = QFileDialog.getOpenFileName(
+                                self, 'Locate Video File', project_dir,
+                                'Video Files (*.mp4 *.avi *.mov *.mkv *.wmv);;All Files (*)'
+                            )
+                            if new_video_path and os.path.exists(new_video_path):
+                                video_path = new_video_path
+                if video_path and os.path.exists(video_path):
+                    self.load_video_from_project(video_path, current_frame)
+            elif image_dataset_info:
+                self.load_image_dataset_from_project(image_dataset_info, current_frame)
+
+            # Restore blur regions into BlurManager
+            if hasattr(self, 'blur_manager') and self.blur_manager is not None:
+                self.blur_manager.from_dict(blur_regions or {})
+
             self.toggle_tracking_mode(tracking_mode_enabled)
             if hasattr(self.interpolation_manager, 'set_active'):
-                self.interpolation_manager.set_active(interpolation_mode_active
-                    )
+                self.interpolation_manager.set_active(interpolation_mode_active)
             self.verification_mode = verification_mode_enabled
-            if video_path and os.path.exists(video_path):
-                self.load_video_file(video_path)
-            elif image_dataset_info:
-                self.load_image_dataset_from_project(image_dataset_info,
-                    current_frame)
-            self.update_frame_display()
+
+            if hasattr(self, '_refresh_blur_display'):
+                self._refresh_blur_display()
+            else:
+                self.update_frame_display()
+
             self.update_annotation_list()
             self.project_path = filename
             self.project_file = filename
@@ -4679,6 +5031,8 @@ The application has been reset to its initial state."""
             QMessageBox.critical(self, 'Error Loading Project',
                 f'Could not load project:\n{str(e)}')
             return False
+        finally:
+            self._loading_from_project = False
 
     @log_exceptions
     def save_application_state(self):
@@ -6959,10 +7313,10 @@ Do you want to scan the entire video now for duplicate frames?
             else:
                 video_path = getattr(self, 'video_filename', None)
             class_attributes = getattr(self.canvas, 'class_attributes', {})
-            from copy import copy
             frame_annotations_copy = {k: list(v) for k, v in self.
                 frame_annotations.items()}
             deleted_annotations_copy = {k: list(v) for k, v in self.deleted_annotations.items()} if hasattr(self, 'deleted_annotations') else None
+            blur_regions = self.blur_manager.to_dict() if hasattr(self, 'blur_manager') and self.blur_manager else None
             project_data_args = {'annotations': list(self.canvas.
                 annotations), 'class_colors': dict(self.canvas.class_colors
                 ), 'video_path': video_path, 'current_frame': self.
@@ -6984,7 +7338,10 @@ Do you want to scan the entire video now for duplicate frames?
                 'verification_mode', False), 'annotations_imported_list': 
                 list(self._annotations_imported) if hasattr(self,
                 '_annotations_imported') else [],
-                'deleted_annotations': deleted_annotations_copy}
+                'deleted_frames': self.deleted_frames if hasattr(self, 'deleted_frames') else set(),
+                'labeler_analytics': self.labeler_analytics if hasattr(self, 'labeler_analytics') else None,
+                'deleted_annotations': deleted_annotations_copy,
+                'blur_regions': blur_regions}
             from viat.utils.task_runner import AutoSaveThread
             self._autosave_thread = AutoSaveThread(self.autosave_file,
                 project_data_args, self)
@@ -7494,7 +7851,7 @@ Do you want to scan the entire video now for duplicate frames?
         return all_frame_annotations
 
     @log_exceptions
-    def save_undo_state(self, modified_frames=None):
+    def save_undo_state(self, modified_frames=None, **extra_state):
         """Save the current state for undo functionality."""
         all_frame_annotations = self._copy_annotations_state(modified_frames)
         class_colors = {}
@@ -7511,13 +7868,14 @@ Do you want to scan the entire video now for duplicate frames?
             'class_attributes': class_attributes, 'current_class': self.
             canvas.current_class if hasattr(self.canvas, 'current_class') else
             None, 'blur_regions': blur_regions}
+        undo_state.update(extra_state)
         self.undo_stack.append(undo_state)
         self.redo_stack.clear()
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
 
     @log_exceptions
-    def save_undo_state_without_clearing_redo(self, modified_frames=None):
+    def save_undo_state_without_clearing_redo(self, modified_frames=None, **extra_state):
         """Save the current state for undo functionality without clearing the redo stack."""
         all_frame_annotations = self._copy_annotations_state(modified_frames)
         class_colors = {}
@@ -7534,6 +7892,7 @@ Do you want to scan the entire video now for duplicate frames?
             'class_attributes': class_attributes, 'current_class': self.
             canvas.current_class if hasattr(self.canvas, 'current_class') else
             None, 'blur_regions': blur_regions}
+        undo_state.update(extra_state)
         self.undo_stack.append(undo_state)
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
@@ -7541,6 +7900,30 @@ Do you want to scan the entire video now for duplicate frames?
     @log_exceptions
     def undo(self):
         """Undo the last annotation or class change."""
+        # If in SAM interactive mode and there are prompt points/box, undo the last prompt first
+        if getattr(getattr(self, 'canvas', None), 'sam_interactive_mode', False):
+            has_prompt_pts = bool(getattr(self.canvas, 'sam_prompt_points', None))
+            has_prompt_box = getattr(self.canvas, 'sam_prompt_box', None) is not None
+            if has_prompt_pts or has_prompt_box:
+                if has_prompt_pts:
+                    self.canvas.sam_prompt_points.pop()
+                    if hasattr(self.canvas, 'sam_prompt_labels') and self.canvas.sam_prompt_labels:
+                        self.canvas.sam_prompt_labels.pop()
+                elif has_prompt_box:
+                    self.canvas.sam_prompt_box = None
+                
+                num_pos = sum(1 for l in getattr(self.canvas, 'sam_prompt_labels', []) if l == 1)
+                num_neg = sum(1 for l in getattr(self.canvas, 'sam_prompt_labels', []) if l == 0)
+                has_b = getattr(self.canvas, 'sam_prompt_box', None) is not None
+                if hasattr(self, 'sam_interactive_dock'):
+                    self.sam_interactive_dock.update_status(num_pos, num_neg, has_b)
+                if not num_pos and not num_neg and not has_b:
+                    self.canvas.sam_preview_polygon = None
+                    self.canvas.sam_preview_rect = None
+                self.canvas.update()
+                self.statusBar.showMessage('Prompt undone.', 2000)
+                return
+
         if not self.undo_stack:
             self.statusBar.showMessage('Nothing to undo', 3000)
             return
@@ -7605,6 +7988,15 @@ Do you want to scan the entire video now for duplicate frames?
             self.update_annotation_list()
             self.refresh_class_ui()
             self.statusBar.showMessage('Undo successful', 3000)
+
+        if last_state.get('action_type') == 'blur_and_delete_class':
+            class_name = last_state.get('action_class', '')
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                "Undo Class Blur & Delete",
+                f"Warning: Undo has restored the class '{class_name}' and its bounding boxes, and reverted the blurred regions."
+            )
 
     @log_exceptions
     def redo(self):

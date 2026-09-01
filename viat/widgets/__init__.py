@@ -7,3 +7,5 @@ from .sam_interactive_dock import SAMInteractiveDock
 from .crop_settings_dock import CropSettingsDock
 from .evaluation_dialog import EvaluationDialog
 from viat.evaluation.visualization.visual_inspector import VisualInspectorDock
+from .evaluation_inspector_dock import EvaluationInspectorDock
+

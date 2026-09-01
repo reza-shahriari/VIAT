@@ -21,9 +21,12 @@
 
 try:
     import faster_coco_eval
+    from faster_coco_eval import COCO, COCOeval_faster
     faster_coco_eval.init_as_pycocotools()
     HAS_FASTER_COCO_EVAL = True
 except (ImportError, Exception):
+    COCO = None
+    COCOeval_faster = None
     HAS_FASTER_COCO_EVAL = False
 
 from collections import defaultdict
@@ -668,4 +671,264 @@ def _compute_ap_recall(scores, matched, NP, recall_thresholds=None):
         "FNs": FN, #False Negative num in max F1 score
         "score":score, #Score in max F1
         "argmax": argmax #argmax in max F1
+    }
+
+
+def evaluate_coco_files(gt_path, dt_path, iou_min=0.40, iou_max=0.95, iou_count=12):
+    """
+    Evaluates COCO detections against Ground Truth using the high-performance C++
+    faster_coco_eval backend. Computes all standard and fine-grained metrics, F1-optimal
+    confidence threshold, and per-class / per-size breakdowns.
+    """
+    import json
+    import os
+
+    if not HAS_FASTER_COCO_EVAL or COCO is None or COCOeval_faster is None:
+        try:
+            from viat.evaluation.utils.converter import coco2bb
+            from viat.evaluation.utils.enumerators import BBType
+        except ImportError:
+            from ..utils.converter import coco2bb
+            from ..utils.enumerators import BBType
+        gts = coco2bb(gt_path)
+        dets = coco2bb(dt_path, BBType.DETECTED)
+        res = get_coco_summary(gts, dets)
+        if 'Score' not in res or res['Score'] is None:
+            res['Score'] = 0.5
+        return res
+
+    cocoGt = COCO(gt_path)
+
+    # Load detections JSON
+    if isinstance(dt_path, str) and os.path.exists(dt_path):
+        with open(dt_path, 'r', encoding='utf-8') as f:
+            dt_raw = json.load(f)
+    elif isinstance(dt_path, (dict, list)):
+        dt_raw = dt_path
+    else:
+        dt_raw = []
+
+    dt_anns = dt_raw.get('annotations', dt_raw) if isinstance(dt_raw, dict) else dt_raw
+    if not isinstance(dt_anns, list):
+        dt_anns = []
+
+    # Ensure every detection has a valid score and bbox
+    valid_dt_anns = []
+    for ann in dt_anns:
+        if 'score' not in ann and 'confidence' in ann:
+            ann['score'] = float(ann['confidence'])
+        elif 'score' not in ann:
+            ann['score'] = 1.0
+        if 'bbox' in ann and len(ann['bbox']) >= 4:
+            valid_dt_anns.append(ann)
+
+    n_gt = len(cocoGt.getAnnIds()) if hasattr(cocoGt, 'getAnnIds') else 0
+    n_dt = len(valid_dt_anns)
+
+    if not valid_dt_anns or n_gt == 0:
+        return {
+            'Precision': 0.0,
+            'Recall': 0.0,
+            'F1': 0.0,
+            'Score': 0.5,
+            'TP': 0,
+            'FP': n_dt,
+            'FN': n_gt,
+            'AP': 0.0,
+            'AP40': 0.0,
+            'AP50': 0.0,
+            'AP75': 0.0,
+            'APsmall': float('nan'),
+            'APmedium': float('nan'),
+            'APlarge': float('nan'),
+            'APsmall16': float('nan'),
+            'APsmall32': float('nan'),
+            'APmedium64': float('nan'),
+            'APmedium96': float('nan'),
+            'APlarge128': float('nan'),
+            'APlarge160': float('nan'),
+            'APlarge192': float('nan'),
+            'APlarge224': float('nan'),
+            'APlarge256': float('nan'),
+            'APlarge288': float('nan'),
+            'APlarge320': float('nan'),
+            'AR1': 0.0,
+            'AR10': 0.0,
+            'AR100': 0.0,
+            'ARsmall': float('nan'),
+            'ARmedium': float('nan'),
+            'ARlarge': float('nan'),
+            'TP(zero_score)': 0,
+            'FP(zero_score)': n_dt,
+            'FN(zero_score)': n_gt,
+            'per_class_metrics': {},
+            'per_size_metrics': {}
+        }
+
+    cocoDt = cocoGt.loadRes(valid_dt_anns)
+    cocoEval = COCOeval_faster(cocoGt, cocoDt, 'bbox')
+
+    # Custom Area Ranges (including fine-grained 16..320 buckets)
+    custom_areas = [
+        [0, 1e10], [0, 32**2], [32**2, 96**2], [96**2, 1e10],
+        [0, 16**2], [16**2, 32**2], [32**2, 64**2], [64**2, 96**2],
+        [96**2, 128**2], [128**2, 160**2], [160**2, 192**2], [192**2, 224**2],
+        [224**2, 256**2], [256**2, 288**2], [288**2, 320**2]
+    ]
+    custom_labels = [
+        'all', 'small', 'medium', 'large',
+        'small16', 'small32', 'medium64', 'medium96',
+        'large128', 'large160', 'large192', 'large224',
+        'large256', 'large288', 'large320'
+    ]
+    cocoEval.params.areaRng = custom_areas
+    cocoEval.params.areaRngLbl = custom_labels
+    cocoEval.params.iouThrs = np.linspace(iou_min, iou_max, iou_count, endpoint=True)
+
+    cocoEval.evaluate()
+    cocoEval.accumulate()
+    cocoEval.summarize()
+
+    stats = cocoEval.stats
+    rec_thrs = cocoEval.params.recThrs  # 101 recall points
+
+    # Find IoU indices: 0.40 (index 0), 0.50 (index 2), 0.75 (index 7 if 12 thresholds)
+    iou_list = list(np.round(cocoEval.params.iouThrs, 2))
+    idx_04 = iou_list.index(0.40) if 0.40 in iou_list else 0
+    idx_05 = iou_list.index(0.50) if 0.50 in iou_list else min(2, len(iou_list) - 1)
+    idx_075 = iou_list.index(0.75) if 0.75 in iou_list else min(7, len(iou_list) - 1)
+
+    # Precision and score tensors at IoU 0.50
+    pr_05 = cocoEval.eval['precision'][idx_05, :, :, 0, -1]  # shape: (R=101, K=num_classes)
+    sc_05 = cocoEval.eval['scores'][idx_05, :, :, 0, -1]     # shape: (R=101, K=num_classes)
+    pr_04 = cocoEval.eval['precision'][idx_04, :, :, 0, -1]
+    pr_075 = cocoEval.eval['precision'][idx_075, :, :, 0, -1]
+
+    # Summary AP numbers
+    ap_all = float(stats[0]) if len(stats) > 0 and stats[0] >= 0 else 0.0
+    ap40 = float(np.mean(pr_04[pr_04 > -1])) if np.any(pr_04 > -1) else 0.0
+    ap50 = float(np.mean(pr_05[pr_05 > -1])) if np.any(pr_05 > -1) else 0.0
+    ap75 = float(np.mean(pr_075[pr_075 > -1])) if np.any(pr_075 > -1) else 0.0
+
+    # Fine-grained Area APs
+    def _get_area_ap(area_idx):
+        if area_idx < cocoEval.eval['precision'].shape[3]:
+            vals = cocoEval.eval['precision'][:, :, :, area_idx, -1]
+            valid_vals = vals[vals > -1]
+            return float(np.mean(valid_vals)) if len(valid_vals) > 0 else float('nan')
+        return float('nan')
+
+    # Per-class metrics & optimal score per class
+    per_class_metrics = {}
+    optimal_scores_list = []
+    total_tp_opt = 0
+
+    for k_idx, cat_id in enumerate(cocoEval.params.catIds):
+        cat_name = cocoGt.cats[cat_id]['name'] if hasattr(cocoGt, 'cats') and cat_id in cocoGt.cats else str(cat_id)
+        c_pr_05 = cocoEval.eval['precision'][idx_05, :, k_idx, 0, -1]
+        c_sc_05 = cocoEval.eval['scores'][idx_05, :, k_idx, 0, -1]
+        c_pr_all = cocoEval.eval['precision'][:, :, k_idx, 0, -1]
+
+        c_ap50 = float(np.mean(c_pr_05[c_pr_05 > -1])) if np.any(c_pr_05 > -1) else 0.0
+        c_ap = float(np.mean(c_pr_all[c_pr_all > -1])) if np.any(c_pr_all > -1) else 0.0
+
+        valid = (c_pr_05 > 0) & (c_sc_05 > 0)
+        if np.any(valid):
+            c_p_v = c_pr_05[valid]
+            c_r_v = rec_thrs[valid]
+            c_s_v = c_sc_05[valid]
+            c_f1_curve = 2 * c_p_v * c_r_v / (c_p_v + c_r_v + 1e-10)
+            c_best_idx = np.argmax(c_f1_curve)
+
+            c_opt_score = float(c_s_v[c_best_idx])
+            c_opt_f1 = float(c_f1_curve[c_best_idx])
+            c_opt_p = float(c_p_v[c_best_idx])
+            c_opt_r = float(c_r_v[c_best_idx])
+            optimal_scores_list.append(c_opt_score)
+        else:
+            c_opt_score = 0.5
+            c_opt_f1 = 0.0
+            c_opt_p = 0.0
+            c_opt_r = 0.0
+
+        c_n_gt = len(cocoGt.getAnnIds(catIds=[cat_id]))
+        c_tp = int(round(c_opt_r * c_n_gt))
+        total_tp_opt += c_tp
+
+        per_class_metrics[cat_name] = {
+            'AP50': c_ap50,
+            'AP': c_ap,
+            'Score': c_opt_score,
+            'F1': c_opt_f1,
+            'Precision': c_opt_p,
+            'Recall': c_opt_r,
+            'TP': c_tp,
+            'FP': max(0, len(cocoDt.getAnnIds(catIds=[cat_id])) - c_tp),
+            'FN': max(0, c_n_gt - c_tp)
+        }
+
+    # Macro PR curve
+    pr_mean = np.zeros(101)
+    sc_mean = np.zeros(101)
+    for r_idx in range(101):
+        valid_p = pr_05[r_idx][pr_05[r_idx] > -1]
+        pr_mean[r_idx] = np.mean(valid_p) if len(valid_p) > 0 else 0.0
+        valid_s = sc_05[r_idx][sc_05[r_idx] > -1]
+        sc_mean[r_idx] = np.mean(valid_s) if len(valid_s) > 0 else 0.0
+
+    f1_curve = np.where((pr_mean + rec_thrs) > 0, 2 * pr_mean * rec_thrs / (pr_mean + rec_thrs + 1e-10), 0)
+    best_idx = np.argmax(f1_curve)
+
+    precision = float(pr_mean[best_idx])
+    recall = float(rec_thrs[best_idx])
+    f1_score = float(f1_curve[best_idx])
+    optimal_score = float(sc_mean[best_idx]) if sc_mean[best_idx] > 0 else (float(np.mean(optimal_scores_list)) if optimal_scores_list else 0.5)
+
+    tp_est = total_tp_opt if total_tp_opt > 0 else int(round(recall * n_gt))
+    fp_est = max(0, n_dt - tp_est)
+    fn_est = max(0, n_gt - tp_est)
+
+    per_size_metrics = {
+        'Small (<32²)': _get_area_ap(1),
+        'Medium (32²-96²)': _get_area_ap(2),
+        'Large (>96²)': _get_area_ap(3),
+    }
+
+    return {
+        'Precision': precision,
+        'Recall': recall,
+        'F1': f1_score,
+        'Score': optimal_score,
+        'TP': tp_est,
+        'FP': fp_est,
+        'FN': fn_est,
+        'AP': ap_all,
+        'AP40': ap40,
+        'AP50': ap50,
+        'AP75': ap75,
+        'APsmall': per_size_metrics['Small (<32²)'],
+        'APmedium': per_size_metrics['Medium (32²-96²)'],
+        'APlarge': per_size_metrics['Large (>96²)'],
+        'APsmall16': _get_area_ap(4),
+        'APsmall32': _get_area_ap(5),
+        'APmedium64': _get_area_ap(6),
+        'APmedium96': _get_area_ap(7),
+        'APlarge128': _get_area_ap(8),
+        'APlarge160': _get_area_ap(9),
+        'APlarge192': _get_area_ap(10),
+        'APlarge224': _get_area_ap(11),
+        'APlarge256': _get_area_ap(12),
+        'APlarge288': _get_area_ap(13),
+        'APlarge320': _get_area_ap(14),
+        'AR1': float(stats[6]) if len(stats) > 6 and stats[6] >= 0 else 0.0,
+        'AR10': float(stats[7]) if len(stats) > 7 and stats[7] >= 0 else 0.0,
+        'AR100': float(stats[8]) if len(stats) > 8 and stats[8] >= 0 else 0.0,
+        'ARsmall': float(stats[9]) if len(stats) > 9 and stats[9] >= 0 else float('nan'),
+        'ARmedium': float(stats[10]) if len(stats) > 10 and stats[10] >= 0 else float('nan'),
+        'ARlarge': float(stats[11]) if len(stats) > 11 and stats[11] >= 0 else float('nan'),
+        'TP(zero_score)': tp_est,
+        'FP(zero_score)': fp_est,
+        'FN(zero_score)': fn_est,
+        'per_class_metrics': per_class_metrics,
+        'per_size_metrics': per_size_metrics
     }

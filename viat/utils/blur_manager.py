@@ -37,21 +37,50 @@ class BlurManager:
         h = radius * 2
         self._add_region(frame_idx, "pen", x, y, w, h, kernel)
 
-    def add_bbox_region(self, frame_idx: int, rect, kernel: int):
-        """Add a blur region that exactly covers a QRect bounding box."""
+    def add_bbox_region(self, frame_idx: int, rect, kernel: int, margin: int = 0):
+        """Add a blur region that covers a QRect bounding box, optionally expanded by margin."""
+        if margin > 0:
+            x = max(0, int(rect.x() - margin))
+            y = max(0, int(rect.y() - margin))
+            w = int(rect.width() + 2 * margin)
+            h = int(rect.height() + 2 * margin)
+        else:
+            x = max(0, int(rect.x()))
+            y = max(0, int(rect.y()))
+            w = int(rect.width())
+            h = int(rect.height())
         self._add_region(
             frame_idx, "bbox",
-            rect.x(), rect.y(),
-            rect.width(), rect.height(),
+            x, y, w, h,
             kernel
         )
 
-    def add_polygon_region(self, frame_idx: int, polygon, kernel: int):
-        """Add a blur region defined by a polygon."""
+    def add_polygon_region(self, frame_idx: int, polygon, kernel: int, margin: int = 0):
+        """Add a blur region defined by a polygon, optionally dilated by margin."""
         if not polygon:
             return
             
         pts = np.array(polygon, dtype=np.int32)
+        if len(pts) < 3:
+            return
+
+        if margin > 0:
+            x_min, y_min, w_box, h_box = cv2.boundingRect(pts)
+            pad = int(margin + 5)
+            mask_w = w_box + 2 * pad
+            mask_h = h_box + 2 * pad
+            mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
+            local_pts = pts - [x_min - pad, y_min - pad]
+            cv2.fillPoly(mask, [local_pts], 255)
+            ksize = 2 * int(margin) + 1
+            kernel_elem = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+            dilated = cv2.dilate(mask, kernel_elem)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                largest_c = max(contours, key=cv2.contourArea)
+                shifted_pts = largest_c.reshape(-1, 2) + [x_min - pad, y_min - pad]
+                pts = np.maximum(shifted_pts, 0)
+                
         x, y, w, h = cv2.boundingRect(pts)
         
         # Simplify the polygon to drastically reduce the number of points for JSON saving
@@ -67,8 +96,8 @@ class BlurManager:
         poly_list = [[float(pt[0][0]), float(pt[0][1])] for pt in approx_pts]
         
         self.blur_regions[frame_idx].append({
-            "type": "polygon", "x": x, "y": y,
-            "w": w, "h": h, "kernel": kernel,
+            "type": "polygon", "x": int(x), "y": int(y),
+            "w": int(w), "h": int(h), "kernel": kernel,
             "points": poly_list
         })
 
@@ -137,13 +166,14 @@ class BlurManager:
         h, w = result.shape[:2]
 
         for region in regions:
-            x1 = max(0, region["x"])
-            y1 = max(0, region["y"])
-            x2 = min(w, x1 + region["w"])
-            y2 = min(h, y1 + region["h"])
+            x1 = max(0, int(round(region.get("x", 0))))
+            y1 = max(0, int(round(region.get("y", 0))))
+            x2 = min(w, int(round(x1 + region.get("w", 0))))
+            y2 = min(h, int(round(y1 + region.get("h", 0))))
             if x2 <= x1 or y2 <= y1:
                 continue
-            kernel = max(3, region["kernel"] | 1)  # must be odd
+            raw_kernel = int(round(region.get("kernel", 151)))
+            kernel = max(3, raw_kernel | 1)  # must be odd and >= 3
             
             patch = result[y1:y2, x1:x2].copy()
             blurred = cv2.GaussianBlur(patch, (kernel, kernel), 0)
@@ -187,6 +217,19 @@ class BlurManager:
             return
         for k, v in data.items():
             try:
-                self.blur_regions[int(k)] = list(v)
+                frame_idx = int(k)
+                if isinstance(v, list):
+                    clean_list = []
+                    for item in v:
+                        if isinstance(item, dict):
+                            clean_item = dict(item)
+                            clean_item["x"] = int(round(clean_item.get("x", 0)))
+                            clean_item["y"] = int(round(clean_item.get("y", 0)))
+                            clean_item["w"] = int(round(clean_item.get("w", 0)))
+                            clean_item["h"] = int(round(clean_item.get("h", 0)))
+                            clean_item["kernel"] = max(3, int(round(clean_item.get("kernel", 151))) | 1)
+                            clean_list.append(clean_item)
+                    if clean_list:
+                        self.blur_regions[frame_idx] = clean_list
             except (ValueError, TypeError):
                 pass

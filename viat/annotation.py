@@ -1377,23 +1377,66 @@ class ClassManager:
         )
         attribute_handling_combo.setEnabled(False)
 
-        # Connect checkbox to enable/disable conversion options
-        def toggle_conversion_options(checked):
-            target_class_combo.setEnabled(checked)
-            attribute_handling_combo.setEnabled(checked)
-
-        convert_check.toggled.connect(toggle_conversion_options)
-
         conversion_layout.addWidget(convert_check)
         conversion_layout.addWidget(QLabel("Target class:"))
         conversion_layout.addWidget(target_class_combo)
         conversion_layout.addWidget(QLabel("Attribute handling:"))
         conversion_layout.addWidget(attribute_handling_combo)
 
-        # Add conversion group to dialog layout
+        # Add blur & delete option
+        blur_group = QGroupBox("Blur & Remove Class")
+        blur_layout = QVBoxLayout(blur_group)
+
+        blur_check = QCheckBox("Blur all bounding boxes for this class and remove class")
+        blur_check.setChecked(False)
+        blur_check.setToolTip(
+            "Apply blur over all bounding boxes of this class across all frames, "
+            "remove each bounding box after blurring, and delete this class."
+        )
+        blur_layout.addWidget(blur_check)
+
+        def toggle_blur_options(checked):
+            if checked:
+                convert_check.setChecked(False)
+                convert_check.setEnabled(False)
+                target_class_combo.setEnabled(False)
+                attribute_handling_combo.setEnabled(False)
+                dialog.name_edit.setEnabled(False)
+            else:
+                convert_check.setEnabled(True)
+                dialog.name_edit.setEnabled(True)
+
+        def toggle_conversion_options(checked):
+            target_class_combo.setEnabled(checked)
+            attribute_handling_combo.setEnabled(checked)
+            if checked:
+                blur_check.setChecked(False)
+                blur_check.setEnabled(False)
+            else:
+                blur_check.setEnabled(True)
+
+        blur_check.toggled.connect(toggle_blur_options)
+        convert_check.toggled.connect(toggle_conversion_options)
+
+        # Add conversion and blur groups to dialog layout
         dialog.layout().insertWidget(dialog.layout().count() - 1, conversion_group)
+        dialog.layout().insertWidget(dialog.layout().count() - 1, blur_group)
 
         if dialog.exec_() == QDialog.Accepted:
+            if blur_check.isChecked():
+                reply = QMessageBox.question(
+                    self.main_window,
+                    "Blur & Delete Class",
+                    f"Are you sure you want to blur all bounding boxes of class '{selected_class}' across all frames and delete the class?\n\n"
+                    f"All bounding boxes of this class will be blurred and removed, and the class will be deleted.\n"
+                    f"This action can be undone with Ctrl+Z.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    self.blur_and_delete_class(selected_class)
+                return
+
             new_class_name = dialog.name_edit.text().strip()
             new_color = dialog.color
 
@@ -1593,7 +1636,7 @@ class ClassManager:
 
     def delete_selected_class(self):
         """Delete the selected class."""
-        item = self.main_window.class_dock.classes_list.currentItem()
+        item = self.main_window.class_dock.classes_list.currentItem() if hasattr(self.main_window, "class_dock") else None
         if not item:
             return
 
@@ -1617,22 +1660,161 @@ class ClassManager:
         # Remove class from class_attributes if it exists
         if hasattr(self.main_window.canvas, "class_attributes") and class_name in self.main_window.canvas.class_attributes:
             del self.main_window.canvas.class_attributes[class_name]
+        if hasattr(self.main_window, "class_attributes") and class_name in self.main_window.class_attributes:
+            del self.main_window.class_attributes[class_name]
+
+        # Update current class if needed
+        if hasattr(self.main_window, "canvas"):
+            if getattr(self.main_window.canvas, "current_class", None) == class_name:
+                remaining = list(self.main_window.canvas.class_colors.keys())
+                self.main_window.canvas.set_current_class(remaining[0] if remaining else "")
 
         # Update UI
-        self.main_window.toolbar.update_class_selector()
-        self.main_window.class_dock.update_class_list()
-        self.main_window.update_annotation_list()
+        if hasattr(self.main_window, "refresh_class_ui"):
+            self.main_window.refresh_class_ui()
+        if hasattr(self.main_window, "toolbar") and hasattr(self.main_window.toolbar, "update_class_selector"):
+            self.main_window.toolbar.update_class_selector()
+        if hasattr(self.main_window, "class_dock") and hasattr(self.main_window.class_dock, "update_class_list"):
+            self.main_window.class_dock.update_class_list()
+        if hasattr(self.main_window, "update_annotation_list"):
+            self.main_window.update_annotation_list()
 
         # Update canvas
-        if hasattr(self.main_window, "class_selector") and self.main_window.class_selector.count() > 0:
-            self.main_window.canvas.set_current_class(self.main_window.class_selector.currentText())
-        self.main_window.canvas.update()
+        if hasattr(self.main_window, "canvas"):
+            self.main_window.canvas.update()
         
         # Mark project as modified
         self.main_window.project_modified = True
         
         # Show success message
-        self.main_window.statusBar.showMessage(f"Deleted class '{class_name}' and all its annotations", 5000)
+        if hasattr(self.main_window, "statusBar"):
+            self.main_window.statusBar.showMessage(f"Deleted class '{class_name}' and all its annotations", 5000)
+
+    def blur_and_delete_class(self, class_name):
+        """
+        Blur all bounding boxes assigned to the specified class across all frames,
+        remove those bounding boxes, and delete the class.
+        """
+        if not class_name:
+            return
+
+        # Save undo state with metadata
+        if hasattr(self.main_window, "save_undo_state"):
+            self.main_window.save_undo_state('all', action_type='blur_and_delete_class', action_class=class_name)
+
+        # Ensure blur manager is initialized
+        if not hasattr(self.main_window, 'blur_manager') or self.main_window.blur_manager is None:
+            from viat.utils.blur_manager import BlurManager
+            self.main_window.blur_manager = BlurManager()
+
+        blur_kernel = getattr(self.main_window.canvas, 'blur_kernel', 151) if hasattr(self.main_window, 'canvas') else 151
+        blur_kernel = max(3, int(blur_kernel) | 1)
+
+        total_blurred = 0
+        frames_affected = 0
+
+        # Sync current canvas annotations with frame_annotations if on current frame
+        cur_frame = getattr(self.main_window, 'current_frame', 0)
+        if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'annotations'):
+            if cur_frame in self.main_window.frame_annotations:
+                self.main_window.frame_annotations[cur_frame] = list(self.main_window.canvas.annotations)
+
+        # Iterate over all frames in frame_annotations
+        for frame_idx, annotations in list(self.main_window.frame_annotations.items()):
+            to_blur = [ann for ann in annotations if ann.class_name == class_name]
+            if not to_blur:
+                continue
+
+            frames_affected += 1
+            for ann in to_blur:
+                if hasattr(ann, 'segmentation') and ann.segmentation:
+                    self.main_window.blur_manager.add_polygon_region(frame_idx, ann.segmentation, blur_kernel)
+                elif hasattr(ann, 'rect') and ann.rect:
+                    self.main_window.blur_manager.add_bbox_region(frame_idx, ann.rect, blur_kernel)
+                total_blurred += 1
+
+            # Remove bounding boxes of this class
+            self.main_window.frame_annotations[frame_idx] = [
+                ann for ann in annotations if ann.class_name != class_name
+            ]
+
+        # Also remove from canvas annotations if on current frame
+        if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'annotations'):
+            self.main_window.canvas.annotations = [
+                ann for ann in self.main_window.canvas.annotations if ann.class_name != class_name
+            ]
+
+        # Remove class from class_colors
+        if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'class_colors'):
+            if class_name in self.main_window.canvas.class_colors:
+                del self.main_window.canvas.class_colors[class_name]
+
+        # Remove class from class_attributes
+        if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'class_attributes'):
+            if self.main_window.canvas.class_attributes and class_name in self.main_window.canvas.class_attributes:
+                del self.main_window.canvas.class_attributes[class_name]
+        if hasattr(self.main_window, 'class_attributes') and self.main_window.class_attributes and class_name in self.main_window.class_attributes:
+            del self.main_window.class_attributes[class_name]
+
+        # Update current_class
+        if hasattr(self.main_window, 'canvas'):
+            if getattr(self.main_window.canvas, 'current_class', None) == class_name:
+                remaining = list(self.main_window.canvas.class_colors.keys())
+                self.main_window.canvas.set_current_class(remaining[0] if remaining else "")
+
+        # Update UI components
+        if hasattr(self.main_window, 'refresh_class_ui'):
+            self.main_window.refresh_class_ui()
+        if hasattr(self.main_window, 'toolbar') and hasattr(self.main_window.toolbar, 'update_class_selector'):
+            self.main_window.toolbar.update_class_selector()
+        if hasattr(self.main_window, 'class_dock') and hasattr(self.main_window.class_dock, 'update_class_list'):
+            self.main_window.class_dock.update_class_list()
+        if hasattr(self.main_window, 'update_annotation_list'):
+            self.main_window.update_annotation_list()
+
+        # Update blur rendering on canvas
+        if hasattr(self.main_window, '_refresh_blur_display'):
+            self.main_window._refresh_blur_display()
+        if hasattr(self.main_window, 'canvas'):
+            self.main_window.canvas.update()
+
+        # Mark project modified
+        self.main_window.project_modified = True
+
+        msg = f"Blurred and removed {total_blurred} bounding box(es) across {frames_affected} frame(s), and deleted class '{class_name}'"
+        if hasattr(self.main_window, 'statusBar'):
+            self.main_window.statusBar.showMessage(msg, 5000)
+
+    def blur_and_delete_selected_class(self):
+        """Blur all bounding boxes of the selected class, remove them, and delete the class."""
+        selected_class = None
+        if (
+            hasattr(self.main_window, "class_dock")
+            and self.main_window.class_dock.classes_list.currentItem()
+        ):
+            selected_class = (
+                self.main_window.class_dock.classes_list.currentItem().text()
+            )
+        elif hasattr(self.main_window.canvas, "current_class"):
+            selected_class = self.main_window.canvas.current_class
+
+        if not selected_class:
+            QMessageBox.warning(
+                self.main_window, "No Class Selected", "Please select a class to blur and delete."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self.main_window,
+            "Blur & Delete Class",
+            f"Are you sure you want to blur all bounding boxes of class '{selected_class}' across all frames and delete the class?\n\n"
+            f"All bounding boxes of this class will be blurred and removed, and the class will be deleted.\n"
+            f"This action can be undone with Ctrl+Z.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.blur_and_delete_class(selected_class)
 
     def import_classes_from_yolo_yaml(self, filepath):
         """Import annotation classes from a YOLO dataset YAML file."""

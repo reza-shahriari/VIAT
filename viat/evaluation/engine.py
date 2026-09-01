@@ -295,8 +295,23 @@ class Evaluate():
                     # Prefer a real (non-numeric) name over a str(id) fallback
                     if cid not in id_to_name or id_to_name[cid].isdigit():
                         id_to_name[cid] = name
-        if not id_to_name and isinstance(self.target_classes, list):
-            id_to_name = {i: str(n) for i, n in enumerate(self.target_classes)}
+        for cid, name in list(id_to_name.items()):
+            if name.isdigit():
+                if isinstance(self.target_classes, list):
+                    if 0 <= cid < len(self.target_classes):
+                        id_to_name[cid] = str(self.target_classes[cid])
+                    elif 0 <= cid - 1 < len(self.target_classes):
+                        id_to_name[cid] = str(self.target_classes[cid - 1])
+                elif isinstance(self.category_names, list):
+                    if 0 <= cid < len(self.category_names):
+                        id_to_name[cid] = str(self.category_names[cid])
+                    elif 0 <= cid - 1 < len(self.category_names):
+                        id_to_name[cid] = str(self.category_names[cid - 1])
+        if not id_to_name:
+            if isinstance(self.target_classes, list):
+                id_to_name = {i: str(n) for i, n in enumerate(self.target_classes)}
+            elif isinstance(self.category_names, list):
+                id_to_name = {i: str(n) for i, n in enumerate(self.category_names)}
         return id_to_name
 
     def _compute_detection_diagnostics(self, out_folder, iou_thr=0.5):
@@ -320,6 +335,7 @@ class Evaluate():
         matched_records = []
         fp_records = []
         fn_records = []
+        computed_video_metrics = []
         canvas = [0, 0]
 
         for det_dir in det_paths:
@@ -353,6 +369,10 @@ class Evaluate():
                     for ann in det_data.get('annotations', []):
                         dets_by_img[ann.get('image_id')].append(ann)
 
+                    v_matched = []
+                    v_fp = []
+                    v_fn = []
+
                     for img_id, dets in dets_by_img.items():
                         gts = gts_by_img.get(img_id, [])
                         gt_boxes = [a['bbox'] for a in gts]
@@ -376,20 +396,71 @@ class Evaluate():
                                 gt_used[best_g] = True
                                 g_cls = id_to_name.get(gts[best_g].get('category_id'),
                                                        str(gts[best_g].get('category_id')))
-                                matched_records.append({'gt': g_cls, 'det': d_cls,
-                                                        'iou': float(best_iou),
-                                                        'score': float(d.get('score', 0)),
-                                                        'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3]})
+                                rec = {'gt': g_cls, 'det': d_cls,
+                                       'iou': float(best_iou),
+                                       'score': float(d.get('score', 0)),
+                                       'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3]}
+                                matched_records.append(rec)
+                                v_matched.append(rec)
                             else:
-                                fp_records.append({'det': d_cls, 'score': float(d.get('score', 0)),
-                                                   'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3]})
+                                rec = {'det': d_cls, 'score': float(d.get('score', 0)),
+                                       'cx': cx, 'cy': cy, 'w': db[2], 'h': db[3],
+                                       'max_iou': float(best_iou)}
+                                fp_records.append(rec)
+                                v_fp.append(rec)
                         for gi, used in enumerate(gt_used):
                             if not used:
                                 gb = gt_boxes[gi]
                                 g_cls = id_to_name.get(gts[gi].get('category_id'),
                                                        str(gts[gi].get('category_id')))
-                                fn_records.append({'gt': g_cls, 'cx': gb[0] + gb[2] / 2.0,
-                                                   'cy': gb[1] + gb[3] / 2.0, 'w': gb[2], 'h': gb[3]})
+                                rec = {'gt': g_cls, 'cx': gb[0] + gb[2] / 2.0,
+                                       'cy': gb[1] + gb[3] / 2.0, 'w': gb[2], 'h': gb[3]}
+                                fn_records.append(rec)
+                                v_fn.append(rec)
+
+                    # Compute real detection metrics for this video sequence
+                    v_tp_count = len(v_matched)
+                    v_fp_count = len(v_fp)
+                    v_fn_count = len(v_fn)
+                    v_total_gt = v_tp_count + v_fn_count
+                    v_p = v_tp_count / (v_tp_count + v_fp_count) if (v_tp_count + v_fp_count) > 0 else 0.0
+                    v_r = v_tp_count / v_total_gt if v_total_gt > 0 else 0.0
+                    v_f1 = 2 * v_p * v_r / (v_p + v_r) if (v_p + v_r) > 0 else 0.0
+
+                    v_dets = v_matched + v_fp
+                    v_ap50 = 0.0
+                    if v_dets and v_total_gt > 0:
+                        v_confs = np.array([r['score'] for r in v_dets])
+                        v_is_tp = np.array([True] * len(v_matched) + [False] * len(v_fp))
+                        v_precs, v_recs = [], []
+                        for t in np.arange(0.05, 1.0, 0.05):
+                            sel = v_confs >= t
+                            tp_s = int(v_is_tp[sel].sum())
+                            n_s = int(sel.sum())
+                            v_precs.append(tp_s / n_s if n_s else 0.0)
+                            v_recs.append(tp_s / v_total_gt)
+                        s_idx = np.argsort(v_recs)
+                        s_r = np.array(v_recs)[s_idx]
+                        s_p = np.array(v_precs)[s_idx]
+                        v_ap50 = float(np.trapz(s_p, s_r)) if len(s_r) > 1 else v_p
+
+                    computed_video_metrics.append({
+                        'name': name,
+                        'video': name,
+                        'ap50': v_ap50,
+                        'f1': v_f1,
+                        'precision': v_p,
+                        'recall': v_r,
+                        'metrics': {
+                            'AP50': v_ap50,
+                            'F1': v_f1,
+                            'Precision': v_p,
+                            'Recall': v_r,
+                            'TP': v_tp_count,
+                            'FP': v_fp_count,
+                            'FN': v_fn_count
+                        }
+                    })
 
         if not (matched_records or fp_records or fn_records):
             return
@@ -433,6 +504,63 @@ class Evaluate():
                     ece += abs(float(is_tp[in_bin].mean()) - float(confs[in_bin].mean())) \
                            * (int(in_bin.sum()) / len(confs))
 
+        # TP vs FP confidence distributions
+        conf_tp = [float(r['score']) for r in matched_records if r['gt'] == r['det']]
+        conf_fp = [float(r['score']) for r in fp_records] + [float(r['score']) for r in matched_records if r['gt'] != r['det']]
+
+        # Per-class Precision-Recall and F1 curves
+        per_class_curves = {}
+        for c in classes:
+            c_matches = [r for r in matched_records if r['gt'] == c and r['det'] == c]
+            c_fps = [r for r in fp_records if r['det'] == c] + [r for r in matched_records if r['det'] == c and r['gt'] != c]
+            c_gts_total = len([r for r in matched_records if r['gt'] == c]) + len([r for r in fn_records if r['gt'] == c])
+            c_dets = c_matches + c_fps
+            if not c_dets or c_gts_total == 0:
+                continue
+
+            c_confs = np.array([r['score'] for r in c_dets])
+            c_is_tp = np.array([True] * len(c_matches) + [False] * len(c_fps))
+
+            c_precisions, c_recalls, c_f1s = [], [], []
+            for t in thresholds:
+                sel = c_confs >= t
+                tp_sel = int(c_is_tp[sel].sum())
+                n_sel = int(sel.sum())
+                p = tp_sel / n_sel if n_sel else 0.0
+                rc = tp_sel / c_gts_total if c_gts_total else 0.0
+                c_precisions.append(p)
+                c_recalls.append(rc)
+                c_f1s.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
+
+            c_opt_idx = int(np.argmax(c_f1s)) if c_f1s else 0
+            # Compute AP from PR curve
+            sorted_rc_indices = np.argsort(c_recalls)
+            sorted_rc = np.array(c_recalls)[sorted_rc_indices]
+            sorted_pr = np.array(c_precisions)[sorted_rc_indices]
+            c_ap = float(np.trapz(sorted_pr, sorted_rc)) if len(sorted_rc) > 1 else 0.0
+
+            per_class_curves[c] = {
+                'confidences': thresholds.tolist(),
+                'precisions': c_precisions,
+                'recalls': c_recalls,
+                'f1s': c_f1s,
+                'optimal_thr': float(thresholds[c_opt_idx]) if c_f1s else 0.5,
+                'peak_f1': float(c_f1s[c_opt_idx]) if c_f1s else 0.0,
+                'ap': max(0.0, min(1.0, c_ap))
+            }
+
+        # Error breakdown
+        classification_err = len([r for r in matched_records if r['gt'] != r['det']])
+        localization_err = len([r for r in fp_records if r.get('max_iou', 0) >= 0.1])
+        background_fp = len([r for r in fp_records if r.get('max_iou', 0) < 0.1])
+        missed_fn = len(fn_records)
+        error_breakdown = {
+            'classification': classification_err,
+            'localization': localization_err,
+            'background_fp': background_fp,
+            'missed_fn': missed_fn
+        }
+
         # Aspect-ratio bias: error (FP) rate per W/H bin
         ratio_edges = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, np.inf]
         ratio_mids = [0.125, 0.375, 0.625, 0.875, 1.25, 1.75, 2.5, 3.5, 6.0]
@@ -456,16 +584,23 @@ class Evaluate():
                 'ece_score': float(ece),
                 'optimal_thr': optimal_thr,
             },
+            'conf_tp': conf_tp,
+            'conf_fp': conf_fp,
+            'per_class_curves': per_class_curves,
+            'error_breakdown': error_breakdown,
             'aspect_ratio': {'ratios': ar_ratios, 'error_rates': ar_errors},
             'fp_coords': [[r['cx'], r['cy']] for r in fp_records],
             'fn_coords': [[r['cx'], r['cy']] for r in fn_records],
             'canvas_size': [canvas[0] or 1920, canvas[1] or 1080],
+            'video_metrics': computed_video_metrics,
         }
         with open(os.path.join(out_folder, 'diagnostics.json'), 'w') as f:
             json.dump(diag, f)
 
     def eval_detect(self):
         def evaluate_detector(dets_path, gt_path):
+            if hasattr(coco_evaluator, 'evaluate_coco_files'):
+                return coco_evaluator.evaluate_coco_files(gt_path, dets_path)
             dets = coco2bb(dets_path, BBType.DETECTED)
             gts = coco2bb(gt_path)
             coc = coco_evaluator.get_coco_summary(gts, dets)
@@ -561,7 +696,8 @@ class Evaluate():
                     c_key = int(c_id)
                 except (TypeError, ValueError):
                     c_key = c_id
-                named_class_m[class_id_to_name.get(c_key, str(c_id))] = metrics
+                target_name = class_id_to_name.get(c_key) or str(c_id)
+                named_class_m[target_name] = metrics
 
             if named_class_m:
                 try:

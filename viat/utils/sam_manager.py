@@ -198,18 +198,34 @@ class SamManager:
         try:
             kwargs = {'verbose': False, 'imgsz': 1024}
             if points and labels:
-                kwargs['points'] = points
-                kwargs['labels'] = labels
+                if isinstance(points[0], (int, float)):
+                    pts_fmt = [[[float(points[0]), float(points[1])]]]
+                    lbls_fmt = [[int(labels[0]) if isinstance(labels, (list, tuple)) else int(labels)]]
+                elif isinstance(points[0], (list, tuple)) and isinstance(points[0][0], (int, float)):
+                    pts_fmt = [[[float(p[0]), float(p[1])] for p in points]]
+                    lbls_fmt = [[int(l) for l in labels]]
+                else:
+                    pts_fmt = points
+                    lbls_fmt = labels
+                kwargs['points'] = pts_fmt
+                kwargs['labels'] = lbls_fmt
             if box:
-                kwargs['bboxes'] = box
+                if isinstance(box[0], (int, float)):
+                    kwargs['bboxes'] = [[float(b) for b in box]]
+                else:
+                    kwargs['bboxes'] = box
             if text_prompt and self.current_model_type and "fastsam" in self.current_model_type.lower():
                 kwargs['texts'] = text_prompt
 
             results = self.model(image_array, **kwargs)
             
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
-                polygon = results[0].masks.xy[0]
-                if len(polygon) > 0:
+                valid_polygons = [m for m in results[0].masks.xy if len(m) >= 3]
+                if valid_polygons:
+                    largest_poly = max(valid_polygons, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
+                    return [(float(pt[0]), float(pt[1])) for pt in largest_poly]
+                elif len(results[0].masks.xy[0]) > 0:
+                    polygon = results[0].masks.xy[0]
                     return [(float(pt[0]), float(pt[1])) for pt in polygon]
             
             return None
@@ -383,10 +399,22 @@ class SamManager:
                 
             kwargs = {'stream': True}
             if points and labels:
-                kwargs['points'] = points
-                kwargs['labels'] = labels
+                if isinstance(points[0], (int, float)):
+                    pts_fmt = [[[float(points[0]), float(points[1])]]]
+                    lbls_fmt = [[int(labels[0]) if isinstance(labels, (list, tuple)) else int(labels)]]
+                elif isinstance(points[0], (list, tuple)) and isinstance(points[0][0], (int, float)):
+                    pts_fmt = [[[float(p[0]), float(p[1])] for p in points]]
+                    lbls_fmt = [[int(l) for l in labels]]
+                else:
+                    pts_fmt = points
+                    lbls_fmt = labels
+                kwargs['points'] = pts_fmt
+                kwargs['labels'] = lbls_fmt
             if box:
-                kwargs['bboxes'] = box
+                if isinstance(box[0], (int, float)):
+                    kwargs['bboxes'] = [[float(b) for b in box]]
+                else:
+                    kwargs['bboxes'] = box
             if text_prompt and ("fastsam" in model_type.lower() or "sam3" in model_type.lower()):
                 kwargs['texts'] = text_prompt
 
