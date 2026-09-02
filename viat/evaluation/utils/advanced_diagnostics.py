@@ -445,17 +445,18 @@ class AdvancedDiagnosticsEngine:
 
     @staticmethod
     def generate_per_video_comparison_plot(video_metrics, save_path, theme='Dark', palette='Vibrant', dpi=150):
-        """9. Multi-Video Performance Comparison Bar Chart (mAP@0.50 & F1-Score)."""
+        """9. Multi-Video Performance Comparison Bar Chart (mAP@0.50 & F1-Score with Full Video Key Legend)."""
         if not HAS_MATPLOTLIB or plt is None or not video_metrics:
             return False
 
-        v_names = []
+        full_names = []
+        tick_labels = []
         ap50s = []
         f1s = []
 
         for i, v in enumerate(video_metrics):
             if isinstance(v, dict):
-                raw_name = v.get('name') or v.get('video') or v.get('Video_name') or f"Video_{i+1}"
+                raw_name = v.get('name') or v.get('video') or v.get('Video_name') or f"video_{i+1}"
                 mets = v.get('metrics', v)
                 if not isinstance(mets, dict):
                     mets = v
@@ -475,29 +476,44 @@ class AdvancedDiagnosticsEngine:
                 ap50_val = _get_val(['ap50', 'map50', 'map050', 'ap'])
                 f1_val = _get_val(['f1', 'f1score', 'fscore'])
             else:
-                raw_name = f"Video_{i+1}"
+                raw_name = f"video_{i+1}"
                 ap50_val = 0.0
                 f1_val = 0.0
 
             clean_name = str(raw_name).strip()
-            # If name is long, truncate cleanly (e.g. 5-7 chars with ellipsis)
-            if len(clean_name) > 7:
-                short_name = clean_name[:6] + "…"
-            else:
-                short_name = clean_name
+            full_names.append(clean_name)
 
-            v_names.append(short_name)
+            # Meaningful tick label: strip redundant common prefixes like 'video_', 'vid_', 'seq_'
+            short_sub = clean_name
+            for prefix in ['video_', 'vid_', 'seq_']:
+                if short_sub.lower().startswith(prefix):
+                    short_sub = short_sub[len(prefix):]
+                    break
+            if len(short_sub) > 10:
+                short_sub = short_sub[:9] + "…"
+
+            tick_label = f"V{i+1}: {short_sub}" if short_sub else f"V{i+1}"
+            tick_labels.append(tick_label)
+
             ap50s.append(ap50_val * 100 if ap50_val <= 1.0 else ap50_val)
             f1s.append(f1_val * 100 if f1_val <= 1.0 else f1_val)
 
-        if not v_names:
+        n_vids = len(full_names)
+        if n_vids == 0:
             return False
 
-        fig, ax = plt.subplots(figsize=(max(8, len(v_names) * 0.9), 5), dpi=dpi)
+        n_cols = 3 if n_vids > 6 else (2 if n_vids > 3 else 1)
+        col_len = (n_vids + n_cols - 1) // n_cols
+
+        extra_height = max(1.2, 0.32 * (col_len + 1))
+        fig_height = 4.8 + extra_height
+        fig_width = max(8.5, n_vids * 1.1)
+
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
         colors = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
         theme_cfg = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
 
-        x = np.arange(len(v_names))
+        x = np.arange(n_vids)
         width = 0.35
 
         bars1 = ax.bar(x - width/2, ap50s, width, label='mAP@0.50', color=colors[2 % len(colors)], alpha=0.85)
@@ -506,28 +522,60 @@ class AdvancedDiagnosticsEngine:
         ax.set_ylabel('Score (%)', fontsize=11, fontweight='bold')
         ax.set_title('Cross-Video Performance Comparison (mAP@0.50 & F1-Score)', fontsize=13, fontweight='bold', pad=12)
         ax.set_xticks(x)
-        ax.set_xticklabels(v_names, rotation=30, ha='right', fontsize=9, fontweight='bold')
-        ax.set_ylim([0, 110])
+        ax.set_xticklabels(tick_labels, rotation=25, ha='right', fontsize=9, fontweight='bold')
+        ax.set_ylim([0, 112])
 
         for bar in bars1:
             yval = bar.get_height()
             if yval > 0:
-                ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.2, f'{yval:.1f}%',
-                        ha='center', va='bottom', fontsize=8, color=theme_cfg['text'], fontweight='bold')
+                ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
+                        ha='center', va='bottom', fontsize=8.5, color=theme_cfg['text'], fontweight='bold')
         for bar in bars2:
             yval = bar.get_height()
             if yval > 0:
-                ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.2, f'{yval:.1f}%',
-                        ha='center', va='bottom', fontsize=8, color=theme_cfg['text'], fontweight='bold')
+                ax.text(bar.get_x() + bar.get_width()/2.0, yval + 1.5, f'{yval:.1f}%',
+                        ha='center', va='bottom', fontsize=8.5, color=theme_cfg['text'], fontweight='bold')
 
-        leg = ax.legend(loc='upper right', frameon=True)
+        leg = ax.legend(loc='upper right', frameon=True, fontsize=10)
         leg.get_frame().set_facecolor(theme_cfg['legend_bg'])
         leg.get_frame().set_edgecolor(theme_cfg['legend_edge'])
         for text in leg.get_texts():
             text.set_color(theme_cfg['text'])
 
         AestheticConfig.apply(fig, ax, theme, show_grid=True)
-        plt.tight_layout()
+
+        # Format structured Video Key box at the bottom
+        key_lines = []
+        for r in range(col_len):
+            row_items = []
+            for c in range(n_cols):
+                idx = c * col_len + r
+                if idx < n_vids:
+                    fname = full_names[idx]
+                    if len(fname) > 34:
+                        fname = fname[:31] + "…"
+                    row_items.append(f"[V{idx+1}] {fname:<34}")
+            key_lines.append("    ".join(row_items))
+
+        legend_header = "VIDEOS KEY (Full Sequence Names):"
+        full_legend_text = legend_header + "\n" + "\n".join(key_lines)
+
+        fig.text(
+            0.08, 0.02, full_legend_text,
+            fontsize=8.5,
+            family='monospace',
+            color=theme_cfg['text'],
+            va='bottom',
+            ha='left',
+            bbox=dict(
+                boxstyle='round,pad=0.5',
+                facecolor=theme_cfg['legend_bg'],
+                edgecolor=theme_cfg['legend_edge'],
+                alpha=0.9
+            )
+        )
+
+        plt.subplots_adjust(bottom=(extra_height + 0.5) / fig_height, top=0.92, left=0.08, right=0.96)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, facecolor=fig.get_facecolor(), edgecolor='none')
         plt.close(fig)

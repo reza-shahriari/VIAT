@@ -561,6 +561,7 @@ class VideoAnnotationTool(QMainWindow):
             'default': -1, 'min': 0, 'max': 100}}}
         self.class_thresholds = {}
         self.project_file = None
+        self.project_path = None
         self.project_modified = False
         self.autosave_timer = None
         self.autosave_enabled = True
@@ -576,6 +577,9 @@ class VideoAnnotationTool(QMainWindow):
         self.seg_labeler = None
         self.is_image_dataset = False
         self.image_files = []
+        self.is_video_dataset = False
+        self.video_dataset_info = None
+        self.video_dataset_index = 0
         self.deleted_frames = set()
         self.deleted_annotations = {}
         self.labeler_analytics = {
@@ -1363,21 +1367,41 @@ class VideoAnnotationTool(QMainWindow):
         det_dir = self.eval_dataset_context.get('det_dir', '')
         self.eval_current_video_name = video_name
 
-        # 1. Locate and open video file
+        # 1. Locate and open video file from Ground Truth directory (primary)
         exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV', '.m4v']
         video_file = None
-        for ext in exts:
-            c1 = os.path.join(gt_dir, video_name + ext)
-            c2 = os.path.join(det_dir, video_name + ext)
-            if os.path.exists(c1):
-                video_file = c1
-                break
-            elif os.path.exists(c2):
-                video_file = c2
-                break
 
-        if video_file and hasattr(self, 'open_video'):
-            self.open_video(video_file)
+        # Check if already loaded in video dataset manager
+        if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+            for v in self.video_dataset_info.all_videos:
+                if v.name == video_name or os.path.splitext(v.filename)[0] == video_name:
+                    self.switch_to_dataset_video(v.path, save_current=False)
+                    video_file = v.path
+                    break
+
+        if not video_file:
+            search_dirs = [gt_dir, os.path.join(gt_dir, "videos"), os.path.join(gt_dir, "images"), os.path.dirname(gt_dir)]
+            for sdir in search_dirs:
+                if not sdir or not os.path.exists(sdir):
+                    continue
+                for ext in exts:
+                    candidate = os.path.join(sdir, video_name + ext)
+                    if os.path.exists(candidate):
+                        video_file = candidate
+                        break
+                if video_file:
+                    break
+
+            # Fallback to det_dir only if video was not found in GT folder
+            if not video_file and det_dir and os.path.exists(det_dir):
+                for ext in exts:
+                    c2 = os.path.join(det_dir, video_name + ext)
+                    if os.path.exists(c2):
+                        video_file = c2
+                        break
+
+            if video_file and hasattr(self, 'open_video'):
+                self.open_video(video_file)
 
         # 2. Locate and import Ground Truth
         self.frame_annotations = {}
@@ -2884,6 +2908,9 @@ class VideoAnnotationTool(QMainWindow):
             self.project_file = None
             self.image_dataset_info = None
             self.is_image_dataset = False
+            self.is_video_dataset = False
+            self.video_dataset_info = None
+            self.video_dataset_index = 0
             self.canvas.annotations = []
             self.frame_annotations = {}
             self.deleted_frames = set()
@@ -2920,7 +2947,7 @@ class VideoAnnotationTool(QMainWindow):
                 all_annotations.append(annotation_copy)
                 
         if not all_annotations and self.canvas.annotations:
-            all_annotations = self.canvas.annotations
+            all_annotations = list(self.canvas.annotations)
             
         classes = list(self.canvas.class_colors.keys())
         try:
@@ -2928,6 +2955,8 @@ class VideoAnnotationTool(QMainWindow):
             total_f = getattr(self, 'total_frames', None)
             export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
             self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.update_video_status(self.video_filename, True)
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Failed to fast export: {str(e)}')
             import traceback
@@ -2946,10 +2975,22 @@ class VideoAnnotationTool(QMainWindow):
         if has_blurs:
             self.export_blurred_video(interactive=False)
             
-        # 2. Find next video
-        video_exts = ['.mp4', '.avi', '.mov', '.mkv']
+        # 2. Advance to next video
+        if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+            all_vids = self.video_dataset_info.all_videos
+            cur_idx = getattr(self, 'video_dataset_index', 0)
+            next_idx = cur_idx + 1
+            if next_idx < len(all_vids):
+                self.switch_to_dataset_video(all_vids[next_idx].path, save_current=False)
+            else:
+                self._prompt_merge_and_open_next(self.video_dataset_info.root)
+            return
+
+        # Single video mode: Find next video in folder
+        video_exts = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v', '.wmv']
+        exclude_output_videos = {'outvideo.mp4', 'out_video.mp4'}
         all_files = os.listdir(default_dir)
-        video_files = [f for f in all_files if os.path.splitext(f)[1].lower() in video_exts]
+        video_files = [f for f in all_files if os.path.splitext(f)[1].lower() in video_exts and f.lower() not in exclude_output_videos]
         video_files = natsorted(video_files)
         
         current_idx = -1
@@ -2985,7 +3026,7 @@ class VideoAnnotationTool(QMainWindow):
 
     @log_exceptions
     def delete_video_and_next(self):
-        """Delete the current video (and its .txt annotation if present) then load the next unannotated video."""
+        """Delete the current video (and its .txt annotation if present) then load the next video."""
         if not hasattr(self, 'video_filename') or not self.video_filename:
             return
 
@@ -3005,16 +3046,52 @@ class VideoAnnotationTool(QMainWindow):
         if reply != QMessageBox.Yes:
             return
 
-        # Find next video BEFORE deleting (so the file listing is still intact)
-        video_exts = ['.mp4', '.avi', '.mov', '.mkv']
-        all_files = os.listdir(default_dir)
-        video_files = natsorted([f for f in all_files if os.path.splitext(f)[1].lower() in video_exts])
+        # Release the video capture object so the file is not locked
+        if getattr(self, 'cap', None):
+            self.cap.release()
+            self.cap = None
 
-        current_basename = os.path.basename(video_path)
-        current_idx = video_files.index(current_basename) if current_basename in video_files else -1
+        # Move to removed/ directory or delete
+        removed_dir = os.path.join(default_dir, "removed")
+        os.makedirs(removed_dir, exist_ok=True)
+        dest_video = os.path.join(removed_dir, os.path.basename(video_path))
+        dest_txt = os.path.join(removed_dir, os.path.basename(txt_path))
+
+        try:
+            if os.path.isfile(txt_path):
+                shutil.move(txt_path, dest_txt)
+            if os.path.isfile(video_path):
+                shutil.move(video_path, dest_video)
+            self.statusBar.showMessage(f'Moved {os.path.basename(video_path)} to removed/')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to move file(s): {str(e)}')
+            return
+
+        if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+            cur_idx = getattr(self, 'video_dataset_index', 0)
+            for split in self.video_dataset_info.splits:
+                split.videos = [v for v in split.videos if v.path != video_path]
+                
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.set_video_dataset(self.video_dataset_info)
+
+            remaining = self.video_dataset_info.all_videos
+            if remaining:
+                next_idx = min(cur_idx, len(remaining) - 1)
+                self.switch_to_dataset_video(remaining[next_idx].path, save_current=False)
+            else:
+                self.reset_media_state()
+                QMessageBox.information(self, "Dataset Empty", "All videos in the dataset have been processed.")
+            return
+
+        # Single video mode: Find next video
+        video_exts = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v', '.wmv']
+        exclude_output_videos = {'outvideo.mp4', 'out_video.mp4'}
+        all_files = os.listdir(default_dir)
+        video_files = natsorted([f for f in all_files if os.path.splitext(f)[1].lower() in video_exts and f.lower() not in exclude_output_videos])
 
         next_video_path = None
-        for i in range(current_idx + 1, len(video_files)):
+        for i in range(len(video_files)):
             candidate_name = video_files[i]
             candidate_base = os.path.splitext(candidate_name)[0]
             candidate_txt = candidate_base + '.txt'
@@ -3035,21 +3112,6 @@ class VideoAnnotationTool(QMainWindow):
         self.duplicate_frames_cache = {}
         self.video_filename = None
         self.project_file = None
-        
-        # Release the video capture object so the file is not locked
-        if getattr(self, 'cap', None):
-            self.cap.release()
-            self.cap = None
-
-        # Delete files
-        try:
-            if os.path.isfile(txt_path):
-                os.remove(txt_path)
-            os.remove(video_path)
-            self.statusBar.showMessage(f'Deleted {os.path.basename(video_path)}')
-        except Exception as e:
-            QMessageBox.critical(self, 'Error', f'Failed to delete file(s): {str(e)}')
-            return
 
         # Load next video
         if next_video_path:
@@ -3137,7 +3199,7 @@ class VideoAnnotationTool(QMainWindow):
                     self.on_video_selected(first_vid)
 
     @log_exceptions
-    def load_video_file(self, filename):
+    def load_video_file(self, filename, from_dataset=False):
         """Load a video file and display the first frame."""
         if self.cap:
             self.cap.release()
@@ -3151,7 +3213,7 @@ class VideoAnnotationTool(QMainWindow):
             
         self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
         if not self.cap.isOpened():
-            QMessageBox.critical(self, 'Error', 'Could not open video file!')
+            QMessageBox.critical(self, 'Error', f'Could not open video file:\n{filename}')
             self.cap = None
             return False
         self.video_filename = filename
@@ -3190,30 +3252,283 @@ class VideoAnnotationTool(QMainWindow):
                 '_autosave.json')
             if self.autosave_enabled and not self.autosave_timer.isActive():
                 self.autosave_timer.start(self.autosave_interval)
-            if self.duplicate_frames_enabled and not self.frame_hashes:
-                reply = QMessageBox.question(self,
-                    'Duplicate Frame Detection',
-                    """Would you like to scan this video for duplicate frames?
+            if not from_dataset:
+                if self.duplicate_frames_enabled and not self.frame_hashes:
+                    reply = QMessageBox.question(self,
+                        'Duplicate Frame Detection',
+                        """Would you like to scan this video for duplicate frames?
 (This will help automatically propagate annotations)"""
-                    , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                if reply == QMessageBox.Yes:
-                    QTimer.singleShot(500, self.scan_video_for_duplicates)
-            elif self.duplicate_frames_enabled and self.frame_hashes:
-                duplicate_count = sum(len(frames) - 1 for frames in self.
-                    duplicate_frames_cache.values() if len(frames) > 1)
-                self.statusBar.showMessage(
-                    f'Loaded {duplicate_count} duplicate frames from project file'
-                    , 5000)
-            if not hasattr(self, '_loading_from_project'
-                ) or not self._loading_from_project:
-                self.check_for_annotation_files(filename)
-                
+                        , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                    if reply == QMessageBox.Yes:
+                        QTimer.singleShot(500, self.scan_video_for_duplicates)
+                elif self.duplicate_frames_enabled and self.frame_hashes:
+                    duplicate_count = sum(len(frames) - 1 for frames in self.
+                        duplicate_frames_cache.values() if len(frames) > 1)
+                    self.statusBar.showMessage(
+                        f'Loaded {duplicate_count} duplicate frames from project file'
+                        , 5000)
+                if not hasattr(self, '_loading_from_project'
+                    ) or not self._loading_from_project:
+                    self.check_for_annotation_files(filename)
+                    
             return True
         else:
             QMessageBox.critical(self, 'Error', 'Could not read video frame!')
             self.cap.release()
             self.cap = None
             return False
+
+    @log_exceptions
+    def open_video_folder(self):
+        """Open a folder containing multiple videos or a video dataset via file dialog."""
+        if not self.check_unsaved_changes():
+            return
+        folder_path = QFileDialog.getExistingDirectory(
+            self, 'Open Video Folder / Dataset', '', QFileDialog.ShowDirsOnly
+        )
+        if not folder_path:
+            return
+        self.load_video_dataset_path(folder_path)
+
+    @log_exceptions
+    def load_video_dataset_path(self, folder_path, initial_video_idx=0):
+        """Load a video dataset from a folder."""
+        self.reset_media_state()
+        from viat.utils.video_dataset_manager import scan_video_dataset
+        info = scan_video_dataset(folder_path)
+        if not info.all_videos:
+            QMessageBox.warning(
+                self, 'Open Video Folder',
+                'No video files found in the selected folder or its subfolders!'
+            )
+            return False
+
+        self.is_video_dataset = True
+        self.video_dataset_info = info
+        self.video_dataset_index = initial_video_idx
+
+        # Initialize global classes
+        if info.classes:
+            for cls_name in info.classes:
+                if cls_name not in self.canvas.class_colors:
+                    self.add_class(cls_name)
+            self.refresh_class_ui()
+
+        if hasattr(self, 'video_manager_dock'):
+            self.video_manager_dock.show()
+            self.video_manager_dock.set_video_dataset(info)
+
+        # Load initial video
+        if 0 <= initial_video_idx < len(info.all_videos):
+            target_video = info.all_videos[initial_video_idx]
+            self.switch_to_dataset_video(target_video.path, save_current=False)
+            
+        folder_name = os.path.basename(folder_path) or folder_path
+        self.statusBar.showMessage(f'Loaded Video Dataset: {folder_name} ({info.video_count} videos)', 5000)
+        return True
+
+    @log_exceptions
+    def switch_to_dataset_video(self, video_identifier, save_current=True):
+        """
+        Switch active video within a video dataset.
+        
+        Args:
+            video_identifier: Full path or filename of target video
+            save_current: Whether to auto-save current video annotations before switching
+        """
+        if not getattr(self, 'is_video_dataset', False) or not self.video_dataset_info:
+            return False
+
+        target_vinfo = None
+        target_idx = -1
+        all_vids = self.video_dataset_info.all_videos
+        
+        for idx, v in enumerate(all_vids):
+            if v.path == video_identifier or v.filename == video_identifier or os.path.abspath(v.path) == os.path.abspath(video_identifier):
+                target_vinfo = v
+                target_idx = idx
+                break
+
+        if not target_vinfo:
+            return False
+
+        if getattr(self, 'video_filename', None) and os.path.abspath(self.video_filename) == os.path.abspath(target_vinfo.path):
+            return True
+
+        # 1. Auto-save current video annotations if present
+        if save_current and getattr(self, 'video_filename', None):
+            self.auto_save_current_video_annotations()
+
+        # 2. Reset canvas and frame annotation state for new video
+        self.canvas.annotations = []
+        self.frame_annotations = {}
+        self.deleted_frames = set()
+        self.deleted_annotations = {}
+        self.current_frame = 0
+        self.frame_hashes = {}
+        self.duplicate_frames_cache = {}
+
+        # 3. Load target video file
+        self.video_dataset_index = target_idx
+        success = self.load_video_file(target_vinfo.path, from_dataset=True)
+        if not success:
+            return False
+
+        # 4. Auto-import annotations if present
+        self.auto_import_video_annotations(target_vinfo.path)
+
+        # 5. Update dock selection and window title
+        if hasattr(self, 'video_manager_dock'):
+            self.video_manager_dock.select_video(target_vinfo.path)
+            
+        dataset_name = os.path.basename(self.video_dataset_info.root) or "Dataset"
+        split_suffix = f" [{target_vinfo.split}]" if target_vinfo.split and target_vinfo.split != "root" else ""
+        self.setWindowTitle(f"VIAT - [{dataset_name}{split_suffix}] {target_vinfo.filename} ({target_idx + 1}/{len(all_vids)})")
+        return True
+
+    def auto_save_current_video_annotations(self):
+        """Automatically save annotations for current video in dataset mode."""
+        if not getattr(self, 'video_filename', None):
+            return
+            
+        has_annotations = bool(self.frame_annotations or self.canvas.annotations)
+        if not has_annotations:
+            return
+
+        default_dir = os.path.dirname(self.video_filename)
+        default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
+        has_blurs = hasattr(self, 'blur_manager') and bool(self.blur_manager.blur_regions)
+
+        if has_blurs:
+            export_path = os.path.join(default_dir, default_filename + '_blurred.txt')
+        else:
+            export_path = os.path.join(default_dir, default_filename + '.txt')
+
+        from viat.utils.file_operations import export_raya_with_classes_annotations
+        all_annotations = []
+        for frame_num, annotations in self.frame_annotations.items():
+            for annotation in annotations:
+                import copy
+                annotation_copy = copy.copy(annotation)
+                annotation_copy.frame = frame_num
+                all_annotations.append(annotation_copy)
+
+        if not all_annotations and self.canvas.annotations:
+            all_annotations = list(self.canvas.annotations)
+
+        classes = list(self.canvas.class_colors.keys())
+        try:
+            deleted = getattr(self, 'deleted_frames', set())
+            total_f = getattr(self, 'total_frames', None)
+            export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.update_video_status(self.video_filename, True)
+        except Exception as e:
+            logger.error(f"Auto-saving annotations for {self.video_filename} failed: {e}")
+
+    def auto_import_video_annotations(self, video_path):
+        """Auto-detect and import annotations for a video in dataset mode without modal prompts."""
+        if not video_path:
+            return
+            
+        vinfo = self.video_dataset_info.find_video_by_path(video_path) if getattr(self, 'video_dataset_info', None) else None
+        ann_file = vinfo.annotation_file if vinfo else None
+        
+        if not ann_file:
+            v_dir = os.path.dirname(video_path)
+            v_base = os.path.splitext(os.path.basename(video_path))[0]
+            for ext in ('.txt', '.json', '.xml'):
+                cand = os.path.join(v_dir, v_base + ext)
+                if os.path.isfile(cand):
+                    ann_file = cand
+                    break
+
+        if not ann_file or not os.path.isfile(ann_file):
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.update_video_status(video_path, False)
+            return
+
+        try:
+            from viat.utils.file_operations import import_annotations as import_annotations_func, detect_annotation_format, extract_raya_classes
+            format_type = detect_annotation_format(ann_file)
+            class_mapping = None
+            
+            if format_type == 'Raya with classes':
+                imported_classes = extract_raya_classes(ann_file)
+                existing_classes = list(self.canvas.class_colors.keys())
+                if imported_classes:
+                    class_mapping = {}
+                    for idx, cls in enumerate(imported_classes):
+                        match_existing = next((ex for ex in existing_classes if ex.lower() == cls.lower()), None)
+                        if match_existing:
+                            class_mapping[idx] = match_existing
+                        else:
+                            self.add_class(cls)
+                            class_mapping[idx] = cls
+
+            image_width = self.canvas.pixmap.width() if self.canvas.pixmap else 640
+            image_height = self.canvas.pixmap.height() if self.canvas.pixmap else 480
+
+            res = import_annotations_func(
+                ann_file, BoundingBox, image_width,
+                image_height, self.canvas.class_colors, class_mapping=class_mapping
+            )
+            format_type, annotations, imported_frame_annotations = res[0], res[1], res[2]
+            imported_deleted_frames = res[3] if len(res) > 3 else set()
+
+            for frame_num, anns in imported_frame_annotations.items():
+                self.frame_annotations[frame_num] = list(anns)
+
+            if imported_deleted_frames:
+                self.deleted_frames = set(imported_deleted_frames)
+
+            if self.current_frame in imported_frame_annotations:
+                self.canvas.annotations = list(imported_frame_annotations[self.current_frame])
+                self.canvas.update()
+                
+            self.annotation_dock.update_annotation_list()
+            has_labels = bool(self.frame_annotations or self.canvas.annotations)
+            if hasattr(self, 'video_manager_dock'):
+                self.video_manager_dock.update_video_status(video_path, has_labels)
+        except Exception as e:
+            logger.error(f"Auto-importing annotations from {ann_file} failed: {e}")
+
+    @log_exceptions
+    def open_merge_video_dataset_dialog(self):
+        """Open dialog to merge all videos and annotations in a folder to a single video."""
+        default_dir = ""
+        if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+            default_dir = self.video_dataset_info.root
+        elif hasattr(self, 'video_filename') and self.video_filename:
+            default_dir = os.path.dirname(self.video_filename)
+
+        folder = QFileDialog.getExistingDirectory(
+            self, 'Select Video Dataset Folder to Merge', default_dir, QFileDialog.ShowDirsOnly
+        )
+        if not folder:
+            return
+
+        out_video, _ = QFileDialog.getSaveFileName(
+            self, 'Save Merged Video As', os.path.join(folder, 'outvideo.mp4'), 'Video Files (*.mp4)'
+        )
+        if not out_video:
+            return
+
+        out_labels = os.path.splitext(out_video)[0] + '.txt'
+
+        import sys
+        from pathlib import Path
+        root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root_path not in sys.path:
+            sys.path.insert(0, root_path)
+        from many2single import merge_dataset_programmatic
+
+        self.statusBar.showMessage('Merging videos... This may take a while.', 10000)
+        success, msg = merge_dataset_programmatic(Path(folder), Path(out_video), Path(out_labels))
+        if success:
+            QMessageBox.information(self, "Merge Successful", msg)
+        else:
+            QMessageBox.critical(self, "Merge Error", f"Failed to merge videos:\n{msg}")
 
     def _process_frame_metadata(self, frame, frame_num):
         """Process the frame according to loaded metadata (e.g., cropping padded regions)."""
@@ -3484,6 +3799,9 @@ The file might be corrupted or have an unsupported format."""
         self.video_path = None
         self.image_dataset_info = None
         self.is_image_dataset = False
+        self.is_video_dataset = False
+        self.video_dataset_info = None
+        self.video_dataset_index = 0
         if hasattr(self, 'update_dataset_labels_action'):
             self.update_dataset_labels_action.setEnabled(False)
         self.frame_hashes = {}
@@ -3948,11 +4266,17 @@ Would you like to load it?"""
             self.video_manager_dock.video_selected.connect(self.on_video_selected)
             self.video_manager_dock.prev_video_requested.connect(self.on_prev_video_requested)
             self.video_manager_dock.next_video_requested.connect(self.on_next_video_requested)
+            self.video_manager_dock.next_unannotated_requested.connect(self.on_next_unannotated_video_requested)
+            self.video_manager_dock.fast_export_requested.connect(self.fast_export_video_and_next)
             self.video_manager_dock.sam_tracking_toggled.connect(self.toggle_sam_interactive_mode)
             self.video_manager_dock.remove_video_requested.connect(self.remove_current_cut)
 
     @log_exceptions
     def remove_current_cut(self):
+        if getattr(self, 'is_video_dataset', False):
+            self.delete_video_and_next()
+            return
+
         if not getattr(self, 'video_mode', False) or not hasattr(self, 'video_manager_dock'):
             return
             
@@ -3998,6 +4322,10 @@ Would you like to load it?"""
         self.update_frame_display()
 
     def on_video_selected(self, video_name):
+        if getattr(self, 'is_video_dataset', False):
+            self.switch_to_dataset_video(video_name, save_current=True)
+            return
+
         if not video_name or video_name not in getattr(self, 'video_groups', {}):
             return
             
@@ -4014,7 +4342,7 @@ Would you like to load it?"""
         self.set_current_frame(start_idx)
         
     def on_prev_video_requested(self):
-        if not getattr(self, 'video_mode', False) or not hasattr(self, 'video_manager_dock'):
+        if not hasattr(self, 'video_manager_dock'):
             return
         current_item = self.video_manager_dock.list_widget.currentItem()
         if current_item:
@@ -4023,13 +4351,33 @@ Would you like to load it?"""
                 self.video_manager_dock.list_widget.setCurrentRow(row - 1)
 
     def on_next_video_requested(self):
-        if not getattr(self, 'video_mode', False) or not hasattr(self, 'video_manager_dock'):
+        if not hasattr(self, 'video_manager_dock'):
             return
         current_item = self.video_manager_dock.list_widget.currentItem()
         if current_item:
             row = self.video_manager_dock.list_widget.row(current_item)
             if row < self.video_manager_dock.list_widget.count() - 1:
                 self.video_manager_dock.list_widget.setCurrentRow(row + 1)
+
+    def on_next_unannotated_video_requested(self):
+        if not getattr(self, 'is_video_dataset', False) or not hasattr(self, 'video_dataset_info') or not self.video_dataset_info:
+            return
+        all_vids = self.video_dataset_info.all_videos
+        if not all_vids:
+            return
+        start_idx = (getattr(self, 'video_dataset_index', 0) + 1) % len(all_vids)
+        
+        target_idx = None
+        for i in range(len(all_vids)):
+            check_idx = (start_idx + i) % len(all_vids)
+            if not all_vids[check_idx].has_annotations:
+                target_idx = check_idx
+                break
+                
+        if target_idx is not None:
+            self.switch_to_dataset_video(all_vids[target_idx].path, save_current=True)
+        else:
+            self.statusBar.showMessage("All videos in dataset have annotations!", 4000)
 
     def toggle_video_mode(self, checked):
         self.video_mode = checked
@@ -4834,12 +5182,20 @@ Would you like to load it?"""
                 filename += '.json'
             video_path = None
             image_dataset_info = None
+            video_dataset_info_dict = None
             if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
                 if self.image_files:
                     base_folder = os.path.dirname(self.image_files[0])
                     image_dataset_info = {'is_image_dataset': True,
                         'base_folder': base_folder, 'image_files': self.
                         get_image_files_relative()}
+            elif getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+                video_dataset_info_dict = {
+                    'is_video_dataset': True,
+                    'root': self.video_dataset_info.root,
+                    'current_video_idx': getattr(self, 'video_dataset_index', 0),
+                    'current_video_path': getattr(self, 'video_filename', None),
+                }
             else:
                 video_path = getattr(self, 'video_filename', None)
             class_attributes = getattr(self.canvas, 'class_attributes', {})
@@ -4872,7 +5228,7 @@ Would you like to load it?"""
                 ._annotations_imported) if hasattr(self,
                 '_annotations_imported') else [], class_thresholds=dict(
                 self.class_thresholds) if getattr(self, 'class_thresholds',
-                None) is not None else {}, deleted_frames=self.deleted_frames if hasattr(self, 'deleted_frames') else set(), labeler_analytics=self.labeler_analytics if hasattr(self, 'labeler_analytics') else None, deleted_annotations=deleted_annotations_copy, blur_regions=blur_regions, maximum=100)
+                None) is not None else {}, deleted_frames=self.deleted_frames if hasattr(self, 'deleted_frames') else set(), labeler_analytics=self.labeler_analytics if hasattr(self, 'labeler_analytics') else None, deleted_annotations=deleted_annotations_copy, blur_regions=blur_regions, video_dataset_info=video_dataset_info_dict, maximum=100)
             self.project_file = filename
             self.project_modified = False
             self.statusBar.showMessage(
@@ -4977,8 +5333,28 @@ The application has been reset to its initial state."""
                 "base_annotations": loaded_analytics.get("base_annotations", {})
             }
             
-            # Load media (video or image dataset)
-            if video_path:
+            # Load media (video, image dataset, or video dataset)
+            video_dataset_info_dict = project_data.get('video_dataset_info')
+            if video_dataset_info_dict and video_dataset_info_dict.get('is_video_dataset'):
+                root = video_dataset_info_dict.get('root')
+                if not root or not os.path.isdir(root):
+                    project_dir = os.path.dirname(filename)
+                    if root and os.path.isdir(os.path.join(project_dir, os.path.basename(root))):
+                        root = os.path.join(project_dir, os.path.basename(root))
+                    else:
+                        reply = QMessageBox.question(
+                            self, 'Video Dataset Folder Not Found',
+                            f"The video dataset folder '{root}' was not found.\nWould you like to locate it?",
+                            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                        )
+                        if reply == QMessageBox.Yes:
+                            new_dir = QFileDialog.getExistingDirectory(self, 'Locate Video Dataset Folder', project_dir)
+                            if new_dir:
+                                root = new_dir
+                if root and os.path.isdir(root):
+                    c_idx = video_dataset_info_dict.get('current_video_idx', 0)
+                    self.load_video_dataset_path(root, initial_video_idx=c_idx)
+            elif video_path:
                 if not os.path.exists(video_path):
                     project_dir = os.path.dirname(filename)
                     rel_path1 = os.path.join(project_dir, os.path.basename(video_path))
@@ -5039,8 +5415,7 @@ The application has been reset to its initial state."""
         """Save the current application state."""
         if not hasattr(self, 'project_file') or not self.project_file:
             return
-        state = {'project_path': self.project_path, 'video_filename': self.
-            video_filename, 'current_frame': self.current_frame,
+        state = {'project_path': getattr(self, 'project_path', None) or getattr(self, 'project_file', None), 'video_filename': getattr(self, 'video_filename', None), 'current_frame': getattr(self, 'current_frame', 0),
             'zoom_level': self.canvas.zoom_level if hasattr(self.canvas,
             'zoom_level') else 1.0, 'tracking_mode_enabled': self.
             tracking_mode_enabled, 'interpolation_mode_active': self.

@@ -39,16 +39,162 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QComboBox,
     QScrollArea,
-    QInputDialog
+    QInputDialog,
+    QListWidget,
+    QListWidgetItem
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QIcon, QFont, QTextCursor, QPixmap
 
-from viat.evaluation.utils.yaml_parser import parse_yolo_yaml, scan_dataset_classes
+from viat.evaluation.utils.yaml_parser import parse_yolo_yaml, scan_dataset_classes, scan_dataset_videos
 from viat.evaluation.utils.class_merger import DetailedAnalyticsEngine
 from viat.evaluation.utils.advanced_diagnostics import AdvancedDiagnosticsEngine
 from viat.evaluation.visualization.visual_inspector import VisualInspectorWidget
 from viat.evaluation.inference.model_runner import ModelRunner
+
+
+class VideoMultiSelectDialog(QDialog):
+    """Modern checkable multi-select dialog for video sequences."""
+
+    def __init__(self, all_videos, selected_videos=None, title="Select Videos for Evaluation", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(460, 520)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 12px; }
+            QLineEdit {
+                background-color: #2b2b2b; color: #ffffff; border: 1px solid #444444;
+                border-radius: 4px; padding: 6px 10px; font-size: 12px;
+            }
+            QLineEdit:focus { border: 1px solid #409EFF; }
+            QListWidget {
+                background-color: #252525; border: 1px solid #3d3d3d;
+                border-radius: 6px; padding: 4px;
+            }
+            QListWidget::item {
+                padding: 6px 8px; color: #ffffff; border-radius: 4px;
+            }
+            QListWidget::item:hover { background-color: rgba(64, 158, 255, 0.15); }
+            QPushButton {
+                background-color: #333333; color: #ffffff; border: 1px solid #555555;
+                border-radius: 4px; padding: 6px 12px; font-size: 11px;
+            }
+            QPushButton:hover { background-color: #444444; border-color: #409EFF; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        lbl_desc = QLabel(
+            "<b>Select Target Videos:</b><br>"
+            "<span style='color:#aaaaaa; font-size:11px;'>By default, all detected videos are selected. Deselect any videos you wish to exclude.</span>"
+        )
+        lbl_desc.setWordWrap(True)
+        layout.addWidget(lbl_desc)
+
+        # Search bar
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 Search / Filter videos...")
+        self.search_edit.textChanged.connect(self.filter_items)
+        layout.addWidget(self.search_edit)
+
+        # Action buttons
+        btn_bar = QHBoxLayout()
+        btn_all = QPushButton("☑ Select All")
+        btn_all.clicked.connect(self.select_all)
+        btn_none = QPushButton("☐ Deselect All")
+        btn_none.clicked.connect(self.deselect_all)
+        btn_invert = QPushButton("🔀 Invert")
+        btn_invert.clicked.connect(self.invert_selection)
+
+        self.lbl_count = QLabel("")
+        self.lbl_count.setStyleSheet("color: #409EFF; font-weight: bold; font-size: 11px;")
+
+        btn_bar.addWidget(btn_all)
+        btn_bar.addWidget(btn_none)
+        btn_bar.addWidget(btn_invert)
+        btn_bar.addStretch()
+        btn_bar.addWidget(self.lbl_count)
+        layout.addLayout(btn_bar)
+
+        # Checkable list
+        self.list_widget = QListWidget()
+        self.all_videos = list(all_videos) if all_videos else []
+
+        if selected_videos is None:
+            self.selected_set = set(self.all_videos)
+        else:
+            self.selected_set = set(selected_videos)
+
+        for vid in self.all_videos:
+            item = QListWidgetItem(vid, self.list_widget)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if vid in self.selected_set or (selected_videos is None):
+                item.setCheckState(Qt.Checked)
+            else:
+                item.setCheckState(Qt.Unchecked)
+
+        self.list_widget.itemChanged.connect(self.update_count)
+        layout.addWidget(self.list_widget)
+        self.update_count()
+
+        # Bottom buttons
+        bottom_box = QHBoxLayout()
+        bottom_box.addStretch()
+        btn_ok = QPushButton("Apply Selection")
+        btn_ok.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; padding: 7px 16px;")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        bottom_box.addWidget(btn_ok)
+        bottom_box.addWidget(btn_cancel)
+        layout.addLayout(bottom_box)
+
+    def select_all(self):
+        self.list_widget.blockSignals(True)
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Checked)
+        self.list_widget.blockSignals(False)
+        self.update_count()
+
+    def deselect_all(self):
+        self.list_widget.blockSignals(True)
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Unchecked)
+        self.list_widget.blockSignals(False)
+        self.update_count()
+
+    def invert_selection(self):
+        self.list_widget.blockSignals(True)
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+        self.list_widget.blockSignals(False)
+        self.update_count()
+
+    def filter_items(self, text):
+        query = text.lower().strip()
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            item.setHidden(bool(query and query not in item.text().lower()))
+
+    def update_count(self):
+        sel = len(self.get_selected_videos())
+        tot = self.list_widget.count()
+        self.lbl_count.setText(f"{sel}/{tot} Selected")
+
+    def get_selected_videos(self):
+        selected = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.checkState() == Qt.Checked:
+                selected.append(item.text())
+        return selected
 
 
 
@@ -599,6 +745,8 @@ class EvaluationDialog(QDialog):
         self.setup_log_tab()
         self.tabs.addTab(self.tab_log, "💻 Console Log")
 
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
         main_layout.addWidget(self.tabs)
 
         # Bottom Execution Bar
@@ -664,45 +812,93 @@ class EvaluationDialog(QDialog):
 
         # Metric Settings integrated here
         settings_group = QGroupBox("Evaluation Metrics & Settings")
+        settings_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         set_layout = QGridLayout(settings_group)
-        set_layout.addWidget(QLabel("Size Threshold (%):"), 0, 0)
+        set_layout.setSpacing(10)
+
+        # Thresholds row
+        thr_layout = QHBoxLayout()
+        thr_layout.addWidget(QLabel("Size Filter Threshold (%):"))
         self.spin_size_thr = QSpinBox()
         self.spin_size_thr.setRange(0, 100)
-        set_layout.addWidget(self.spin_size_thr, 0, 1)
+        thr_layout.addWidget(self.spin_size_thr)
 
-        set_layout.addWidget(QLabel("Quality Threshold (%):"), 0, 2)
+        thr_layout.addWidget(QLabel("Quality Filter Threshold (%):"))
         self.spin_quality_thr = QSpinBox()
         self.spin_quality_thr.setRange(0, 100)
-        set_layout.addWidget(self.spin_quality_thr, 0, 3)
+        thr_layout.addWidget(self.spin_quality_thr)
 
-        set_layout.addWidget(QLabel("Confidence Threshold (Auto-Inference):"), 1, 0)
+        thr_layout.addWidget(QLabel("Confidence Threshold:"))
         self.spin_conf_thr = QDoubleSpinBox()
         self.spin_conf_thr.setRange(0.01, 1.0)
         self.spin_conf_thr.setSingleStep(0.05)
         self.spin_conf_thr.setValue(0.25)
-        set_layout.addWidget(self.spin_conf_thr, 1, 1)
+        thr_layout.addWidget(self.spin_conf_thr)
 
-        self.chk_ignore_all = QCheckBox("Ignore non-evaluated categories")
-        self.chk_ignore_all.setChecked(True)
-        set_layout.addWidget(self.chk_ignore_all, 1, 2, 1, 2)
+        thr_layout.addStretch()
+        set_layout.addLayout(thr_layout, 0, 0, 1, 2)
 
-        set_layout.addWidget(QLabel("<b>Metrics & Diagnostics to Run:</b>"), 2, 0, 1, 4)
+        set_layout.addWidget(QLabel("<b>Select Metrics & Evaluation Engines:</b>"), 1, 0, 1, 2)
 
-        self.chk_detection = QCheckBox("COCO Detection Evaluation (mAP, AP50, AP75)")
+        # Modern high-contrast metric card stylesheet
+        card_style = """
+            QCheckBox {
+                color: #ffffff;
+                font-size: 11.5px;
+                font-weight: bold;
+                padding: 10px 14px;
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-radius: 6px;
+                min-height: 42px;
+            }
+            QCheckBox:hover {
+                background-color: rgba(64, 158, 255, 0.14);
+                border: 1px solid #409EFF;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border: 2px solid #888888;
+                background-color: #222222;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #409EFF;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007acc;
+                border-color: #409EFF;
+            }
+        """
+
+        self.chk_detection = QCheckBox("🎯 COCO Detection Benchmark\n   (Computes mAP@0.50, mAP@[0.40:0.95], AP75, and PR Curves)")
+        self.chk_detection.setStyleSheet(card_style)
         self.chk_detection.setChecked(True)
-        set_layout.addWidget(self.chk_detection, 3, 0, 1, 2)
+        set_layout.addWidget(self.chk_detection, 2, 0)
 
-        self.chk_speed = QCheckBox("Speed Profile Segmentation (Slow / Med / Fast)")
-        set_layout.addWidget(self.chk_speed, 3, 2, 1, 2)
+        self.chk_tracking = QCheckBox("📊 MOT Tracking Evaluation\n   (Computes HOTA, MOTA, IDF1, Track Loss, Frag, and ID Swaps)")
+        self.chk_tracking.setStyleSheet(card_style)
+        self.chk_tracking.setChecked(True)
+        set_layout.addWidget(self.chk_tracking, 2, 1)
 
-        self.chk_tracking = QCheckBox("MOT Tracking Evaluation (MOTA, IDF1, HOTA)")
-        set_layout.addWidget(self.chk_tracking, 4, 0, 1, 2)
+        self.chk_speed = QCheckBox("⚡ Speed Profile Segmentation\n   (Segmented accuracy breakdown for Slow, Medium, and Fast objects)")
+        self.chk_speed.setStyleSheet(card_style)
+        set_layout.addWidget(self.chk_speed, 3, 0)
 
-        self.chk_center = QCheckBox("Center Bounding Box Accuracy Check")
-        set_layout.addWidget(self.chk_center, 4, 2, 1, 2)
+        self.chk_center = QCheckBox("📍 Center Bounding Box Accuracy\n   (Measures center point displacement and localization offsets)")
+        self.chk_center.setStyleSheet(card_style)
+        set_layout.addWidget(self.chk_center, 3, 1)
 
-        self.chk_visualize = QCheckBox("Generate MP4 Error Videos (FP/FN Visualizer)")
-        set_layout.addWidget(self.chk_visualize, 5, 0, 1, 2)
+        self.chk_visualize = QCheckBox("🎬 Generate Error Review Videos\n   (Exports MP4 video sequences highlighting False Positives and False Negatives)")
+        self.chk_visualize.setStyleSheet(card_style)
+        set_layout.addWidget(self.chk_visualize, 4, 0, 1, 2)
+
+        self.chk_ignore_all = QCheckBox("🚫 Ignore Non-Evaluated Categories\n   (Automatically filters out classes not explicitly mapped)")
+        self.chk_ignore_all.setStyleSheet(card_style)
+        self.chk_ignore_all.setChecked(True)
+        set_layout.addWidget(self.chk_ignore_all, 5, 0, 1, 2)
+
         layout.addWidget(settings_group)
 
         # Class Assignment / Remapping Table Group (Collapsible)
@@ -715,20 +911,29 @@ class EvaluationDialog(QDialog):
         self.mapping_group.setVisible(False)
         mapping_layout = QVBoxLayout(self.mapping_group)
 
-        ignore_layout = QHBoxLayout()
-        ignore_layout.addWidget(QLabel("Ignored Videos (comma separated):"))
-        self.edit_ignored_videos = QLineEdit()
-        self.edit_ignored_videos.setPlaceholderText("e.g. video1, sequence3")
-        ignore_layout.addWidget(self.edit_ignored_videos)
-        mapping_layout.addLayout(ignore_layout)
+        video_filter_box = QHBoxLayout()
+        self.lbl_global_videos = QLabel("🎥 Active Video Sequences:")
+        self.lbl_global_videos.setStyleSheet("font-weight: bold; font-size: 12px;")
+        self.btn_manage_videos = QPushButton("🎬 All Detected Videos Included (Click to Deselect)")
+        self.btn_manage_videos.setStyleSheet("background-color: #2b2b2b; color: #409EFF; border: 1px solid #409EFF; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-size: 12px;")
+        self.btn_manage_videos.clicked.connect(self.open_global_video_selector)
+        self.global_selected_videos = None # None means all selected
+        video_filter_box.addWidget(self.lbl_global_videos)
+        video_filter_box.addWidget(self.btn_manage_videos)
+        video_filter_box.addStretch()
+        mapping_layout.addLayout(video_filter_box)
 
         btn_scan = QPushButton("🔍 Scan Classes from GT Bundles & YAMLs")
         btn_scan.clicked.connect(self.scan_and_populate_classes)
         mapping_layout.addWidget(btn_scan, 0, Qt.AlignLeft)
 
-        self.table_classes = QTableWidget(0, 4)
+        self.table_classes = QTableWidget(0, 3)
         self.table_classes.setMinimumHeight(300)
-        self.table_classes.setHorizontalHeaderLabels(["Original Class ID / Name", "Target Evaluation Name", "Include in Eval", "Target Video (Empty=All)"])
+        self.table_classes.setHorizontalHeaderLabels([
+            "Original Class (ID / Name)",
+            "Target Evaluation Class (Select [IGNORE] to exclude)",
+            "Target Video Filter (Click to Select / Deselect)"
+        ])
         self.table_classes.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         mapping_layout.addWidget(self.table_classes)
 
@@ -746,71 +951,357 @@ class EvaluationDialog(QDialog):
         else:
             self.btn_toggle_mapping.setText("▶ Show Class Assignment & Remapping")
 
+    def on_tab_changed(self, index):
+        current_widget = self.tabs.widget(index)
+        if current_widget == self.tab_video_categories:
+            self.refresh_video_categories_tab_videos()
+        elif current_widget == self.tab_merge:
+            self.refresh_merge_classes()
+
+    def get_all_detected_classes(self):
+        """Returns sorted unique class names from GT and YAML across bundles."""
+        classes = []
+        for b in self.bundle_widgets:
+            yaml_p = b.get_yaml_path()
+            if yaml_p and os.path.exists(yaml_p):
+                y_dict = parse_yolo_yaml(yaml_p)
+                for v in y_dict.values():
+                    if str(v) not in classes:
+                        classes.append(str(v))
+            gt_p = b.get_gt_path()
+            if gt_p and os.path.exists(gt_p) and gt_p != "[ACTIVE_VIAT_PROJECT]":
+                cls_list = scan_dataset_classes(gt_p)
+                for c in cls_list:
+                    if str(c) not in classes:
+                        classes.append(str(c))
+        if hasattr(self, 'table_classes'):
+            for r in range(self.table_classes.rowCount()):
+                c_item = self.table_classes.item(r, 0)
+                if c_item and c_item.text().strip() and c_item.text().strip() not in classes:
+                    classes.append(c_item.text().strip())
+        return sorted(classes) if classes else ["object"]
+
     def setup_merge_tab(self):
         layout = QVBoxLayout(self.tab_merge)
-        layout.addWidget(QLabel(
-            "<b>Class Merging Impact Simulator</b><br>"
-            "Define merge groups (e.g. merge 'car' + 'bus' + 'truck' into 'vehicle'). "
-            "The evaluator will run both baseline and merged passes to measure accuracy gain."
-        ))
+        layout.setSpacing(10)
 
-        form_layout = QHBoxLayout()
-        form_layout.addWidget(QLabel("Target Merged Group Name:"))
+        header = QLabel(
+            "<b>🔀 Class Merging Impact Simulator</b><br>"
+            "<span style='color: #aaaaaa; font-size: 11.5px;'>Select classes from the list below to combine into a super-category (e.g. check <i>car, bus, truck</i> and merge into <i>Vehicle</i>). "
+            "The benchmark will evaluate both the original baseline and the merged group to measure accuracy gain.</span>"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left Panel: Available Classes with Checkboxes
+        left_group = QGroupBox("1. Select Classes to Merge")
+        left_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        left_layout = QVBoxLayout(left_group)
+
+        self.edit_search_classes = QLineEdit()
+        self.edit_search_classes.setPlaceholderText("🔍 Filter classes...")
+        self.edit_search_classes.textChanged.connect(self.filter_merge_classes)
+        left_layout.addWidget(self.edit_search_classes)
+
+        c_btn_box = QHBoxLayout()
+        btn_c_all = QPushButton("Select All")
+        btn_c_none = QPushButton("Deselect All")
+        btn_c_refresh = QPushButton("🔄 Refresh")
+        btn_c_all.clicked.connect(self.select_all_merge_classes)
+        btn_c_none.clicked.connect(self.deselect_all_merge_classes)
+        btn_c_refresh.clicked.connect(self.refresh_merge_classes)
+        c_btn_box.addWidget(btn_c_all)
+        c_btn_box.addWidget(btn_c_none)
+        c_btn_box.addWidget(btn_c_refresh)
+        left_layout.addLayout(c_btn_box)
+
+        self.list_merge_classes = QListWidget()
+        left_layout.addWidget(self.list_merge_classes)
+        splitter.addWidget(left_group)
+
+        # Right Panel: Merge Rule Creator & Table
+        right_group = QGroupBox("2. Merge Rules Definition")
+        right_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        right_layout = QVBoxLayout(right_group)
+
+        form_box = QHBoxLayout()
+        form_box.addWidget(QLabel("Target Group Name:"))
         self.edit_merge_group = QLineEdit()
-        self.edit_merge_group.setPlaceholderText("e.g. Vehicle")
-        form_layout.addWidget(self.edit_merge_group)
+        self.edit_merge_group.setPlaceholderText("e.g. Vehicle, Pedestrian, Animal")
+        form_box.addWidget(self.edit_merge_group)
 
-        form_layout.addWidget(QLabel("Classes to Merge (comma separated):"))
-        self.edit_merge_classes = QLineEdit()
-        self.edit_merge_classes.setPlaceholderText("e.g. car, bus, truck")
-        form_layout.addWidget(self.edit_merge_classes)
+        btn_add_rule = QPushButton("🔀 Create Merge Rule from Checked Classes")
+        btn_add_rule.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; padding: 6px 14px;")
+        btn_add_rule.clicked.connect(self.add_merge_rule_from_selection)
+        form_box.addWidget(btn_add_rule)
+        right_layout.addLayout(form_box)
 
-        btn_add_group = QPushButton("+ Add Merge Rule")
-        btn_add_group.clicked.connect(self.add_merge_rule)
-        form_layout.addWidget(btn_add_group)
-        layout.addLayout(form_layout)
+        self.table_merge = QTableWidget(0, 3)
+        self.table_merge.setHorizontalHeaderLabels(["Merged Group Name", "Combined Classes", "Action"])
+        self.table_merge.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table_merge.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table_merge.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        right_layout.addWidget(self.table_merge)
 
-        self.table_merge = QTableWidget(0, 2)
-        self.table_merge.setHorizontalHeaderLabels(["Merged Group Name", "Combined Classes"])
-        self.table_merge.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        layout.addWidget(self.table_merge)
+        splitter.addWidget(right_group)
+        splitter.setSizes([320, 580])
+        layout.addWidget(splitter)
+
+    def refresh_merge_classes(self):
+        classes = self.get_all_detected_classes()
+        self.list_merge_classes.clear()
+        for c in classes:
+            item = QListWidgetItem(str(c), self.list_merge_classes)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+
+    def select_all_merge_classes(self):
+        for i in range(self.list_merge_classes.count()):
+            item = self.list_merge_classes.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Checked)
+
+    def deselect_all_merge_classes(self):
+        for i in range(self.list_merge_classes.count()):
+            item = self.list_merge_classes.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Unchecked)
+
+    def filter_merge_classes(self, text):
+        query = text.lower().strip()
+        for i in range(self.list_merge_classes.count()):
+            item = self.list_merge_classes.item(i)
+            item.setHidden(bool(query and query not in item.text().lower()))
+
+    def add_merge_rule_from_selection(self):
+        group_name = self.edit_merge_group.text().strip()
+        checked_classes = []
+        for i in range(self.list_merge_classes.count()):
+            item = self.list_merge_classes.item(i)
+            if item.checkState() == Qt.Checked:
+                checked_classes.append(item.text().strip())
+
+        if not group_name:
+            QMessageBox.warning(self, "Missing Name", "Please enter a target group name (e.g. 'Vehicle').")
+            return
+        if not checked_classes:
+            QMessageBox.warning(self, "No Classes Checked", "Please check at least one class from the list on the left to merge.")
+            return
+
+        classes_str = ", ".join(checked_classes)
+        row = self.table_merge.rowCount()
+        self.table_merge.insertRow(row)
+        self.table_merge.setItem(row, 0, QTableWidgetItem(group_name))
+        self.table_merge.setItem(row, 1, QTableWidgetItem(classes_str))
+        
+        btn_remove = QPushButton("Remove")
+        btn_remove.clicked.connect(lambda: self.remove_merge_rule_at_btn(btn_remove))
+        self.table_merge.setCellWidget(row, 2, btn_remove)
+
+        self.merge_groups[group_name] = checked_classes
+        self.edit_merge_group.clear()
+        self.deselect_all_merge_classes()
+
+    def remove_merge_rule_at_btn(self, btn):
+        for r in range(self.table_merge.rowCount()):
+            if self.table_merge.cellWidget(r, 2) == btn:
+                g_item = self.table_merge.item(r, 0)
+                if g_item:
+                    g_name = g_item.text()
+                    if g_name in self.merge_groups:
+                        del self.merge_groups[g_name]
+                self.table_merge.removeRow(r)
+                break
+
+    def add_merge_rule(self):
+        self.add_merge_rule_from_selection()
 
     def setup_video_categories_tab(self):
         layout = QVBoxLayout(self.tab_video_categories)
-        layout.addWidget(QLabel("Map specific videos to evaluation subsets/categories (e.g., stadium, night).\nUse this when a single GT/DT folder contains videos from multiple subsets."))
+        layout.setSpacing(10)
+
+        header = QLabel(
+            "<b>🎥 Video Category Subsets Assignment</b><br>"
+            "<span style='color: #aaaaaa; font-size: 11.5px;'>Categorize videos into evaluation subsets (e.g. <i>Urban, Night, Highway, Stadium, Thermal</i>). "
+            "Select videos from the list on the left, choose a category tag, and click Assign.</span>"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left: Video List with Checkboxes
+        left_group = QGroupBox("1. Detected Video Sequences")
+        left_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        left_layout = QVBoxLayout(left_group)
+
+        self.edit_search_vids = QLineEdit()
+        self.edit_search_vids.setPlaceholderText("🔍 Filter videos...")
+        self.edit_search_vids.textChanged.connect(self.filter_category_tab_videos)
+        left_layout.addWidget(self.edit_search_vids)
+
+        v_btn_box = QHBoxLayout()
+        btn_v_all = QPushButton("Select All")
+        btn_v_none = QPushButton("Deselect All")
+        btn_v_refresh = QPushButton("🔄 Refresh")
+        btn_v_all.clicked.connect(self.select_all_category_videos)
+        btn_v_none.clicked.connect(self.deselect_all_category_videos)
+        btn_v_refresh.clicked.connect(self.refresh_video_categories_tab_videos)
+        v_btn_box.addWidget(btn_v_all)
+        v_btn_box.addWidget(btn_v_none)
+        v_btn_box.addWidget(btn_v_refresh)
+        left_layout.addLayout(v_btn_box)
+
+        self.list_category_videos = QListWidget()
+        left_layout.addWidget(self.list_category_videos)
+        splitter.addWidget(left_group)
+
+        # Right: Category Assignment & Mapping Table
+        right_group = QGroupBox("2. Category Tagging & Summary")
+        right_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        right_layout = QVBoxLayout(right_group)
+
+        form_box = QHBoxLayout()
+        form_box.addWidget(QLabel("Category Tag:"))
+        self.combo_category_tag = QComboBox()
+        self.combo_category_tag.setEditable(True)
+        self.combo_category_tag.addItems(["Urban", "Highway", "Night", "Day", "Thermal", "Rain", "Aerial", "Stadium", "Perimeter"])
+        form_box.addWidget(self.combo_category_tag)
+
+        btn_assign_cat = QPushButton("➕ Assign to Checked Videos")
+        btn_assign_cat.setStyleSheet("background-color: #007acc; color: white; font-weight: bold; padding: 6px 12px;")
+        btn_assign_cat.clicked.connect(self.assign_category_to_checked_videos)
+        form_box.addWidget(btn_assign_cat)
+
+        btn_remove_cat = QPushButton("➖ Remove Tag from Checked")
+        btn_remove_cat.clicked.connect(self.remove_category_from_checked_videos)
+        form_box.addWidget(btn_remove_cat)
+
+        right_layout.addLayout(form_box)
+
+        self.table_video_maps = QTableWidget(0, 3)
+        self.table_video_maps.setHorizontalHeaderLabels(["Video Name", "Assigned Categories", "Action"])
+        self.table_video_maps.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_video_maps.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table_video_maps.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        right_layout.addWidget(self.table_video_maps)
+
+        splitter.addWidget(right_group)
+        splitter.setSizes([320, 580])
+        layout.addWidget(splitter)
+
+    def refresh_video_categories_tab_videos(self):
+        vids = self.get_all_detected_videos()
+        self.list_category_videos.clear()
         
-        form = QHBoxLayout()
-        self.edit_vid_map_name = QLineEdit()
-        self.edit_vid_map_name.setPlaceholderText("Video Name (e.g., video_1)")
-        self.edit_vid_map_cats = QLineEdit()
-        self.edit_vid_map_cats.setPlaceholderText("Categories (comma-separated, e.g., stadium, night)")
-        btn_add_vid_map = QPushButton("Add Mapping")
-        btn_add_vid_map.clicked.connect(self.add_video_mapping_row)
-        form.addWidget(self.edit_vid_map_name)
-        form.addWidget(self.edit_vid_map_cats)
-        form.addWidget(btn_add_vid_map)
-        layout.addLayout(form)
-        
-        self.table_video_maps = QTableWidget()
-        self.table_video_maps.setColumnCount(3)
-        self.table_video_maps.setHorizontalHeaderLabels(["Video Name", "Categories", "Action"])
-        self.table_video_maps.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table_video_maps)
+        # Existing video mapping lookup
+        existing_table_vids = {}
+        for r in range(self.table_video_maps.rowCount()):
+            v_item = self.table_video_maps.item(r, 0)
+            c_item = self.table_video_maps.item(r, 1)
+            if v_item:
+                existing_table_vids[v_item.text()] = c_item.text() if c_item else ""
+
+        for v in vids:
+            item = QListWidgetItem(v, self.list_category_videos)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            
+            # Ensure every video exists in the summary table
+            if v not in existing_table_vids:
+                row = self.table_video_maps.rowCount()
+                self.table_video_maps.insertRow(row)
+                self.table_video_maps.setItem(row, 0, QTableWidgetItem(v))
+                self.table_video_maps.setItem(row, 1, QTableWidgetItem(""))
+                btn_remove = QPushButton("Clear")
+                btn_remove.clicked.connect(lambda _, r=row: self.clear_video_category_row(r))
+                self.table_video_maps.setCellWidget(row, 2, btn_remove)
+
+    def select_all_category_videos(self):
+        for i in range(self.list_category_videos.count()):
+            item = self.list_category_videos.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Checked)
+
+    def deselect_all_category_videos(self):
+        for i in range(self.list_category_videos.count()):
+            item = self.list_category_videos.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.Unchecked)
+
+    def filter_category_tab_videos(self, text):
+        query = text.lower().strip()
+        for i in range(self.list_category_videos.count()):
+            item = self.list_category_videos.item(i)
+            item.setHidden(bool(query and query not in item.text().lower()))
+
+    def assign_category_to_checked_videos(self):
+        cat = self.combo_category_tag.currentText().strip()
+        if not cat:
+            QMessageBox.warning(self, "Missing Category", "Please enter or select a category tag.")
+            return
+
+        checked_vids = []
+        for i in range(self.list_category_videos.count()):
+            item = self.list_category_videos.item(i)
+            if item.checkState() == Qt.Checked:
+                checked_vids.append(item.text().strip())
+
+        if not checked_vids:
+            QMessageBox.warning(self, "No Videos Checked", "Please check at least one video from the list on the left.")
+            return
+
+        # Update table rows
+        for v in checked_vids:
+            found = False
+            for r in range(self.table_video_maps.rowCount()):
+                v_item = self.table_video_maps.item(r, 0)
+                if v_item and v_item.text().strip() == v:
+                    found = True
+                    c_item = self.table_video_maps.item(r, 1)
+                    curr_cats = [c.strip() for c in c_item.text().split(',') if c.strip()] if c_item else []
+                    if cat not in curr_cats:
+                        curr_cats.append(cat)
+                    self.table_video_maps.setItem(r, 1, QTableWidgetItem(", ".join(curr_cats)))
+                    break
+            if not found:
+                row = self.table_video_maps.rowCount()
+                self.table_video_maps.insertRow(row)
+                self.table_video_maps.setItem(row, 0, QTableWidgetItem(v))
+                self.table_video_maps.setItem(row, 1, QTableWidgetItem(cat))
+                btn_remove = QPushButton("Clear")
+                btn_remove.clicked.connect(lambda _, r=row: self.clear_video_category_row(r))
+                self.table_video_maps.setCellWidget(row, 2, btn_remove)
+
+    def remove_category_from_checked_videos(self):
+        cat = self.combo_category_tag.currentText().strip()
+        if not cat:
+            return
+        checked_vids = []
+        for i in range(self.list_category_videos.count()):
+            item = self.list_category_videos.item(i)
+            if item.checkState() == Qt.Checked:
+                checked_vids.append(item.text().strip())
+
+        for v in checked_vids:
+            for r in range(self.table_video_maps.rowCount()):
+                v_item = self.table_video_maps.item(r, 0)
+                if v_item and v_item.text().strip() == v:
+                    c_item = self.table_video_maps.item(r, 1)
+                    curr_cats = [c.strip() for c in c_item.text().split(',') if c.strip()] if c_item else []
+                    if cat in curr_cats:
+                        curr_cats.remove(cat)
+                    self.table_video_maps.setItem(r, 1, QTableWidgetItem(", ".join(curr_cats)))
+                    break
+
+    def clear_video_category_row(self, row):
+        if row < self.table_video_maps.rowCount():
+            self.table_video_maps.setItem(row, 1, QTableWidgetItem(""))
 
     def add_video_mapping_row(self):
-        vid_name = self.edit_vid_map_name.text().strip()
-        cats = self.edit_vid_map_cats.text().strip()
-        if not vid_name or not cats:
-            return
-        row = self.table_video_maps.rowCount()
-        self.table_video_maps.insertRow(row)
-        self.table_video_maps.setItem(row, 0, QTableWidgetItem(vid_name))
-        self.table_video_maps.setItem(row, 1, QTableWidgetItem(cats))
-        btn_remove = QPushButton("Remove")
-        btn_remove.clicked.connect(lambda: self.table_video_maps.removeRow(self.table_video_maps.currentRow()))
-        self.table_video_maps.setCellWidget(row, 2, btn_remove)
-        self.edit_vid_map_name.clear()
-        self.edit_vid_map_cats.clear()
+        self.assign_category_to_checked_videos()
 
     def setup_analytics_tab(self):
         main_tab_layout = QVBoxLayout(self.tab_analytics)
@@ -827,6 +1318,13 @@ class EvaluationDialog(QDialog):
         a_layout = QHBoxLayout(aesthetic_box)
         a_layout.setContentsMargins(10, 10, 10, 10)
         a_layout.setSpacing(12)
+
+        a_layout.addWidget(QLabel("<b>Target Scope:</b>"))
+        self.combo_scope = QComboBox()
+        self.combo_scope.setMinimumWidth(200)
+        self.combo_scope.addItem("🌐 All Videos (Aggregated)")
+        self.combo_scope.currentIndexChanged.connect(self.on_scope_changed)
+        a_layout.addWidget(self.combo_scope)
 
         a_layout.addWidget(QLabel("<b>Theme:</b>"))
         self.combo_theme = QComboBox()
@@ -864,7 +1362,7 @@ class EvaluationDialog(QDialog):
                 background-color: #0098ff;
             }
         """)
-        self.btn_replot.clicked.connect(self.replot_diagnostics_with_aesthetics)
+        self.btn_replot.clicked.connect(lambda: self.replot_diagnostics_with_aesthetics(show_toast=True))
         a_layout.addWidget(self.btn_replot)
         a_layout.addStretch()
 
@@ -998,10 +1496,7 @@ class EvaluationDialog(QDialog):
                     self.table_classes.insertRow(r)
                     self.table_classes.setItem(r, 0, QTableWidgetItem(orig.strip()))
                     self.table_classes.setItem(r, 1, QTableWidgetItem(target.strip()))
-                    chk = QCheckBox()
-                    chk.setChecked(True)
-                    self.table_classes.setCellWidget(r, 2, chk)
-                    self.table_classes.setItem(r, 3, QTableWidgetItem(video_name))
+                    self.table_classes.setItem(r, 2, QTableWidgetItem(video_name))
                     self.tabs.setCurrentWidget(self.tab_datasets)
                     self.start_evaluation()
     def setup_log_tab(self):
@@ -1029,7 +1524,60 @@ class EvaluationDialog(QDialog):
             for i, w in enumerate(self.bundle_widgets, 1):
                 w.index = i
 
+    def get_all_detected_videos(self):
+        """Scans all bundle GT and DT directories and returns unique video sequence names."""
+        all_vids = []
+        for b in self.bundle_widgets:
+            gt_p = b.get_gt_path()
+            dt_p = b.get_dt_path()
+            if gt_p and os.path.exists(gt_p) and gt_p != "[ACTIVE_VIAT_PROJECT]":
+                vids = scan_dataset_videos(gt_p)
+                for v in vids:
+                    if v not in all_vids:
+                        all_vids.append(v)
+            if dt_p and os.path.exists(dt_p):
+                vids = scan_dataset_videos(dt_p)
+                for v in vids:
+                    if v not in all_vids:
+                        all_vids.append(v)
+        return sorted(all_vids)
+
+    def open_global_video_selector(self):
+        all_vids = self.get_all_detected_videos()
+        if not all_vids:
+            QMessageBox.information(self, "No Videos Found", "No video sequences were detected in the dataset folders yet. Please set GT/DT folder paths first.")
+            return
+        dlg = VideoMultiSelectDialog(all_vids, self.global_selected_videos, title="Filter Included Videos for Evaluation", parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            self.global_selected_videos = dlg.get_selected_videos()
+            if len(self.global_selected_videos) == len(all_vids) or not self.global_selected_videos:
+                self.btn_manage_videos.setText(f"🎬 All Detected Videos Included ({len(all_vids)}/{len(all_vids)})")
+                self.btn_manage_videos.setStyleSheet("background-color: #2b2b2b; color: #409EFF; border: 1px solid #409EFF; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-size: 12px;")
+            else:
+                self.btn_manage_videos.setText(f"🎬 {len(self.global_selected_videos)}/{len(all_vids)} Videos Selected (Click to change)")
+                self.btn_manage_videos.setStyleSheet("background-color: rgba(230, 162, 60, 0.15); color: #E6A23C; border: 1px solid #E6A23C; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-size: 12px;")
+
+    def open_class_video_selector(self, btn, class_name):
+        all_vids = self.get_all_detected_videos()
+        if not all_vids:
+            QMessageBox.information(self, "No Videos Found", "No video sequences were detected in the dataset folders yet. Please set GT/DT folder paths first.")
+            return
+        dlg = VideoMultiSelectDialog(all_vids, btn.selected_videos, title=f"Select Target Videos for Class '{class_name}'", parent=self)
+        if dlg.exec_() == QDialog.Accepted:
+            selected = dlg.get_selected_videos()
+            if len(selected) == len(all_vids) or not selected:
+                btn.selected_videos = None
+                btn.setText("All Videos (Default) ▾")
+                btn.setStyleSheet("background-color: #2b2b2b; color: #cccccc; border: 1px solid #444444; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+                btn.setToolTip("Applies to all videos globally")
+            else:
+                btn.selected_videos = selected
+                btn.setText(f"{len(selected)}/{len(all_vids)} Videos ▾")
+                btn.setStyleSheet("background-color: rgba(64, 158, 255, 0.15); color: #409EFF; border: 1px solid #409EFF; font-weight: bold; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+                btn.setToolTip(f"Applies only to: {', '.join(selected)}")
+
     def scan_and_populate_classes(self):
+        global_yaml_dict = {}
         global_yaml_classes = []
         local_gt_classes = []
         
@@ -1039,10 +1587,13 @@ class EvaluationDialog(QDialog):
 
             if yaml_p and os.path.exists(yaml_p):
                 yaml_dict = parse_yolo_yaml(yaml_p)
-                for k, v in yaml_dict.items():
-                    global_yaml_classes.append(str(v))
+                for k in sorted(yaml_dict.keys()):
+                    val_str = str(yaml_dict[k])
+                    global_yaml_dict[k] = val_str
+                    if val_str not in global_yaml_classes:
+                        global_yaml_classes.append(val_str)
             
-            if gt_p and os.path.exists(gt_p):
+            if gt_p and os.path.exists(gt_p) and gt_p != "[ACTIVE_VIAT_PROJECT]":
                 cls_list = scan_dataset_classes(gt_p)
                 for c in cls_list:
                     str_c = str(c)
@@ -1055,60 +1606,77 @@ class EvaluationDialog(QDialog):
         self.table_classes.setRowCount(0)
         global_yaml_lower = {g.lower(): g for g in global_yaml_classes}
 
-        # If they provided a YAML, but no GT classes were found, just show the YAML classes
-        classes_to_process = local_gt_classes if local_gt_classes else global_yaml_classes
+        # If GT classes found, show all original GT classes. Otherwise show YAML class indices
+        if local_gt_classes:
+            classes_to_process = local_gt_classes
+        else:
+            classes_to_process = [str(k) for k in sorted(global_yaml_dict.keys())] if global_yaml_dict else global_yaml_classes
 
         for c in classes_to_process:
             row = self.table_classes.rowCount()
             self.table_classes.insertRow(row)
 
             orig_class = str(c)
-            target_class = orig_class
-            include_in_eval = True
+            matched_yaml_class = None
 
-            # Auto-match case-insensitive against YAML if we have one
+            # 1. Check if orig_class is an integer index matching global_yaml_dict (e.g. '0' -> 'person', '1' -> 'car')
+            try:
+                c_int = int(orig_class)
+                if c_int in global_yaml_dict:
+                    matched_yaml_class = global_yaml_dict[c_int]
+            except ValueError:
+                pass
+
+            # 2. Check if orig_class name matches a YAML class name case-insensitively
+            if not matched_yaml_class and orig_class.lower() in global_yaml_lower:
+                matched_yaml_class = global_yaml_lower[orig_class.lower()]
+
             if global_yaml_classes:
-                if orig_class.lower() in global_yaml_lower:
-                    target_class = global_yaml_lower[orig_class.lower()]
+                if matched_yaml_class:
+                    target_class = matched_yaml_class
                 else:
-                    # Unmatched class -> leave target_class as original name, 
-                    # user can edit it manually in the table if they want to merge it.
-                    pass
+                    # Unmatched in YAML -> Default to [IGNORE]
+                    target_class = "[IGNORE] - Exclude from evaluation"
+            else:
+                target_class = orig_class
 
             self.table_classes.setItem(row, 0, QTableWidgetItem(orig_class))
             
-            # Use QComboBox for target classes to easily select from YAML classes
+            # Use QComboBox for target classes with [IGNORE] option
             combo_target = QComboBox()
             combo_target.setEditable(True)
-            if global_yaml_classes:
-                # Deduplicate and sort, but keep exact cases
-                combo_target.addItems(sorted(list(set(global_yaml_classes))))
             
-            # Find index if it matches (case insensitive)
-            idx = -1
+            options = ["[IGNORE] - Exclude from evaluation"]
             if global_yaml_classes:
-                for i in range(combo_target.count()):
-                    if combo_target.itemText(i).lower() == target_class.lower():
-                        idx = i
-                        break
+                for g in global_yaml_classes:
+                    if g not in options:
+                        options.append(g)
+            else:
+                if orig_class not in options and orig_class != "__IGNORE__":
+                    options.append(orig_class)
+
+            combo_target.addItems(options)
+            
+            # Find index if matched
+            idx = -1
+            for i in range(combo_target.count()):
+                if combo_target.itemText(i).lower() == target_class.lower():
+                    idx = i
+                    break
             
             if idx >= 0:
                 combo_target.setCurrentIndex(idx)
             else:
-                if global_yaml_classes:
-                    # Unmatched with YAML present, leave it blank to force user choice
-                    combo_target.setCurrentText("")
-                    include_in_eval = False # Uncheck by default so it doesn't break if they forget
-                else:
-                    # No YAML at all, just default to itself
-                    combo_target.setCurrentText(target_class)
+                combo_target.setCurrentIndex(0)
                 
             self.table_classes.setCellWidget(row, 1, combo_target)
-
-            chk = QCheckBox()
-            chk.setChecked(include_in_eval)
-            self.table_classes.setCellWidget(row, 2, chk)
-            self.table_classes.setItem(row, 3, QTableWidgetItem(""))
+            
+            # Interactive Multi-Select Button for Target Video Filter
+            btn_vid = QPushButton("All Videos (Default) ▾")
+            btn_vid.setStyleSheet("background-color: #2b2b2b; color: #cccccc; border: 1px solid #444444; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+            btn_vid.selected_videos = None
+            btn_vid.clicked.connect(lambda _, b=btn_vid, r=orig_class: self.open_class_video_selector(b, r))
+            self.table_classes.setCellWidget(row, 2, btn_vid)
 
     def add_merge_rule(self):
         group_name = self.edit_merge_group.text().strip()
@@ -1177,7 +1745,7 @@ class EvaluationDialog(QDialog):
         return out_dir
 
     def inspect_in_main_canvas(self):
-        """Loads evaluated video and predictions directly into the main VIAT canvas."""
+        """Loads evaluated video and predictions directly into the main VIAT canvas using VIAT's video dataset loader."""
         main_win = self.parent() or getattr(self, 'main_window', None)
         if not main_win:
             QMessageBox.warning(self, "No Main Window", "Main VIAT application window was not found.")
@@ -1196,42 +1764,57 @@ class EvaluationDialog(QDialog):
             if dt and os.path.exists(dt):
                 dt_paths.append(dt)
 
+        gt_dir = gt_paths[0] if gt_paths else ""
+        det_dir = dt_paths[0] if dt_paths else ""
+
         if not dt_paths and hasattr(self, 'last_results_dir') and self.last_results_dir:
             parent_det = os.path.dirname(os.path.abspath(self.last_results_dir))
             if os.path.basename(parent_det) == 'evaluation_result':
                 parent_det = os.path.dirname(parent_det)
             if os.path.exists(parent_det):
-                dt_paths.append(parent_det)
+                det_dir = parent_det
 
-        if not dt_paths:
-            QMessageBox.information(self, "No Detections", "Please set or run an evaluation first to load predictions.")
+        if not gt_dir or not os.path.exists(gt_dir):
+            QMessageBox.warning(self, "Missing Ground Truth", "Ground Truth directory was not found. Please specify a valid GT folder.")
             return
 
-        det_dir = dt_paths[0]
-        gt_dir = gt_paths[0] if gt_paths else ""
+        # Prioritize scanning GT directory for videos / sequences
+        video_names = scan_dataset_videos(gt_dir)
+        if not video_names and det_dir and os.path.exists(det_dir):
+            video_names = scan_dataset_videos(det_dir)
 
-        pred_files = glob.glob(os.path.join(det_dir, "*.txt")) + glob.glob(os.path.join(det_dir, "*.json"))
-        # Exclude summary jsons
-        pred_files = [p for p in pred_files if not os.path.basename(p).startswith(('per_class', 'diagnostics', 'combined'))]
-        if not pred_files:
-            QMessageBox.warning(self, "No Predictions", f"No .txt or .json prediction files found in:\n{det_dir}")
+        if not video_names:
+            QMessageBox.warning(self, "No Videos Found", f"No video files or annotation sequences found in Ground Truth directory:\n{gt_dir}")
             return
 
-        pred_file = pred_files[0]
-        video_name = os.path.splitext(os.path.basename(pred_file))[0]
-        video_names = [os.path.splitext(os.path.basename(p))[0] for p in pred_files]
+        initial_video = video_names[0]
 
+        # 1. Use VIAT's built-in video dataset loader if available and gt_dir contains video files
+        if hasattr(main_win, 'load_video_dataset_path') and os.path.isdir(gt_dir):
+            try:
+                from viat.utils.video_dataset_manager import scan_video_dataset
+                info = scan_video_dataset(gt_dir)
+                if info and info.all_videos:
+                    main_win.load_video_dataset_path(gt_dir)
+            except Exception as e:
+                logger.warning(f"Could not load via built-in video dataset loader: {e}")
+
+        # 2. Attach evaluation context and inspector
         if hasattr(main_win, 'load_evaluation_dataset_into_inspector'):
-            main_win.load_evaluation_dataset_into_inspector(gt_dir, det_dir, video_names, initial_video=video_name)
+            main_win.load_evaluation_dataset_into_inspector(gt_dir, det_dir, video_names, initial_video=initial_video)
             self.hide()
         elif hasattr(main_win, 'load_predictions_file_into_inspector'):
             exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV']
             for ext in exts:
-                candidate = os.path.join(gt_dir, video_name + ext)
+                candidate = os.path.join(gt_dir, initial_video + ext)
                 if os.path.exists(candidate) and hasattr(main_win, 'open_video'):
                     main_win.open_video(candidate)
                     break
-            main_win.load_predictions_file_into_inspector(pred_file, video_name)
+            pred_file = os.path.join(det_dir, f"{initial_video}.txt")
+            if not os.path.exists(pred_file):
+                pred_file = os.path.join(det_dir, f"{initial_video}.json")
+            if os.path.exists(pred_file):
+                main_win.load_predictions_file_into_inspector(pred_file, initial_video)
             self.hide()
 
     def open_advanced_visualizer(self):
@@ -1333,34 +1916,45 @@ class EvaluationDialog(QDialog):
         # Parse Class Mappings & Video Mappings
         self.class_map = {}
         self.video_class_mappings = {}
-        for row in range(self.table_classes.rowCount()):
-            orig_name = self.table_classes.item(row, 0).text()
-            try:
-                target_name = self.table_classes.cellWidget(row, 1).currentText()
-            except AttributeError:
-                target_name = self.table_classes.item(row, 1).text()
-            include = self.table_classes.cellWidget(row, 2).isChecked()
-            video_name_item = self.table_classes.item(row, 3)
-            video_name = video_name_item.text().strip() if video_name_item else ""
+        all_vids = self.get_all_detected_videos()
 
-            if not include:
+        for row in range(self.table_classes.rowCount()):
+            orig_name = self.table_classes.item(row, 0).text().strip()
+            try:
+                target_name = self.table_classes.cellWidget(row, 1).currentText().strip()
+            except AttributeError:
+                target_name = self.table_classes.item(row, 1).text().strip()
+
+            btn_vid = self.table_classes.cellWidget(row, 2)
+            if hasattr(btn_vid, 'selected_videos'):
+                selected_vids = btn_vid.selected_videos
+            else:
+                item_vid = self.table_classes.item(row, 2)
+                raw_txt = item_vid.text().strip() if item_vid else ""
+                selected_vids = [v.strip() for v in raw_txt.split(',') if v.strip()] if raw_txt else None
+
+            if not target_name or target_name.upper().startswith("[IGNORE]") or target_name in ("__IGNORE__", "IGNORE"):
                 target_name = "__IGNORE__"
 
-            if video_name:
-                if video_name not in self.video_class_mappings:
-                    self.video_class_mappings[video_name] = {}
-                self.video_class_mappings[video_name][orig_name] = target_name
-                try:
-                    self.video_class_mappings[video_name][int(orig_name)] = target_name
-                except ValueError: pass
+            if selected_vids and all_vids and len(selected_vids) < len(all_vids):
+                for vid in selected_vids:
+                    if vid not in self.video_class_mappings:
+                        self.video_class_mappings[vid] = {}
+                    self.video_class_mappings[vid][orig_name] = target_name
+                    try:
+                        self.video_class_mappings[vid][int(orig_name)] = target_name
+                    except ValueError: pass
             else:
                 self.class_map[orig_name] = target_name
                 try:
                     self.class_map[int(orig_name)] = target_name
                 except ValueError: pass
 
-        ignored_videos_str = self.edit_ignored_videos.text().strip()
-        ignored_videos = [v.strip() for v in ignored_videos_str.split(',')] if ignored_videos_str else []
+        # Global ignored videos calculation from global_selected_videos
+        if self.global_selected_videos is not None and all_vids:
+            ignored_videos = [v for v in all_vids if v not in self.global_selected_videos]
+        else:
+            ignored_videos = []
 
         try:
             try:
@@ -1459,11 +2053,41 @@ class EvaluationDialog(QDialog):
             if path and os.path.exists(path):
                 label_widget.setPixmap(QPixmap(path).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-    def replot_diagnostics_with_aesthetics(self):
-        """Re-plots all active charts with the user-selected theme, palette, and DPI."""
+    def populate_scope_selector(self, diag):
+        if not diag:
+            return
+        curr_text = self.combo_scope.currentText()
+        self.combo_scope.blockSignals(True)
+        self.combo_scope.clear()
+        self.combo_scope.addItem("🌐 All Videos (Aggregated)")
+
+        # Categories
+        by_category = diag.get('by_category', {})
+        for cat in sorted(by_category.keys()):
+            self.combo_scope.addItem(f"📁 Category: {cat}")
+
+        # Videos
+        by_video = diag.get('by_video', {})
+        for vid in sorted(by_video.keys()):
+            self.combo_scope.addItem(f"🎬 Video: {vid}")
+
+        idx = self.combo_scope.findText(curr_text)
+        if idx >= 0:
+            self.combo_scope.setCurrentIndex(idx)
+        else:
+            self.combo_scope.setCurrentIndex(0)
+        self.combo_scope.blockSignals(False)
+
+    def on_scope_changed(self):
+        if hasattr(self, 'last_eval_results') and self.last_eval_results:
+            self.replot_diagnostics_with_aesthetics(show_toast=False)
+
+    def replot_diagnostics_with_aesthetics(self, show_toast=True):
+        """Re-plots all active charts with the user-selected scope (All, Category, or Video), theme, palette, and DPI."""
         results = getattr(self, 'last_eval_results', None)
         if not results:
-            QMessageBox.information(self, "No Evaluation Data", "Please run an evaluation first before customizing charts.")
+            if show_toast:
+                QMessageBox.information(self, "No Evaluation Data", "Please run an evaluation first before customizing charts.")
             return
 
         theme = self.combo_theme.currentText()
@@ -1475,22 +2099,7 @@ class EvaluationDialog(QDialog):
         if not results_dir:
             return
 
-        # 1. Re-plot basic charts
-        if 'class_metrics' in results and results['class_metrics']:
-            bar_path = os.path.join(results_dir, "class_ap50_bar.png")
-            from viat.evaluation.utils.plotter import plot_map_by_class, plot_map_by_size
-            named_m = {c: {'AP50': v.get('ap50', 0), 'AP': v.get('ap', 0)} for c, v in results['class_metrics'].items()}
-            plot_map_by_class(named_m, bar_path, theme, palette, dpi)
-            results['bar_path'] = bar_path
-
-        if 'size_metrics' in results and results['size_metrics']:
-            size_path = os.path.join(results_dir, "size_breakdown_bar.png")
-            from viat.evaluation.utils.plotter import plot_map_by_size
-            named_s = {k: v.get('ap50', 0) for k, v in results['size_metrics'].items()}
-            plot_map_by_size(named_s, size_path, theme, palette, dpi)
-            results['size_path'] = size_path
-
-        # 2. Re-plot advanced diagnostic charts from diagnostics_data
+        # 1. Load root diagnostics data
         diag = results.get('diagnostics_data')
         if not diag:
             diag_file = os.path.join(results_dir, 'diagnostics.json')
@@ -1498,18 +2107,57 @@ class EvaluationDialog(QDialog):
                 import json as _json
                 with open(diag_file, 'r') as f:
                     diag = _json.load(f)
+                    results['diagnostics_data'] = diag
 
-        if diag:
-            classes = diag.get('classes', [])
-            cm = np.array(diag.get('confusion', []), dtype=float)
+        # 2. Determine target scope (All Videos, Category, or Video)
+        target_scope = self.combo_scope.currentText()
+        active_diag = diag or {}
+        scope_tag = "all"
+        scope_title = "All Videos (Aggregated)"
+
+        if target_scope.startswith("📁 Category: "):
+            cat_name = target_scope.replace("📁 Category: ", "").strip()
+            if diag and 'by_category' in diag and cat_name in diag['by_category']:
+                active_diag = diag['by_category'][cat_name]
+                scope_tag = f"cat_{cat_name}"
+                scope_title = f"Category: {cat_name}"
+        elif target_scope.startswith("🎬 Video: "):
+            vid_name = target_scope.replace("🎬 Video: ", "").strip()
+            if diag and 'by_video' in diag and vid_name in diag['by_video']:
+                active_diag = diag['by_video'][vid_name]
+                scope_tag = f"vid_{vid_name}"
+                scope_title = f"Video: {vid_name}"
+
+        # 3. Re-plot basic class AP bar chart for this scope
+        from viat.evaluation.utils.plotter import plot_map_by_class, plot_map_by_size
+        bar_path = os.path.join(results_dir, f"class_ap50_bar_{scope_tag}.png")
+        if active_diag and active_diag.get('per_class_curves'):
+            named_m = {c: {'AP50': v.get('ap', 0), 'AP': v.get('ap', 0)} for c, v in active_diag['per_class_curves'].items()}
+            plot_map_by_class(named_m, bar_path, theme, palette, dpi)
+            results['bar_path'] = bar_path
+        elif 'class_metrics' in results and results['class_metrics']:
+            named_m = {c: {'AP50': v.get('ap50', 0), 'AP': v.get('ap', 0)} for c, v in results['class_metrics'].items()}
+            plot_map_by_class(named_m, bar_path, theme, palette, dpi)
+            results['bar_path'] = bar_path
+
+        if 'size_metrics' in results and results['size_metrics']:
+            size_path = os.path.join(results_dir, "size_breakdown_bar.png")
+            named_s = {k: v.get('ap50', 0) for k, v in results['size_metrics'].items()}
+            plot_map_by_size(named_s, size_path, theme, palette, dpi)
+            results['size_path'] = size_path
+
+        # 4. Re-plot advanced diagnostic charts from active_diag
+        if active_diag:
+            classes = active_diag.get('classes', [])
+            cm = np.array(active_diag.get('confusion', []), dtype=float)
             if len(classes) and cm.size:
-                cm_path = os.path.join(results_dir, "diag_confusion_matrix.png")
+                cm_path = os.path.join(results_dir, f"diag_confusion_matrix_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_confusion_matrix_plot(cm, classes, cm_path, theme, palette, dpi)
                 results['cm_path'] = cm_path
 
-            calib = diag.get('calibration', {})
+            calib = active_diag.get('calibration', {})
             if calib.get('confidences'):
-                calib_path = os.path.join(results_dir, "diag_calibration_ece.png")
+                calib_path = os.path.join(results_dir, f"diag_calibration_ece_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_calibration_plot(
                     np.array(calib['confidences']), np.array(calib['precisions']), np.array(calib['recalls']),
                     calib.get('ece_score', 0.0), calib.get('optimal_thr', 0.5), calib_path,
@@ -1517,68 +2165,85 @@ class EvaluationDialog(QDialog):
                 )
                 results['calib_path'] = calib_path
 
-            if diag.get('per_class_curves'):
-                pr_path = os.path.join(results_dir, "diag_pr_curves.png")
+            if active_diag.get('per_class_curves'):
+                pr_path = os.path.join(results_dir, f"diag_pr_curves_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_pr_curves_plot(
-                    diag['per_class_curves'], pr_path, theme, palette, dpi, show_grid=show_grid
+                    active_diag['per_class_curves'], pr_path, theme, palette, dpi, show_grid=show_grid
                 )
                 results['pr_path'] = pr_path
 
-                f1_path = os.path.join(results_dir, "diag_f1_vs_confidence.png")
+                f1_path = os.path.join(results_dir, f"diag_f1_vs_confidence_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_f1_confidence_plot(
-                    diag['per_class_curves'], f1_path, theme, palette, dpi, show_grid=show_grid
+                    active_diag['per_class_curves'], f1_path, theme, palette, dpi, show_grid=show_grid
                 )
                 results['f1_path'] = f1_path
 
-            if diag.get('conf_tp') or diag.get('conf_fp'):
-                conf_dist_path = os.path.join(results_dir, "diag_confidence_distribution.png")
+            if active_diag.get('conf_tp') or active_diag.get('conf_fp'):
+                conf_dist_path = os.path.join(results_dir, f"diag_confidence_distribution_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_confidence_distribution_plot(
-                    diag.get('conf_tp', []), diag.get('conf_fp', []), conf_dist_path,
+                    active_diag.get('conf_tp', []), active_diag.get('conf_fp', []), conf_dist_path,
                     theme, palette, dpi, show_grid=show_grid
                 )
                 results['conf_dist_path'] = conf_dist_path
 
-            if diag.get('error_breakdown'):
-                err_breakdown_path = os.path.join(results_dir, "diag_error_breakdown.png")
+            if active_diag.get('error_breakdown'):
+                err_breakdown_path = os.path.join(results_dir, f"diag_error_breakdown_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_error_breakdown_plot(
-                    diag['error_breakdown'], err_breakdown_path, theme, palette, dpi
+                    active_diag['error_breakdown'], err_breakdown_path, theme, palette, dpi
                 )
                 results['err_breakdown_path'] = err_breakdown_path
 
-            if diag.get('ious'):
-                iou_path = os.path.join(results_dir, "diag_iou_distribution.png")
+            if active_diag.get('ious'):
+                iou_path = os.path.join(results_dir, f"diag_iou_distribution_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_iou_distribution_plot(
-                    diag['ious'], iou_path, theme, palette, dpi, show_grid=show_grid
+                    active_diag['ious'], iou_path, theme, palette, dpi, show_grid=show_grid
                 )
                 results['iou_path'] = iou_path
 
-            ar = diag.get('aspect_ratio', {})
+            ar = active_diag.get('aspect_ratio', {})
             if ar.get('ratios'):
-                ar_path = os.path.join(results_dir, "diag_aspect_ratio_bias.png")
+                ar_path = os.path.join(results_dir, f"diag_aspect_ratio_bias_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_aspect_ratio_plot(
                     ar['ratios'], ar['error_rates'], ar_path, theme, palette, dpi, show_grid=show_grid
                 )
                 results['ar_path'] = ar_path
 
-            fp_coords = diag.get('fp_coords', [])
-            fn_coords = diag.get('fn_coords', [])
+            fp_coords = active_diag.get('fp_coords', [])
+            fn_coords = active_diag.get('fn_coords', [])
             if fp_coords or fn_coords:
-                spatial_path = os.path.join(results_dir, "diag_spatial_error_map.png")
+                spatial_path = os.path.join(results_dir, f"diag_spatial_error_map_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_spatial_error_heatmap(
-                    fp_coords, fn_coords, tuple(diag.get('canvas_size', (1920, 1080))), spatial_path,
+                    fp_coords, fn_coords, tuple(active_diag.get('canvas_size', (1920, 1080))), spatial_path,
                     theme, palette, dpi
                 )
-            v_metrics = results.get('video_metrics') or diag.get('video_metrics')
+                results['spatial_path'] = spatial_path
+
+            v_metrics = active_diag.get('video_metrics') or results.get('video_metrics') or (diag.get('video_metrics') if diag else None)
             if v_metrics:
-                per_video_path = os.path.join(results_dir, "diag_per_video_comparison.png")
+                per_video_path = os.path.join(results_dir, f"diag_per_video_{scope_tag}.png")
                 AdvancedDiagnosticsEngine.generate_per_video_comparison_plot(
                     v_metrics, per_video_path, theme, palette, dpi
                 )
                 results['per_video_path'] = per_video_path
 
-        # 3. Refresh UI displays
+        # 5. Refresh UI displays & Tables
         self.refresh_plot_displays(results)
-        QMessageBox.information(self, "Plots Updated", f"Successfully re-rendered all diagnostic charts with '{theme}' theme and '{palette}' palette at {dpi} DPI.")
+
+        # Update stats table for active scope
+        if active_diag and active_diag.get('per_class_curves'):
+            self.table_stats.setRowCount(0)
+            for c_name, c_crv in active_diag['per_class_curves'].items():
+                r = self.table_stats.rowCount()
+                self.table_stats.insertRow(r)
+                self.table_stats.setItem(r, 0, QTableWidgetItem(c_name))
+                self.table_stats.setItem(r, 1, QTableWidgetItem(f"{c_crv.get('ap', 0)*100:.1f}%"))
+                self.table_stats.setItem(r, 2, QTableWidgetItem(f"{c_crv.get('ap', 0)*100:.1f}%"))
+                self.table_stats.setItem(r, 3, QTableWidgetItem(f"Peak F1: {c_crv.get('peak_f1', 0)*100:.1f}%"))
+                self.table_stats.setItem(r, 4, QTableWidgetItem(f"Opt Thr: {c_crv.get('optimal_thr', 0.5):.2f}"))
+                self.table_stats.setItem(r, 5, QTableWidgetItem(scope_title))
+
+        if show_toast:
+            QMessageBox.information(self, "Plots Updated", f"Successfully re-rendered diagnostic charts for [{scope_title}] with '{theme}' theme and '{palette}' palette at {dpi} DPI.")
 
     def on_evaluation_finished(self, success, msg, results):
         self.btn_evaluate.setEnabled(True)
@@ -1589,9 +2254,19 @@ class EvaluationDialog(QDialog):
             self.results_dir = self.last_results_dir
             self.btn_open_results.setEnabled(True)
 
-            # Update Analytics Plots
-            self.refresh_plot_displays(results)
+            # Populate Scope Selector (All, Categories, Videos)
+            diag = results.get('diagnostics_data')
+            if not diag:
+                diag_file = os.path.join(self.results_dir, 'diagnostics.json')
+                if os.path.exists(diag_file):
+                    import json as _json
+                    with open(diag_file, 'r') as f:
+                        diag = _json.load(f)
+                        results['diagnostics_data'] = diag
+            self.populate_scope_selector(diag)
 
+            # Update Analytics Plots
+            self.replot_diagnostics_with_aesthetics(show_toast=False)
 
             # Populate Stats Table
             class_metrics = results.get('class_metrics', {})
@@ -1696,14 +2371,16 @@ class EvaluationDialog(QDialog):
                 "media": b.edit_media.text() if hasattr(b, 'edit_media') else ""
             })
 
+        profile["global_selected_videos"] = self.global_selected_videos
         for row in range(self.table_classes.rowCount()):
             orig_name = self.table_classes.item(row, 0).text()
             try:
                 target_name = self.table_classes.cellWidget(row, 1).currentText()
             except AttributeError:
                 target_name = self.table_classes.item(row, 1).text()
-            include = self.table_classes.cellWidget(row, 2).isChecked()
-            profile["class_mappings"].append({"orig": orig_name, "target": target_name, "include": include})
+            btn_vid = self.table_classes.cellWidget(row, 2)
+            selected_vids = getattr(btn_vid, 'selected_videos', None) if btn_vid else None
+            profile["class_mappings"].append({"orig": orig_name, "target": target_name, "selected_videos": selected_vids})
 
         profile["video_mappings"] = []
         if hasattr(self, 'table_video_maps'):
@@ -1752,21 +2429,49 @@ class EvaluationDialog(QDialog):
                 b.edit_weights.setText(b_data.get("weights", ""))
                 b.edit_media.setText(b_data.get("media", ""))
 
+        self.global_selected_videos = profile.get("global_selected_videos", None)
+        all_vids = self.get_all_detected_videos()
+        if self.global_selected_videos is not None and all_vids:
+            if len(self.global_selected_videos) == len(all_vids):
+                self.btn_manage_videos.setText(f"🎬 All Detected Videos Included ({len(all_vids)}/{len(all_vids)})")
+                self.btn_manage_videos.setStyleSheet("background-color: #2b2b2b; color: #409EFF; border: 1px solid #409EFF; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-size: 12px;")
+            else:
+                self.btn_manage_videos.setText(f"🎬 {len(self.global_selected_videos)}/{len(all_vids)} Videos Selected (Click to change)")
+                self.btn_manage_videos.setStyleSheet("background-color: rgba(230, 162, 60, 0.15); color: #E6A23C; border: 1px solid #E6A23C; font-weight: bold; border-radius: 4px; padding: 6px 12px; font-size: 12px;")
+
         mappings = profile.get("class_mappings", [])
         self.table_classes.setRowCount(0)
         for m in mappings:
             row = self.table_classes.rowCount()
             self.table_classes.insertRow(row)
-            self.table_classes.setItem(row, 0, QTableWidgetItem(m.get("orig", "")))
+            orig_name = m.get("orig", "")
+            self.table_classes.setItem(row, 0, QTableWidgetItem(orig_name))
             
             combo = QComboBox()
             combo.setEditable(True)
-            combo.setCurrentText(m.get("target", ""))
+            combo.addItem("[IGNORE] - Exclude from evaluation")
+            target_val = m.get("target", "")
+            if target_val and target_val not in ["[IGNORE] - Exclude from evaluation", "__IGNORE__"]:
+                combo.addItem(target_val)
+            if target_val in ["__IGNORE__", "[IGNORE] - Exclude from evaluation", "IGNORE"] or m.get("include") is False:
+                combo.setCurrentIndex(0)
+            else:
+                combo.setCurrentText(target_val)
             self.table_classes.setCellWidget(row, 1, combo)
-            
-            chk = QCheckBox()
-            chk.setChecked(m.get("include", True))
-            self.table_classes.setCellWidget(row, 2, chk)
+
+            # Recreate button
+            btn_vid = QPushButton("All Videos (Default) ▾")
+            btn_vid.setStyleSheet("background-color: #2b2b2b; color: #cccccc; border: 1px solid #444444; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+            sel_vids = m.get("selected_videos") or (m.get("video").split(',') if m.get("video") else None)
+            if sel_vids and all_vids and len(sel_vids) < len(all_vids):
+                btn_vid.selected_videos = sel_vids
+                btn_vid.setText(f"{len(sel_vids)}/{len(all_vids)} Videos ▾")
+                btn_vid.setStyleSheet("background-color: rgba(64, 158, 255, 0.15); color: #409EFF; border: 1px solid #409EFF; font-weight: bold; border-radius: 4px; padding: 4px 8px; font-size: 11px;")
+                btn_vid.setToolTip(f"Applies only to: {', '.join(sel_vids)}")
+            else:
+                btn_vid.selected_videos = None
+            btn_vid.clicked.connect(lambda _, b=btn_vid, r=orig_name: self.open_class_video_selector(b, r))
+            self.table_classes.setCellWidget(row, 2, btn_vid)
             
         video_mappings = profile.get("video_mappings", [])
         if hasattr(self, 'table_video_maps'):

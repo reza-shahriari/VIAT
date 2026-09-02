@@ -87,6 +87,14 @@ class UICreator:
         open_image_folder_action.triggered.connect(self.main_window.open_image_folder)
         file_menu.addAction(open_image_folder_action)
 
+        # Open Video Folder action
+        open_video_folder_action = QAction("Open Video Folder", self.main_window)
+        open_video_folder_action.setShortcut("Ctrl+Alt+O")
+        open_video_folder_action.triggered.connect(
+            lambda: getattr(self.main_window, "open_video_folder", lambda: None)()
+        )
+        file_menu.addAction(open_video_folder_action)
+
         # Save Project action
         save_action = QAction("Save Project", self.main_window)
         save_action.setShortcut("Ctrl+S")
@@ -413,6 +421,16 @@ class UICreator:
         )
         create_dataset_action.triggered.connect(self.main_window.create_dataset)
         tools_menu.addAction(create_dataset_action)
+
+        # Merge Video Dataset action
+        merge_video_dataset_action = QAction("Merge Video Dataset to Single Video...", self.main_window)
+        merge_video_dataset_action.setToolTip(
+            "Merge all annotated videos in a folder into a single video and label file (many2single)"
+        )
+        merge_video_dataset_action.triggered.connect(
+            lambda: getattr(self.main_window, 'open_merge_video_dataset_dialog', lambda: None)()
+        )
+        tools_menu.addAction(merge_video_dataset_action)
         
         # Zero-Shot Classification Refiner
         zero_shot_refiner_action = QAction("Zero-Shot Classification Refiner...", self.main_window)

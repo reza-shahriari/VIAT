@@ -324,9 +324,10 @@ class Evaluate():
 
         # Only per-video jsons: aggregates would double-count detections
         skip_names = {'all_video'}
-        skip_names.update(self.category_names or [])
-        if self.video_category_mappings:
-            skip_names.update(self.video_category_mappings.keys())
+        if self.category_names:
+            for cat in self.category_names:
+                if cat != "default":
+                    skip_names.add(cat)
 
         def _is_aggregate(name):
             return (name in skip_names or name.endswith('_all_video')
@@ -336,6 +337,7 @@ class Evaluate():
         fp_records = []
         fn_records = []
         computed_video_metrics = []
+        per_video_records = {}
         canvas = [0, 0]
 
         for det_dir in det_paths:
@@ -444,7 +446,7 @@ class Evaluate():
                         s_p = np.array(v_precs)[s_idx]
                         v_ap50 = float(np.trapz(s_p, s_r)) if len(s_r) > 1 else v_p
 
-                    computed_video_metrics.append({
+                    v_met_dict = {
                         'name': name,
                         'video': name,
                         'ap50': v_ap50,
@@ -460,140 +462,188 @@ class Evaluate():
                             'FP': v_fp_count,
                             'FN': v_fn_count
                         }
-                    })
+                    }
+                    computed_video_metrics.append(v_met_dict)
+                    per_video_records[name] = {
+                        'matched': v_matched,
+                        'fp': v_fp,
+                        'fn': v_fn,
+                        'metric': v_met_dict
+                    }
 
         if not (matched_records or fp_records or fn_records):
             return
 
-        # Confusion matrix: rows = GT class, cols = predicted class, extra Background row/col
-        classes = sorted({r['gt'] for r in matched_records} | {r['gt'] for r in fn_records}
-                         | {r['det'] for r in matched_records} | {r['det'] for r in fp_records})
-        cls_idx = {c: i for i, c in enumerate(classes)}
-        n = len(classes)
-        cm = np.zeros((n + 1, n + 1))
-        for r in matched_records:
-            cm[cls_idx[r['gt']], cls_idx[r['det']]] += 1
-        for r in fp_records:
-            cm[n, cls_idx[r['det']]] += 1
-        for r in fn_records:
-            cm[cls_idx[r['gt']], n] += 1
+        def _build_single_diagnostic_dict(m_records, f_records, n_records, cvs, v_metrics=None):
+            if not (m_records or f_records or n_records):
+                return {}
+            
+            cls_set = sorted({r['gt'] for r in m_records} | {r['gt'] for r in n_records}
+                             | {r['det'] for r in m_records} | {r['det'] for r in f_records})
+            cls_idx = {c: i for i, c in enumerate(cls_set)}
+            n_cls = len(cls_set)
+            cm = np.zeros((n_cls + 1, n_cls + 1))
+            for r in m_records:
+                cm[cls_idx[r['gt']], cls_idx[r['det']]] += 1
+            for r in f_records:
+                cm[n_cls, cls_idx[r['det']]] += 1
+            for r in n_records:
+                cm[cls_idx[r['gt']], n_cls] += 1
 
-        # Confidence sweep: precision/recall per threshold + ECE + best-F1 threshold
-        all_dets = matched_records + fp_records
-        total_gt = len(matched_records) + len(fn_records)
-        confs = np.array([r['score'] for r in all_dets]) if all_dets else np.array([])
-        is_tp = np.array([True] * len(matched_records) + [False] * len(fp_records))
-        thresholds = np.round(np.arange(0.05, 1.0, 0.05), 2)
-        precisions, recalls, f1s = [], [], []
-        for t in thresholds:
-            sel = confs >= t
-            tp_sel = int(is_tp[sel].sum())
-            n_sel = int(sel.sum())
-            p = tp_sel / n_sel if n_sel else 0.0
-            rc = tp_sel / total_gt if total_gt else 0.0
-            precisions.append(p)
-            recalls.append(rc)
-            f1s.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
-        optimal_thr = float(thresholds[int(np.argmax(f1s))]) if f1s else 0.5
-        ece = 0.0
-        if len(confs):
-            for lo in np.arange(0.0, 1.0, 0.1):
-                hi = lo + 0.1
-                in_bin = (confs >= lo) & (confs < hi) if hi < 1.0 else (confs >= lo) & (confs <= 1.0)
-                if in_bin.any():
-                    ece += abs(float(is_tp[in_bin].mean()) - float(confs[in_bin].mean())) \
-                           * (int(in_bin.sum()) / len(confs))
-
-        # TP vs FP confidence distributions
-        conf_tp = [float(r['score']) for r in matched_records if r['gt'] == r['det']]
-        conf_fp = [float(r['score']) for r in fp_records] + [float(r['score']) for r in matched_records if r['gt'] != r['det']]
-
-        # Per-class Precision-Recall and F1 curves
-        per_class_curves = {}
-        for c in classes:
-            c_matches = [r for r in matched_records if r['gt'] == c and r['det'] == c]
-            c_fps = [r for r in fp_records if r['det'] == c] + [r for r in matched_records if r['det'] == c and r['gt'] != c]
-            c_gts_total = len([r for r in matched_records if r['gt'] == c]) + len([r for r in fn_records if r['gt'] == c])
-            c_dets = c_matches + c_fps
-            if not c_dets or c_gts_total == 0:
-                continue
-
-            c_confs = np.array([r['score'] for r in c_dets])
-            c_is_tp = np.array([True] * len(c_matches) + [False] * len(c_fps))
-
-            c_precisions, c_recalls, c_f1s = [], [], []
+            all_dets = m_records + f_records
+            total_gt = len(m_records) + len(n_records)
+            confs = np.array([r['score'] for r in all_dets]) if all_dets else np.array([])
+            is_tp = np.array([True] * len(m_records) + [False] * len(f_records))
+            thresholds = np.round(np.arange(0.05, 1.0, 0.05), 2)
+            precs, recs, f1_scores = [], [], []
             for t in thresholds:
-                sel = c_confs >= t
-                tp_sel = int(c_is_tp[sel].sum())
+                sel = confs >= t
+                tp_sel = int(is_tp[sel].sum())
                 n_sel = int(sel.sum())
                 p = tp_sel / n_sel if n_sel else 0.0
-                rc = tp_sel / c_gts_total if c_gts_total else 0.0
-                c_precisions.append(p)
-                c_recalls.append(rc)
-                c_f1s.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
+                rc = tp_sel / total_gt if total_gt else 0.0
+                precs.append(p)
+                recs.append(rc)
+                f1_scores.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
 
-            c_opt_idx = int(np.argmax(c_f1s)) if c_f1s else 0
-            # Compute AP from PR curve
-            sorted_rc_indices = np.argsort(c_recalls)
-            sorted_rc = np.array(c_recalls)[sorted_rc_indices]
-            sorted_pr = np.array(c_precisions)[sorted_rc_indices]
-            c_ap = float(np.trapz(sorted_pr, sorted_rc)) if len(sorted_rc) > 1 else 0.0
+            opt_thr = float(thresholds[int(np.argmax(f1_scores))]) if f1_scores else 0.5
+            ece_val = 0.0
+            if len(confs):
+                for lo in np.arange(0.0, 1.0, 0.1):
+                    hi = lo + 0.1
+                    in_bin = (confs >= lo) & (confs < hi) if hi < 1.0 else (confs >= lo) & (confs <= 1.0)
+                    if in_bin.any():
+                        ece_val += abs(float(is_tp[in_bin].mean()) - float(confs[in_bin].mean())) * (int(in_bin.sum()) / len(confs))
 
-            per_class_curves[c] = {
-                'confidences': thresholds.tolist(),
-                'precisions': c_precisions,
-                'recalls': c_recalls,
-                'f1s': c_f1s,
-                'optimal_thr': float(thresholds[c_opt_idx]) if c_f1s else 0.5,
-                'peak_f1': float(c_f1s[c_opt_idx]) if c_f1s else 0.0,
-                'ap': max(0.0, min(1.0, c_ap))
+            conf_tp_list = [float(r['score']) for r in m_records if r['gt'] == r['det']]
+            conf_fp_list = [float(r['score']) for r in f_records] + [float(r['score']) for r in m_records if r['gt'] != r['det']]
+
+            per_class_crvs = {}
+            for c in cls_set:
+                c_matches = [r for r in m_records if r['gt'] == c and r['det'] == c]
+                c_fps = [r for r in f_records if r['det'] == c] + [r for r in m_records if r['det'] == c and r['gt'] != c]
+                c_gts_total = len([r for r in m_records if r['gt'] == c]) + len([r for r in n_records if r['gt'] == c])
+                c_dets = c_matches + c_fps
+                if not c_dets or c_gts_total == 0:
+                    continue
+
+                c_confs = np.array([r['score'] for r in c_dets])
+                c_is_tp = np.array([True] * len(c_matches) + [False] * len(c_fps))
+                c_precs, c_recs, c_f1s = [], [], []
+                for t in thresholds:
+                    sel = c_confs >= t
+                    tp_sel = int(c_is_tp[sel].sum())
+                    n_sel = int(sel.sum())
+                    p = tp_sel / n_sel if n_sel else 0.0
+                    rc = tp_sel / c_gts_total if c_gts_total else 0.0
+                    c_precs.append(p)
+                    c_recs.append(rc)
+                    c_f1s.append(2 * p * rc / (p + rc) if (p + rc) else 0.0)
+
+                c_opt_idx = int(np.argmax(c_f1s)) if c_f1s else 0
+                sorted_rc_indices = np.argsort(c_recs)
+                sorted_rc = np.array(c_recs)[sorted_rc_indices]
+                sorted_pr = np.array(c_precs)[sorted_rc_indices]
+                c_ap = float(np.trapz(sorted_pr, sorted_rc)) if len(sorted_rc) > 1 else 0.0
+
+                per_class_crvs[c] = {
+                    'confidences': thresholds.tolist(),
+                    'precisions': c_precs,
+                    'recalls': c_recs,
+                    'f1s': c_f1s,
+                    'optimal_thr': float(thresholds[c_opt_idx]) if c_f1s else 0.5,
+                    'peak_f1': float(c_f1s[c_opt_idx]) if c_f1s else 0.0,
+                    'ap': max(0.0, min(1.0, c_ap))
+                }
+
+            classification_err = len([r for r in m_records if r['gt'] != r['det']])
+            localization_err = len([r for r in f_records if r.get('max_iou', 0) >= 0.1])
+            background_fp = len([r for r in f_records if r.get('max_iou', 0) < 0.1])
+            missed_fn = len(n_records)
+            err_breakdown = {
+                'classification': classification_err,
+                'localization': localization_err,
+                'background_fp': background_fp,
+                'missed_fn': missed_fn
             }
 
-        # Error breakdown
-        classification_err = len([r for r in matched_records if r['gt'] != r['det']])
-        localization_err = len([r for r in fp_records if r.get('max_iou', 0) >= 0.1])
-        background_fp = len([r for r in fp_records if r.get('max_iou', 0) < 0.1])
-        missed_fn = len(fn_records)
-        error_breakdown = {
-            'classification': classification_err,
-            'localization': localization_err,
-            'background_fp': background_fp,
-            'missed_fn': missed_fn
-        }
+            ratio_edges = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, np.inf]
+            ratio_mids = [0.125, 0.375, 0.625, 0.875, 1.25, 1.75, 2.5, 3.5, 6.0]
+            ar_ratios, ar_errors = [], []
+            if all_dets:
+                ratios = np.array([r['w'] / r['h'] if r['h'] else 0.0 for r in all_dets])
+                for bi in range(len(ratio_edges) - 1):
+                    in_bin = (ratios >= ratio_edges[bi]) & (ratios < ratio_edges[bi + 1])
+                    if in_bin.any():
+                        ar_ratios.append(ratio_mids[bi])
+                        ar_errors.append(float((is_tp[in_bin] == 0).mean() * 100))
 
-        # Aspect-ratio bias: error (FP) rate per W/H bin
-        ratio_edges = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, np.inf]
-        ratio_mids = [0.125, 0.375, 0.625, 0.875, 1.25, 1.75, 2.5, 3.5, 6.0]
-        ar_ratios, ar_errors = [], []
-        if all_dets:
-            ratios = np.array([r['w'] / r['h'] if r['h'] else 0.0 for r in all_dets])
-            for bi in range(len(ratio_edges) - 1):
-                in_bin = (ratios >= ratio_edges[bi]) & (ratios < ratio_edges[bi + 1])
-                if in_bin.any():
-                    ar_ratios.append(ratio_mids[bi])
-                    ar_errors.append(float((is_tp[in_bin] == 0).mean() * 100))
+            return {
+                'classes': cls_set,
+                'confusion': cm.tolist(),
+                'ious': [r['iou'] for r in m_records],
+                'calibration': {
+                    'confidences': thresholds.tolist(),
+                    'precisions': precs,
+                    'recalls': recs,
+                    'ece_score': float(ece_val),
+                    'optimal_thr': opt_thr,
+                },
+                'conf_tp': conf_tp_list,
+                'conf_fp': conf_fp_list,
+                'per_class_curves': per_class_crvs,
+                'error_breakdown': err_breakdown,
+                'aspect_ratio': {'ratios': ar_ratios, 'error_rates': ar_errors},
+                'fp_coords': [[r['cx'], r['cy']] for r in f_records],
+                'fn_coords': [[r['cx'], r['cy']] for r in n_records],
+                'canvas_size': [cvs[0] or 1920, cvs[1] or 1080],
+                'video_metrics': v_metrics or [],
+            }
 
-        diag = {
-            'classes': classes,
-            'confusion': cm.tolist(),
-            'ious': [r['iou'] for r in matched_records],
-            'calibration': {
-                'confidences': thresholds.tolist(),
-                'precisions': precisions,
-                'recalls': recalls,
-                'ece_score': float(ece),
-                'optimal_thr': optimal_thr,
-            },
-            'conf_tp': conf_tp,
-            'conf_fp': conf_fp,
-            'per_class_curves': per_class_curves,
-            'error_breakdown': error_breakdown,
-            'aspect_ratio': {'ratios': ar_ratios, 'error_rates': ar_errors},
-            'fp_coords': [[r['cx'], r['cy']] for r in fp_records],
-            'fn_coords': [[r['cx'], r['cy']] for r in fn_records],
-            'canvas_size': [canvas[0] or 1920, canvas[1] or 1080],
-            'video_metrics': computed_video_metrics,
-        }
+        # Build Per-Video Diagnostics
+        by_video = {}
+        for v_name, v_data in per_video_records.items():
+            by_video[v_name] = _build_single_diagnostic_dict(
+                v_data['matched'], v_data['fp'], v_data['fn'], canvas, [v_data['metric']]
+            )
+
+        # Build Per-Category Diagnostics
+        by_category = {}
+        cat_to_vids = defaultdict(list)
+        if hasattr(self, 'video_category_mappings') and self.video_category_mappings:
+            for k, v in self.video_category_mappings.items():
+                if isinstance(v, list):
+                    for item in v:
+                        if item in per_video_records:
+                            cat_to_vids[k].append(item)
+                        else:
+                            cat_to_vids[item].append(k)
+                elif isinstance(v, str):
+                    cat_to_vids[v].append(k)
+
+        for cat_name, v_names in cat_to_vids.items():
+            c_matched = []
+            c_fp = []
+            c_fn = []
+            c_v_mets = []
+            for vn in set(v_names):
+                if vn in per_video_records:
+                    c_matched.extend(per_video_records[vn]['matched'])
+                    c_fp.extend(per_video_records[vn]['fp'])
+                    c_fn.extend(per_video_records[vn]['fn'])
+                    c_v_mets.append(per_video_records[vn]['metric'])
+            if c_matched or c_fp or c_fn:
+                by_category[cat_name] = _build_single_diagnostic_dict(
+                    c_matched, c_fp, c_fn, canvas, c_v_mets
+                )
+
+        # Build Overall Dataset Diagnostics
+        diag = _build_single_diagnostic_dict(
+            matched_records, fp_records, fn_records, canvas, computed_video_metrics
+        )
+        diag['by_video'] = by_video
+        diag['by_category'] = by_category
+
         with open(os.path.join(out_folder, 'diagnostics.json'), 'w') as f:
             json.dump(diag, f)
 

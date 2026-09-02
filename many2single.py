@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Merge a folder of (video_N.mp4, video_N.txt) dataset pairs into a single
+Merge a folder of (video, annotation.txt) dataset pairs into a single
 video + single label file.
 
-Rules implemented (per spec discussed with user):
-- Videos are natsorted by their N index (video_0, video_1, video_2, ...).
-- If both video_N.mp4 and video_N_blurred.mp4 exist, the blurred version is
-  used and the plain one is ignored.
-- Each .txt has a header block:
+Rules implemented:
+- Matches any video files (.mp4, .avi, .mov, .mkv, .webm, .flv, .m4v, .wmv)
+  regardless of naming pattern.
+- If both plain and blurred versions (ending in _blurred or _blured) exist
+  for a video, the blurred version is used and the plain one is ignored.
+- Each .txt annotation file must have a valid header block:
     ###
     clasess:
     names:
@@ -29,12 +30,11 @@ Rules implemented (per spec discussed with user):
   order videos are processed), and every label's class index is remapped
   from its source video's local index to the global index.
 - Output: one H.264 .mp4 (same resolution/fps as source, assumed identical
-  across all videos per user confirmation) and one merged .txt with a
-  single combined header followed by all kept, remapped label lines in
-  order.
+  across all videos) and one merged .txt with a single combined header
+  followed by all kept, remapped label lines in order.
 
 Usage:
-    python3 merge_dataset.py /path/to/main_folder --out-video out.mp4 --out-labels out.txt
+    python3 many2single.py --folder /path/to/main_folder --out-video outvideo.mp4 --out-labels outvideo.txt
 """
 
 import argparse
@@ -48,6 +48,7 @@ from natsort import natsorted
 
 HEADER_RE = re.compile(r"^###\s*$")
 LABEL_ITEM_RE = re.compile(r"\[([^\]]*)\]")
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v", ".wmv"}
 
 
 def parse_header(lines):
@@ -84,22 +85,30 @@ def parse_header(lines):
         if HEADER_RE.match(stripped):
             idx += 1
             break
-        # Match the nc line strictly: "-nc:4" or "- nc: 4" etc, where the
-        # token right after the leading dash(es)/spaces is literally "nc".
-        # This must NOT match class names that merely contain "nc" as a
-        # substring (e.g. "Motorcycle", "Ambulance", "Fence").
+        # Match the nc line strictly: "-nc:4" or "- nc: 4" etc.
         nc_match = re.match(r"^-\s*nc\s*:\s*(\d+)\s*$", stripped, re.IGNORECASE)
         if nc_match:
             nc = int(nc_match.group(1))
         elif stripped.startswith("-"):
-            # e.g. "- Human"
             name = stripped.lstrip("-").strip()
             if name:
                 names.append(name)
-        # lines like "clasess:" / "names:" are ignored structurally
         idx += 1
 
     return names, nc, idx
+
+
+def is_valid_label_file(label_path: Path) -> bool:
+    """Check if the path exists, is a file, and has a parseable Raya annotation header."""
+    if not label_path.is_file():
+        return False
+    try:
+        with open(label_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [f.readline() for _ in range(100)]
+        names, nc, body_start = parse_header(lines)
+        return body_start > 0
+    except Exception:
+        return False
 
 
 def parse_label_line(line):
@@ -112,7 +121,7 @@ def parse_label_line(line):
     """
     stripped = line.strip()
     if stripped == "":
-        return ("EMPTY", [])  # treat stray blank lines as empty frames (defensive)
+        return ("EMPTY", [])  # treat stray blank lines as empty frames
 
     if stripped.upper().startswith("DELETE"):
         return ("DELETE", None)
@@ -135,48 +144,96 @@ def parse_label_line(line):
     return ("BOXES", boxes)
 
 
-def discover_pairs(folder: Path):
+def discover_pairs(folder: Path, out_video: Path = None, out_labels: Path = None):
     """
-    Find video_N(.mp4 / _blurred.mp4) + video_N.txt triples, natsorted by N.
-    Returns list of dicts: {n, video_path, label_path}
+    Find video + label file pairs in `folder`.
+    Supports arbitrary video names and extensions (.mp4, .avi, .mov, etc.).
+    If both plain and blurred versions (ending in _blurred or _blured) exist for a video,
+    the blurred version is preferred.
+    Matches with a .txt file that has a valid Raya annotation format.
+    Returns list of dicts: {"name": base_name, "video_path": video_path, "label_path": label_path}
     """
     all_files = list(folder.iterdir())
-    video_re = re.compile(r"^video_?(\d+)_?(blurred|blured)?\.mp4$", re.IGNORECASE)
 
-    by_n = {}  # n -> {"plain": path or None, "blurred": path or None}
+    # Exclude output video/label filenames if specified, or default outvideo.*
+    exclude_names = {"outvideo.mp4", "outvideo.txt", "out_video.mp4", "out_video.txt"}
+    if out_video:
+        exclude_names.add(out_video.name.lower())
+    if out_labels:
+        exclude_names.add(out_labels.name.lower())
+
+    # Group video files by base stem (without _blurred / _blured suffix)
+    by_base = {}  # base_stem -> {"plain": path, "blurred": path}
+
     for f in all_files:
-        m = video_re.match(f.name)
-        if not m:
+        if not f.is_file():
             continue
-        n = int(m.group(1))
-        is_blurred = m.group(2) is not None
-        by_n.setdefault(n, {"plain": None, "blurred": None})
-        if is_blurred:
-            by_n[n]["blurred"] = f
+        if f.name.lower() in exclude_names:
+            continue
+        if f.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+
+        stem = f.stem
+        stem_lower = stem.lower()
+        if stem_lower.endswith("_blurred"):
+            base_stem = stem[:-8]
+            is_blurred = True
+        elif stem_lower.endswith("_blured"):
+            base_stem = stem[:-7]
+            is_blurred = True
         else:
-            by_n[n]["plain"] = f
+            base_stem = stem
+            is_blurred = False
+
+        by_base.setdefault(base_stem, {"plain": None, "blurred": None})
+        if is_blurred:
+            by_base[base_stem]["blurred"] = f
+        else:
+            by_base[base_stem]["plain"] = f
 
     pairs = []
-    for n in natsorted(by_n.keys()):
-        entry = by_n[n]
+    for base_stem in natsorted(by_base.keys()):
+        entry = by_base[base_stem]
         use_blurred = entry["blurred"] is not None
         video_path = entry["blurred"] if use_blurred else entry["plain"]
         if video_path is None:
             continue
 
-        # Label file naming follows the chosen video's naming: if we're
-        # using the blurred video, prefer video_N_blurred.txt or videoN_blured.txt
+        # Candidate label files in order of preference
         if use_blurred:
-            candidate_label_paths = [folder / f"video_{n}_blurred.txt", folder / f"video_{n}_blured.txt", folder / f"video{n}_blured.txt", folder / f"video_{n}.txt"]
+            candidate_label_paths = [
+                folder / f"{base_stem}_blurred.txt",
+                folder / f"{base_stem}_blured.txt",
+                folder / f"{video_path.stem}.txt",
+                folder / f"{base_stem}.txt",
+            ]
         else:
-            candidate_label_paths = [folder / f"video_{n}.txt", folder / f"video{n}.txt"]
+            candidate_label_paths = [
+                folder / f"{video_path.stem}.txt",
+                folder / f"{base_stem}.txt",
+            ]
 
-        label_path = next((p for p in candidate_label_paths if p.exists()), None)
+        # Find the first candidate that exists and has a valid format
+        label_path = None
+        for cand in candidate_label_paths:
+            if is_valid_label_file(cand):
+                label_path = cand
+                break
+
         if label_path is None:
-            tried = ", ".join(p.name for p in candidate_label_paths)
-            print(f"WARNING: no label file for video_{n} ({video_path.name}), tried [{tried}], skipping this video", file=sys.stderr)
+            existing_candidates = [p.name for p in candidate_label_paths if p.is_file()]
+            if existing_candidates:
+                print(f"WARNING: Label file for '{video_path.name}' found [{', '.join(existing_candidates)}] but format is invalid (missing '###' header), skipping this video", file=sys.stderr)
+            else:
+                tried = ", ".join(p.name for p in candidate_label_paths)
+                print(f"WARNING: No label file found for '{video_path.name}' (tried [{tried}]), skipping this video", file=sys.stderr)
             continue
-        pairs.append({"n": n, "video_path": video_path, "label_path": label_path})
+
+        pairs.append({
+            "name": base_stem,
+            "video_path": video_path,
+            "label_path": label_path,
+        })
 
     return pairs
 
@@ -185,28 +242,23 @@ def normalize_name(name: str) -> str:
     return name.strip().lower()
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Merge dataset videos + labels into one video/txt")
-
-    ap.add_argument("--fourcc", type=str, default="avc1", help="FourCC for H.264 (try 'avc1' or 'h264' or 'mp4v' as fallback)")
-    args = ap.parse_args()
 def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, fourcc: str = "avc1"):
     if not folder.is_dir():
-        raise ValueError(f"{folder} is not a directory")
+        raise ValueError(f"'{folder}' is not a directory")
 
-    pairs = discover_pairs(folder)
+    pairs = discover_pairs(folder, out_video=out_video, out_labels=out_labels)
     if not pairs:
-        raise ValueError("No video/label pairs found")
+        raise ValueError(f"No valid video/label pairs found in '{folder}'")
 
     print(f"Found {len(pairs)} video/label pairs (in order):")
     for p in pairs:
-        print(f"  video_{p['n']}: {p['video_path'].name}  |  {p['label_path'].name}")
+        print(f"  [{p['name']}]: {p['video_path'].name}  |  {p['label_path'].name}")
 
     # ---- Pass 1: parse all headers, build global class list, and read all label lines ----
     global_names = []          # display names, first-appearance order
     global_name_to_idx = {}    # normalized name -> global idx
 
-    per_video_data = []  # list of dicts: {n, video_path, local_idx_to_global_idx, label_lines}
+    per_video_data = []  # list of dicts: {name, video_path, local_idx_to_global_idx, label_lines}
 
     for p in pairs:
         with open(p["label_path"], "r", encoding="utf-8") as f:
@@ -234,7 +286,7 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
             body_lines.pop()
 
         per_video_data.append({
-            "n": p["n"],
+            "name": p["name"],
             "video_path": p["video_path"],
             "label_path": p["label_path"],
             "local_idx_to_global_idx": local_idx_to_global_idx,
@@ -282,8 +334,6 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
                   f"{vd['label_path'].name} has {n_label_lines} label lines. "
                   f"Will process min({n_video_frames},{n_label_lines}).", file=sys.stderr)
 
-        n_to_process = min(n_video_frames, n_label_lines) if n_video_frames and n_label_lines else max(n_video_frames, n_label_lines)
-
         local_idx_to_global_idx = vd["local_idx_to_global_idx"]
 
         frame_idx = 0
@@ -328,7 +378,7 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
             frame_idx += 1
 
         cap.release()
-        print(f"Processed video_{vd['n']}: {frame_idx} frames read, "
+        print(f"Processed {vd['video_path'].name}: {frame_idx} frames read, "
               f"{n_video_frames - frame_idx if n_video_frames > frame_idx else 0} unread remainder")
 
     writer.release()
@@ -351,21 +401,25 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
     print(f"  Output labels: {out_labels}")
     return True, f"Merged successfully. Frames kept: {total_frames_kept}"
 
+
 def main():
     ap = argparse.ArgumentParser(description="Merge dataset videos + labels into one video/txt")
     ap.add_argument("--fourcc", type=str, default="avc1", help="FourCC for H.264 (try 'avc1' or 'h264' or 'mp4v' as fallback)")
-    ap.add_argument("--folder", type=str, default="/media/reza/New Volume/Reza/AiCLab/MLM/Lableing/videos/IDF_D9_armored_bulldozer/")
+    ap.add_argument("--folder", type=str, required=True, help="Folder containing videos and label files")
+    ap.add_argument("--out-video", type=str, default="outvideo.mp4", help="Output video filename/path (default: outvideo.mp4)")
+    ap.add_argument("--out-labels", type=str, default="outvideo.txt", help="Output label filename/path (default: outvideo.txt)")
     args = ap.parse_args()
-    
+
     folder = Path(args.folder)
-    out_video = folder / 'outvideo.mp4'
-    out_labels = folder / 'outvideo.txt'
-    
+    out_video = Path(args.out_video) if Path(args.out_video).is_absolute() else folder / args.out_video
+    out_labels = Path(args.out_labels) if Path(args.out_labels).is_absolute() else folder / args.out_labels
+
     try:
         merge_dataset_programmatic(folder, out_video, out_labels, args.fourcc)
     except Exception as e:
         print(e, file=sys.stderr)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

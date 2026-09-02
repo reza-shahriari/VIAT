@@ -47,10 +47,15 @@ def scan_dataset_classes(gt_path):
 
     classes_found = []
 
-    # Check txt files
+    # 1. Check txt files
     txt_files = []
+    json_files = []
     for root, _, files in os.walk(gt_path):
-        txt_files.extend([os.path.join(root, f) for f in files if f.endswith('.txt')])
+        for f in files:
+            if f.endswith('.txt'):
+                txt_files.append(os.path.join(root, f))
+            elif f.endswith('.json'):
+                json_files.append(os.path.join(root, f))
 
     for file_p in txt_files:
         try:
@@ -80,7 +85,7 @@ def scan_dataset_classes(gt_path):
                     for name in header_names:
                         if name not in classes_found:
                             classes_found.append(name)
-                    continue # Try next file, maybe it has different headers
+                    continue
                     
                 # Fallback to scanning bounding boxes
                 for line in lines:
@@ -88,21 +93,24 @@ def scan_dataset_classes(gt_path):
                     if not line:
                         continue
                     if line.startswith('['):
-                        # Raya format
-                        try:
-                            raw = line.split(';')[0]
-                            sline = eval(raw)
-                            if isinstance(sline, list) and len(sline) > 0 and isinstance(sline[0], list):
-                                sline = sline[0]
-                            if isinstance(sline, list) and len(sline) > 0:
-                                val = sline[0]
-                                if isinstance(val, float) and val.is_integer():
-                                    val = int(val)
-                                str_val = str(val)
-                                if str_val not in classes_found:
-                                    classes_found.append(str_val)
-                        except Exception:
-                            pass
+                        # Raya format: iterate through all boxes in the line separated by ';'
+                        for raw in line.split(';'):
+                            raw = raw.strip()
+                            if not raw.startswith('['):
+                                continue
+                            try:
+                                sline = eval(raw)
+                                if isinstance(sline, list) and len(sline) > 0 and isinstance(sline[0], list):
+                                    sline = sline[0]
+                                if isinstance(sline, list) and len(sline) > 0:
+                                    val = sline[0]
+                                    if isinstance(val, float) and val.is_integer():
+                                        val = int(val)
+                                    str_val = str(val)
+                                    if str_val not in classes_found:
+                                        classes_found.append(str_val)
+                            except Exception:
+                                pass
                     else:
                         parts = line.split()
                         if parts:
@@ -120,4 +128,46 @@ def scan_dataset_classes(gt_path):
         except Exception:
             pass
 
-    return classes_found
+    # 2. Check JSON files (COCO categories or Raya json)
+    for j_file in json_files:
+        try:
+            import json as _json
+            with open(j_file, 'r', encoding='utf-8', errors='ignore') as f:
+                jdata = _json.load(f)
+                if isinstance(jdata, dict) and 'categories' in jdata:
+                    for cat in jdata['categories']:
+                        c_name = cat.get('name') if cat.get('name') is not None else cat.get('id')
+                        if c_name is not None and str(c_name) not in classes_found:
+                            classes_found.append(str(c_name))
+        except Exception:
+            pass
+
+    def _sort_key(c):
+        try:
+            return (0, int(c))
+        except ValueError:
+            return (1, str(c).lower())
+
+    return sorted(classes_found, key=_sort_key)
+
+
+def scan_dataset_videos(gt_path):
+    """
+    Scan a directory for video sequence names (e.g. from txt, json, or video files).
+    Returns a sorted list of unique video/sequence base names without extensions.
+    """
+    if not gt_path or not os.path.exists(gt_path):
+        return []
+    videos = []
+    excluded_names = {
+        'data', 'dataset', 'labels', 'classes', 'per_class_metrics', 
+        'diagnostics', 'combined', 'notes', 'readme'
+    }
+    for root, _, files in os.walk(gt_path):
+        for f in files:
+            if f.endswith(('.txt', '.json', '.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV', '.MP4')):
+                base = os.path.splitext(f)[0]
+                if base.lower() not in excluded_names and not base.startswith(('per_class', 'diagnostics', 'combined')):
+                    if base not in videos:
+                        videos.append(base)
+    return sorted(videos)

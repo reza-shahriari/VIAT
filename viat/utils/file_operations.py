@@ -126,7 +126,8 @@ def save_project_generator(
     deleted_frames=None,
     labeler_analytics=None,
     deleted_annotations=None,
-    blur_regions=None
+    blur_regions=None,
+    video_dataset_info=None
 ):
     yield 10, "Serializing annotations..."
     
@@ -198,6 +199,10 @@ def save_project_generator(
     # Add image dataset info if available
     if image_dataset_info:
         project_data["image_dataset_info"] = image_dataset_info
+
+    # Add video dataset info if available
+    if video_dataset_info:
+        project_data["video_dataset_info"] = video_dataset_info
 
     yield 85, "Writing to disk..."
     # Save to file
