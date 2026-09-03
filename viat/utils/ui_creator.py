@@ -431,6 +431,16 @@ class UICreator:
             lambda: getattr(self.main_window, 'open_merge_video_dataset_dialog', lambda: None)()
         )
         tools_menu.addAction(merge_video_dataset_action)
+
+        # Convert Video Dataset to YOLO Dataset action
+        convert_video_to_yolo_action = QAction("Convert Video Dataset to YOLO Dataset...", self.main_window)
+        convert_video_to_yolo_action.setToolTip(
+            "Convert a folder of videos and per-frame annotations into a YOLO image dataset with smart cropping and class balancing"
+        )
+        convert_video_to_yolo_action.triggered.connect(
+            lambda: getattr(self.main_window, 'open_video_to_yolo_dialog', lambda: None)()
+        )
+        tools_menu.addAction(convert_video_to_yolo_action)
         
         # Zero-Shot Classification Refiner
         zero_shot_refiner_action = QAction("Zero-Shot Classification Refiner...", self.main_window)

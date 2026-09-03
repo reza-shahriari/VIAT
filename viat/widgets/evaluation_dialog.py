@@ -1783,6 +1783,18 @@ class EvaluationDialog(QDialog):
         if not video_names and det_dir and os.path.exists(det_dir):
             video_names = scan_dataset_videos(det_dir)
 
+        # Filter out evaluation engine aggregate output names — these are COCO JSON
+        # artifacts written by the engine (all_video.json, fast_all_video.json, etc.)
+        # and are NOT real video sequences with per-frame GT.
+        _AGGREGATE_NAMES = {
+            'all_video', 'fast_all_video', 'medium_all_video', 'slow_all_video',
+            'all_videos', 'combined', 'aggregated',
+        }
+        video_names = [
+            v for v in video_names
+            if v not in _AGGREGATE_NAMES and not v.endswith('_all_video')
+        ]
+
         if not video_names:
             QMessageBox.warning(self, "No Videos Found", f"No video files or annotation sequences found in Ground Truth directory:\n{gt_dir}")
             return
@@ -1799,9 +1811,37 @@ class EvaluationDialog(QDialog):
             except Exception as e:
                 logger.warning(f"Could not load via built-in video dataset loader: {e}")
 
+        # Collect class mapping and target classes
+        cls_map = {}
+        tgt_classes = []
+        for row in range(self.table_classes.rowCount()):
+            item_orig = self.table_classes.item(row, 0)
+            orig_name = item_orig.text().strip() if item_orig else ""
+            try:
+                target_name = self.table_classes.cellWidget(row, 1).currentText().strip()
+            except AttributeError:
+                item_tgt = self.table_classes.item(row, 1)
+                target_name = item_tgt.text().strip() if item_tgt else ""
+            if not target_name or target_name.upper().startswith("[IGNORE]") or target_name in ("__IGNORE__", "IGNORE"):
+                target_name = "__IGNORE__"
+            else:
+                if target_name not in tgt_classes:
+                    tgt_classes.append(target_name)
+            if orig_name:
+                cls_map[orig_name] = target_name
+                try:
+                    cls_map[int(orig_name)] = target_name
+                except ValueError:
+                    pass
+
         # 2. Attach evaluation context and inspector
         if hasattr(main_win, 'load_evaluation_dataset_into_inspector'):
-            main_win.load_evaluation_dataset_into_inspector(gt_dir, det_dir, video_names, initial_video=initial_video)
+            main_win.load_evaluation_dataset_into_inspector(
+                gt_dir, det_dir, video_names,
+                initial_video=initial_video,
+                class_mapping=cls_map,
+                target_classes=tgt_classes
+            )
             self.hide()
         elif hasattr(main_win, 'load_predictions_file_into_inspector'):
             exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV']

@@ -241,34 +241,37 @@ class Evaluate():
                                     file.close()
                                     gfile.close()
         
-    def eval_track(self,Config):
+    def eval_track(self, Config):
         if run_tracker is None:
             cons.print("[yellow]Warning: Tracking evaluation module (TrackEval) is not available, skipping tracking evaluation.[/yellow]")
             return
-        if (self.gt_path,list) and len(self.gt_path)>1:
-            if isinstance(self.gt_path,list) and isinstance(self.det_path,list):
-                Config.stadium_downloads =['_all','_download','_stadium']
-                for i,j in zip(self.gt_path,self.det_path):
-                    gt_path = [i]
-                    det_path = [j]
-                    convert_to_mot(gt_path,det_path,Config,self.size_thr,self.quality_thr)
+
+        gt_paths = self.gt_path if isinstance(self.gt_path, list) else [self.gt_path]
+        det_paths = self.det_path if isinstance(self.det_path, list) else [self.det_path]
+
+        try:
+            if len(gt_paths) > 1 and len(det_paths) > 1:
+                Config.stadium_downloads = ['_all', '_download', '_stadium']
+                for i, j in zip(gt_paths, det_paths):
+                    convert_to_mot([i], [j], Config, self.size_thr, self.quality_thr)
                     run_tracker(Config)
-                convert_to_mot(self.gt_path,self.det_path,Config,self.size_thr,self.quality_thr)
+                convert_to_mot(gt_paths, det_paths, Config, self.size_thr, self.quality_thr)
                 run_tracker(Config)
-            elif isinstance(self.gt_path,list) or isinstance(self.det,list):
-                ValueError(f"gt_path and det_path should be in same type\ntype gt_path is {type(gt_path)} and type det_path is {type(det_path)}")   
-        else:
-            Config.stadium_downloads = []
-            gt_path = [self.gt_path] if type(self.gt_path) == str else self.gt_path
-            det_path = [self.det_path] if type(self.det_path) == str else self.det_path
-            with cons.status('[bold blue] writing mot format files ') as status:
-                convert_to_mot(gt_path,det_path,Config,self.size_thr,self.quality_thr)
-            cons.print("[bold cyan]mot format files created")
-            with cons.status('[bold green] evaluating tracker') as status:
-                run_tracker(Config)
-            if os.path.exists(self.gt_path[0] +'/Track'):
-                shutil.rmtree(self.gt_path[0] +'/Track')
-            cons.print('[bold cyan] tracker evaluated successfully :smiley:')
+            else:
+                Config.stadium_downloads = []
+                with cons.status('[bold blue] writing mot format files ') as status:
+                    convert_to_mot(gt_paths, det_paths, Config, self.size_thr, self.quality_thr)
+                cons.print("[bold cyan]mot format files created")
+                with cons.status('[bold green] evaluating tracker') as status:
+                    run_tracker(Config)
+
+                track_tmp = os.path.join(gt_paths[0], 'Track')
+                if os.path.exists(track_tmp):
+                    shutil.rmtree(track_tmp, ignore_errors=True)
+                cons.print('[bold cyan] tracker evaluated successfully :smiley:')
+        except Exception as e:
+            cons.print(f"[bold red]Tracking evaluation error:[/bold red] {e}")
+            logger.exception(f"Error during tracking evaluation: {e}")
     
     def _get_category_id_to_name(self):
         """Build the real class-id -> class-name mapping from the COCO jsons

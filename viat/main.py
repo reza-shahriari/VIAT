@@ -10,6 +10,7 @@ try:
 except ImportError:
     pass
 import os
+import shutil
 import random
 import math
 import cv2
@@ -200,13 +201,14 @@ class AutoLabelWorker(QThread):
                 if not isinstance(c, dict):
                     continue
                 if c.get('action') == 'Detect (Zero-Shot)':
+                    c_name_key = c['name'].strip().lower()
                     rule = c.get('dedup_against', '').strip().lower()
                     if rule == '*':
-                        dedup_rules[c['name']] = '*'
+                        dedup_rules[c_name_key] = '*'
                     elif rule:
-                        dedup_rules[c['name']] = [x.strip() for x in rule.split(',')]
+                        dedup_rules[c_name_key] = [x.strip() for x in rule.split(',')]
                     else:
-                        dedup_rules[c['name']] = [c['name'].lower()]
+                        dedup_rules[c_name_key] = [c_name_key]
 
             # Build detect prompts once (text labels to search for with zero-shot models).
             # Use extract_prompt if set, otherwise class name.
@@ -318,7 +320,8 @@ class AutoLabelWorker(QThread):
                         continue
                     is_duplicate = False
                     c_name = d['class_name']
-                    rule = dedup_rules.get(c_name, [c_name.lower()])
+                    c_name_key = c_name.strip().lower()
+                    rule = dedup_rules.get(c_name_key, [c_name_key])
                     for ann in existing_anns:
                         ann_class_lower = ann.class_name.lower()
                         should_check = False
@@ -424,11 +427,15 @@ class AutoLabelWorker(QThread):
                             else:
                                 polygon = self.sam_manager.predict_mask_from_box(frame, box)
                             
-                        if polygon and len(polygon) > 0:
-                            x_coords = [pt[0] for pt in polygon]
-                            y_coords = [pt[1] for pt in polygon]
-                            box = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
-                            
+                    if polygon and len(polygon) > 0:
+                        x_coords = [pt[0] for pt in polygon]
+                        y_coords = [pt[1] for pt in polygon]
+                        box = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
+                    elif is_helper:
+                        # Helper refinement could not find the target subpart (no polygon generated).
+                        # Skip emitting this helper detection to avoid creating an unrefined duplicate box.
+                        continue
+                        
                     frame_anns.append({'box': list(box), 'class_name': c_name, 'score': score, 'segmentation': polygon, 'source': 'refined' if is_helper else 'detected', 'original_ann_idx': det.get('original_ann_idx')})
                     
                 self.frame_processed.emit(f_idx, frame_anns)
@@ -848,18 +855,20 @@ class VideoAnnotationTool(QMainWindow):
             if root_path not in sys.path:
                 sys.path.insert(0, root_path)
                 
-            from many2single import merge_dataset_programmatic
+            from many2single import merge_dataset_generator
+            from viat.utils.task_runner import run_task_with_progress
             
             folder = Path(folder_path)
             out_video = folder / 'outvideo.mp4'
             out_labels = folder / 'outvideo.txt'
             
-            self.statusBar.showMessage('Merging videos... This may take a while.')
-            QApplication.processEvents()
+            result = run_task_with_progress(
+                self, 'Merging Videos', 'Merging dataset videos into a single video...',
+                merge_dataset_generator, folder, out_video, out_labels
+            )
             
-            success, msg = merge_dataset_programmatic(folder, out_video, out_labels)
-            
-            if success:
+            if result:
+                msg = result[1] if isinstance(result, tuple) else str(result)
                 QMessageBox.information(self, "Merge Successful", msg)
             self.statusBar.showMessage('Merge complete', 5000)
         except Exception as e:
@@ -1275,12 +1284,15 @@ class VideoAnnotationTool(QMainWindow):
                         'class_id': cat_id
                     })
             else:
-                # Text format (e.g. [[class_id, x1, y1, x2, y2, score]];)
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
+                # Text format (e.g. [[class_id, x1, y1, x2, y2, score]]; or [x1, y1, x2, y2, score])
+                from viat.evaluation.utils.convert_ourformat2mot import strip_header_lines
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    raw_lines = f.readlines()
+                lines, _ = strip_header_lines(raw_lines)
+
                 for f_idx, line in enumerate(lines):
                     clean = line.strip().rstrip(';').strip()
-                    if not clean:
+                    if not clean or clean.upper().startswith("DELETED"):
                         continue
                     try:
                         raw_list = eval(clean)
@@ -1293,10 +1305,56 @@ class VideoAnnotationTool(QMainWindow):
 
                     frame_preds = []
                     for box in raw_list:
-                        if len(box) >= 5:
-                            cid = box[0]
-                            cls_name = str(cid)
-                            # Check classes from active GT or class manager
+                        if not isinstance(box, (list, tuple)):
+                            continue
+                        vals = [float(v) for v in box]
+                        if len(vals) < 4:
+                            continue
+
+                        cid = 0
+                        score = 1.0
+
+                        if len(vals) == 4:
+                            # [x1, y1, x2, y2] or [x, y, w, h]
+                            x1, y1, x2, y2 = vals[0], vals[1], vals[2], vals[3]
+                            if x2 > x1 and y2 > y1:
+                                x, y, w, h = x1, y1, x2 - x1, y2 - y1
+                            else:
+                                x, y, w, h = x1, y1, x2, y2
+                        elif len(vals) == 5:
+                            # Could be [x1, y1, x2, y2, score] or [class_id, x, y, w, h]
+                            if vals[4] <= 1.0:
+                                # [x1, y1, x2, y2, score]
+                                score = vals[4]
+                                x1, y1, x2, y2 = vals[0], vals[1], vals[2], vals[3]
+                                if x2 > x1 and y2 > y1:
+                                    x, y, w, h = x1, y1, x2 - x1, y2 - y1
+                                else:
+                                    x, y, w, h = x1, y1, x2, y2
+                            else:
+                                cid = int(vals[0])
+                                x, y, w, h = vals[1], vals[2], vals[3], vals[4]
+                        else:
+                            # >= 6 elements: [class_id, x1, y1, x2, y2, score, ...]
+                            cid = int(vals[0]) if vals[0].is_integer() else vals[0]
+                            score = vals[5]
+                            x1, y1, x2, y2 = vals[1], vals[2], vals[3], vals[4]
+                            if x2 > x1 and y2 > y1:
+                                x, y, w, h = x1, y1, x2 - x1, y2 - y1
+                            else:
+                                x, y, w, h = x1, y1, x2, y2
+
+                        # Class name mapping
+                        cls_name = str(cid)
+                        if hasattr(self, 'eval_dataset_context') and self.eval_dataset_context:
+                            tgt_classes = self.eval_dataset_context.get('target_classes', [])
+                            cls_map = self.eval_dataset_context.get('class_mapping', {})
+                            if isinstance(cid, int) and 0 <= cid < len(tgt_classes):
+                                cls_name = tgt_classes[cid]
+                            elif str(cid) in cls_map:
+                                cls_name = cls_map[str(cid)]
+
+                        if cls_name == str(cid):
                             if hasattr(self, 'eval_current_classes') and self.eval_current_classes:
                                 if isinstance(cid, int) and 0 <= cid < len(self.eval_current_classes):
                                     cls_name = self.eval_current_classes[cid]
@@ -1304,8 +1362,7 @@ class VideoAnnotationTool(QMainWindow):
                                 if isinstance(cid, int) and 0 <= cid < len(self.class_manager.classes):
                                     cls_name = self.class_manager.classes[cid]
 
-                            x, y, w, h = box[1], box[2], box[3], box[4]
-                            score = float(box[5]) if len(box) > 5 else 1.0
+                        if w > 0 and h > 0:
                             frame_preds.append({
                                 'bbox': [x, y, w, h],
                                 'score': score,
@@ -1340,13 +1397,18 @@ class VideoAnnotationTool(QMainWindow):
             dock.show()
             dock.raise_()
 
-    def load_evaluation_dataset_into_inspector(self, gt_dir, det_dir, video_names, initial_video=None):
+    def load_evaluation_dataset_into_inspector(self, gt_dir, det_dir, video_names, initial_video=None, class_mapping=None, target_classes=None):
         """Loads a multi-video evaluation dataset into the inspector with full video switching support."""
         self.eval_dataset_context = {
             'gt_dir': gt_dir,
             'det_dir': det_dir,
-            'video_names': list(video_names)
+            'video_names': list(video_names),
+            'class_mapping': class_mapping or {},
+            'target_classes': list(target_classes) if target_classes else []
         }
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.set_eval_classes(class_mapping, target_classes)
+
         target_video = initial_video or (video_names[0] if video_names else None)
         if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
             self.evaluation_inspector_dock.set_dataset_videos(video_names, current_video=target_video)
@@ -1365,7 +1427,12 @@ class VideoAnnotationTool(QMainWindow):
 
         gt_dir = self.eval_dataset_context.get('gt_dir', '')
         det_dir = self.eval_dataset_context.get('det_dir', '')
+        cls_map = self.eval_dataset_context.get('class_mapping', {})
+        tgt_classes = self.eval_dataset_context.get('target_classes', [])
         self.eval_current_video_name = video_name
+
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.set_eval_classes(cls_map, tgt_classes)
 
         # 1. Locate and open video file from Ground Truth directory (primary)
         exts = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV', '.m4v']
@@ -1373,8 +1440,10 @@ class VideoAnnotationTool(QMainWindow):
 
         # Check if already loaded in video dataset manager
         if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
-            for v in self.video_dataset_info.all_videos:
-                if v.name == video_name or os.path.splitext(v.filename)[0] == video_name:
+            for v in getattr(self.video_dataset_info, 'all_videos', []):
+                v_name = getattr(v, 'base_name', getattr(v, 'name', ''))
+                v_fn = getattr(v, 'filename', '')
+                if v_name == video_name or os.path.splitext(v_fn)[0] == video_name:
                     self.switch_to_dataset_video(v.path, save_current=False)
                     video_file = v.path
                     break
@@ -1403,41 +1472,76 @@ class VideoAnnotationTool(QMainWindow):
             if video_file and hasattr(self, 'open_video'):
                 self.open_video(video_file)
 
+        # --- Bug Fix: Clear old predictions/matches before loading new video ---
+        # Prevents stale predictions from the previous video showing over the new one.
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.eval_predictions = {}
+            self.canvas.eval_matched_frames = {}
+
         # 2. Locate and import Ground Truth
+        # IMPORTANT: Only use the Raya .txt file — never .json files.
+        # COCO JSON files in the GT folder are evaluation engine artifacts
+        # (all_video.json, etc.) and are NOT valid per-frame GT sources.
         self.frame_annotations = {}
         if hasattr(self, 'canvas'):
             self.canvas.annotations = []
 
-        gt_candidates = [
-            os.path.join(gt_dir, f"{video_name}.txt"),
-            os.path.join(gt_dir, f"{video_name}.json"),
-        ]
+        gt_txt = os.path.join(gt_dir, f"{video_name}.txt")
         self.eval_current_gt_path = None
-        for gtc in gt_candidates:
-            if os.path.exists(gtc):
-                self.eval_current_gt_path = gtc
-                try:
-                    from viat.utils.file_operations import import_annotations as import_annotations_func, detect_annotation_format, extract_raya_classes, import_raya_with_classes_annotations
-                    fmt = detect_annotation_format(gtc)
-                    if fmt == "Raya with classes":
-                        cls_list = extract_raya_classes(gtc) or []
-                        self.eval_current_classes = cls_list
-                        cls_mapping = {i: c for i, c in enumerate(cls_list)}
-                        f_anns, _ = import_raya_with_classes_annotations(gtc, BoundingBox, cls_mapping)
-                        self.frame_annotations = f_anns
+        if os.path.exists(gt_txt):
+            self.eval_current_gt_path = gt_txt
+            try:
+                from viat.utils.file_operations import (
+                    detect_annotation_format, extract_raya_classes,
+                    import_raya_with_classes_annotations, import_raya_annotations
+                )
+                fmt = detect_annotation_format(gt_txt)
+                if fmt == "Raya with classes":
+                    # File has embedded class names in its ### header block
+                    cls_list = extract_raya_classes(gt_txt) or []
+                    self.eval_current_classes = cls_list
+                    # Build index→name mapping from embedded header, then apply
+                    # any explicit remapping from the evaluation dialog on top
+                    cls_mapping = {i: c for i, c in enumerate(cls_list)}
+                    if cls_map:
+                        for k, v in cls_map.items():
+                            try:
+                                cls_mapping[int(k)] = v
+                            except (ValueError, TypeError):
+                                cls_mapping[k] = v
+                    f_anns, _ = import_raya_with_classes_annotations(gt_txt, BoundingBox, cls_mapping)
+                    self.frame_annotations = f_anns
+                else:
+                    # Plain Raya format — apply class mapping from evaluation dialog
+                    # so GT boxes get real class names, not generic fallbacks.
+                    if cls_map:
+                        idx_mapping = {}
+                        for k, v in cls_map.items():
+                            try:
+                                idx_mapping[int(k)] = v
+                            except (ValueError, TypeError):
+                                idx_mapping[k] = v
+                        f_anns, _ = import_raya_with_classes_annotations(gt_txt, BoundingBox, idx_mapping)
                     else:
-                        self.eval_current_classes = list(getattr(self.canvas, 'class_colors', {}).keys())
-                        f_anns, _ = import_annotations_func(gtc, BoundingBox, class_colors=getattr(self.canvas, 'class_colors', None))
-                        self.frame_annotations = f_anns
+                        f_anns, _ = import_raya_annotations(
+                            gt_txt, BoundingBox,
+                            class_colors=getattr(self.canvas, 'class_colors', None)
+                        )
+                    self.eval_current_classes = list(getattr(self.canvas, 'class_colors', {}).keys())
+                    self.frame_annotations = f_anns
 
-                    curr_f = getattr(self, 'current_frame', 0)
-                    if hasattr(self, 'canvas') and curr_f in self.frame_annotations:
-                        self.canvas.annotations = list(self.frame_annotations[curr_f])
-                except Exception as e:
-                    logger.warning(f"Could not import GT file {gtc}: {e}")
-                break
+                curr_f = getattr(self, 'current_frame', 0)
+                if hasattr(self, 'canvas') and curr_f in self.frame_annotations:
+                    self.canvas.annotations = list(self.frame_annotations[curr_f])
+            except Exception as e:
+                logger.warning(f"Could not import GT file {gt_txt}: {e}")
+        else:
+            logger.debug(f"No GT .txt file found for video '{video_name}' in {gt_dir}")
 
-        # 3. Locate and load Predictions
+        # 3. Locate and load Predictions (.txt preferred, then .json for COCO format)
+        # If no prediction file found, activate with empty dict so the canvas/dock
+        # explicitly clear any stale predictions from the previous video.
+        predictions_loaded = False
         det_candidates = [
             os.path.join(det_dir, f"{video_name}.txt"),
             os.path.join(det_dir, f"{video_name}.json"),
@@ -1445,7 +1549,27 @@ class VideoAnnotationTool(QMainWindow):
         for dtc in det_candidates:
             if os.path.exists(dtc):
                 self.load_predictions_file_into_inspector(dtc, video_name)
+                predictions_loaded = True
                 break
+
+        if not predictions_loaded:
+            # Explicitly activate with empty predictions so the canvas/dock are
+            # refreshed and the previous video's boxes are fully removed.
+            self.activate_evaluation_inspection(video_name, {})
+            logger.debug(f"No prediction file found for video '{video_name}' in {det_dir}")
+
+        # 4. Populate Class Filter list in Inspector Dock
+        if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
+            all_known_classes = set(tgt_classes)
+            if hasattr(self, 'eval_current_classes') and self.eval_current_classes:
+                all_known_classes.update(self.eval_current_classes)
+            if hasattr(self, 'frame_annotations'):
+                for f_anns in self.frame_annotations.values():
+                    for a in f_anns:
+                        cname = getattr(a, 'class_name', None)
+                        if cname:
+                            all_known_classes.add(cname)
+            self.evaluation_inspector_dock.set_available_classes(sorted(list(all_known_classes)))
 
     def save_evaluation_ground_truth(self, show_dialog=True):
         """Saves current annotations (including promoted FPs and modifications) to the ground truth file."""
@@ -3140,18 +3264,20 @@ class VideoAnnotationTool(QMainWindow):
                 if root_path not in sys.path:
                     sys.path.insert(0, root_path)
                     
-                from many2single import merge_dataset_programmatic
+                from many2single import merge_dataset_generator
+                from viat.utils.task_runner import run_task_with_progress
                 
                 folder = Path(default_dir)
                 out_video = folder / 'outvideo.mp4'
                 out_labels = folder / 'outvideo.txt'
                 
-                self.statusBar.showMessage('Merging videos... This may take a while.')
-                QApplication.processEvents()
+                result = run_task_with_progress(
+                    self, 'Merging Videos', 'Merging dataset videos into a single video...',
+                    merge_dataset_generator, folder, out_video, out_labels
+                )
                 
-                success, msg = merge_dataset_programmatic(folder, out_video, out_labels)
-                
-                if success:
+                if result:
+                    msg = result[1] if isinstance(result, tuple) else str(result)
                     QMessageBox.information(self, "Merge Successful", msg)
                 self.statusBar.showMessage('Merge complete', 5000)
             except Exception as e:
@@ -3521,14 +3647,29 @@ class VideoAnnotationTool(QMainWindow):
         root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if root_path not in sys.path:
             sys.path.insert(0, root_path)
-        from many2single import merge_dataset_programmatic
+        from many2single import merge_dataset_generator
+        from viat.utils.task_runner import run_task_with_progress
 
-        self.statusBar.showMessage('Merging videos... This may take a while.', 10000)
-        success, msg = merge_dataset_programmatic(Path(folder), Path(out_video), Path(out_labels))
-        if success:
+        result = run_task_with_progress(
+            self, 'Merging Videos', 'Merging dataset videos into a single video...',
+            merge_dataset_generator, Path(folder), Path(out_video), Path(out_labels)
+        )
+        if result:
+            msg = result[1] if isinstance(result, tuple) else str(result)
             QMessageBox.information(self, "Merge Successful", msg)
-        else:
-            QMessageBox.critical(self, "Merge Error", f"Failed to merge videos:\n{msg}")
+
+    @log_exceptions
+    def open_video_to_yolo_dialog(self):
+        """Open dialog to convert a video dataset into a YOLO image dataset with smart cropping and class balancing."""
+        default_dir = ""
+        if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
+            default_dir = self.video_dataset_info.root
+        elif hasattr(self, 'video_filename') and self.video_filename:
+            default_dir = os.path.dirname(self.video_filename)
+
+        from viat.widgets.video_to_yolo_dialog import VideoToYoloDialog
+        dialog = VideoToYoloDialog(self, default_source_dir=default_dir)
+        dialog.exec_()
 
     def _process_frame_metadata(self, frame, frame_num):
         """Process the frame according to loaded metadata (e.g., cropping padded regions)."""
@@ -4268,6 +4409,7 @@ Would you like to load it?"""
             self.video_manager_dock.next_video_requested.connect(self.on_next_video_requested)
             self.video_manager_dock.next_unannotated_requested.connect(self.on_next_unannotated_video_requested)
             self.video_manager_dock.fast_export_requested.connect(self.fast_export_video_and_next)
+            self.video_manager_dock.convert_to_yolo_requested.connect(self.open_video_to_yolo_dialog)
             self.video_manager_dock.sam_tracking_toggled.connect(self.toggle_sam_interactive_mode)
             self.video_manager_dock.remove_video_requested.connect(self.remove_current_cut)
 

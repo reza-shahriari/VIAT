@@ -4,11 +4,11 @@ import glob
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QFileDialog, QComboBox, QListWidget, QMessageBox
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
+    QPushButton, QFileDialog, QComboBox, QCheckBox, QListWidget, QMessageBox
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QBrush
 
 def compute_iou(box1, box2):
     # COCO format: [x, y, width, height]
@@ -28,11 +28,12 @@ class EvaluatorVisualizer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VIAT - Advanced Evaluation Visualizer")
-        self.resize(1200, 800)
+        self.resize(1250, 850)
         
         self.gt_data = {}
         self.dt_data = {}
         self.categories = {}
+        self.video_caps = {}
         
         self.current_video_name = None
         self.current_frame_id = None
@@ -50,7 +51,7 @@ class EvaluatorVisualizer(QMainWindow):
         # Left Panel (Controls)
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_panel.setFixedWidth(300)
+        left_panel.setFixedWidth(320)
         
         btn_load_json = QPushButton("Load Evaluation JSONs Folder")
         btn_load_json.clicked.connect(self.load_jsons)
@@ -70,12 +71,47 @@ class EvaluatorVisualizer(QMainWindow):
         self.combo_class.currentIndexChanged.connect(self.update_view)
         left_layout.addWidget(QLabel("Filter by Class:"))
         left_layout.addWidget(self.combo_class)
-        
-        self.combo_type = QComboBox()
-        self.combo_type.addItems(["All", "TP (True Positive)", "FP (False Positive)", "FN (False Negative)"])
-        self.combo_type.currentIndexChanged.connect(self.update_view)
-        left_layout.addWidget(QLabel("Filter by Type:"))
-        left_layout.addWidget(self.combo_type)
+
+        # Visibility Checkboxes
+        left_layout.addWidget(QLabel("<b>Visibility Ticks:</b>"))
+        grid = QGridLayout()
+        grid.setSpacing(4)
+
+        self.chk_show_dt = QCheckBox("Detections (DT)")
+        self.chk_show_dt.setChecked(True)
+        self.chk_show_dt.stateChanged.connect(self.update_view)
+
+        self.chk_show_gt = QCheckBox("Ground Truth (GT)")
+        self.chk_show_gt.setChecked(True)
+        self.chk_show_gt.stateChanged.connect(self.update_view)
+
+        self.chk_show_tp = QCheckBox("TP (True Positives)")
+        self.chk_show_tp.setChecked(True)
+        self.chk_show_tp.setStyleSheet("color: #00e5ff; font-weight: bold;")
+        self.chk_show_tp.stateChanged.connect(self.update_view)
+
+        self.chk_show_fp = QCheckBox("FP (False Positives)")
+        self.chk_show_fp.setChecked(True)
+        self.chk_show_fp.setStyleSheet("color: #ff334b; font-weight: bold;")
+        self.chk_show_fp.stateChanged.connect(self.update_view)
+
+        self.chk_show_fn = QCheckBox("FN (False Negatives)")
+        self.chk_show_fn.setChecked(True)
+        self.chk_show_fn.setStyleSheet("color: #ff9900; font-weight: bold;")
+        self.chk_show_fn.stateChanged.connect(self.update_view)
+
+        self.chk_show_tn = QCheckBox("Ignored / Non-Eval GTs")
+        self.chk_show_tn.setChecked(True)
+        self.chk_show_tn.setStyleSheet("color: #aaaaaa; font-style: italic;")
+        self.chk_show_tn.stateChanged.connect(self.update_view)
+
+        grid.addWidget(self.chk_show_dt, 0, 0)
+        grid.addWidget(self.chk_show_gt, 0, 1)
+        grid.addWidget(self.chk_show_tp, 1, 0)
+        grid.addWidget(self.chk_show_fp, 1, 1)
+        grid.addWidget(self.chk_show_fn, 2, 0)
+        grid.addWidget(self.chk_show_tn, 2, 1)
+        left_layout.addLayout(grid)
         
         # Next / Prev buttons for quick jumping
         jump_layout = QHBoxLayout()
@@ -175,17 +211,51 @@ class EvaluatorVisualizer(QMainWindow):
         base_flat = os.path.join(self.base_video_path, os.path.basename(file_name))
         if os.path.exists(base_flat): return base_flat
         return None
+
+    def read_frame_image(self, frame_info, frame_idx):
+        path = self.get_frame_path(frame_info['file_name'])
+        if path and os.path.exists(path) and not path.lower().endswith(('.mp4', '.avi', '.mkv', '.mov')):
+            img = cv2.imread(path)
+            if img is not None:
+                return img
+
+        # Try opening base video file
+        vid_candidates = [
+            os.path.join(self.base_video_path, os.path.splitext(self.current_video_name)[0] + ext)
+            for ext in ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.MOV']
+        ]
+        for vc in vid_candidates:
+            if os.path.exists(vc):
+                if vc not in self.video_caps:
+                    self.video_caps[vc] = cv2.VideoCapture(vc)
+                cap = self.video_caps[vc]
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    return frame
+        return None
         
     def get_matches(self, frame_id, class_filter=None):
         gt_all = self.gt_data[self.current_video_name].get('annotations', [])
         dt_all = self.dt_data.get(self.current_video_name, {}).get('annotations', [])
         
-        gt_frame = [g for g in gt_all if g['image_id'] == frame_id]
-        dt_frame = [d for d in dt_all if d['image_id'] == frame_id]
+        raw_gt = [g for g in gt_all if g['image_id'] == frame_id]
+        raw_dt = [d for d in dt_all if d['image_id'] == frame_id]
+
+        gt_frame = []
+        ignored_gt = []
+        for g in raw_gt:
+            if g.get('ignore', False) or g.get('iscrowd', 0):
+                ignored_gt.append(g)
+            else:
+                gt_frame.append(g)
+
+        dt_frame = raw_dt
         
         if class_filter is not None:
             gt_frame = [g for g in gt_frame if g['category_id'] == class_filter]
             dt_frame = [d for d in dt_frame if d['category_id'] == class_filter]
+            ignored_gt = [g for g in ignored_gt if g['category_id'] == class_filter]
             
         matched_gt = set()
         matched_dt = set()
@@ -211,28 +281,23 @@ class EvaluatorVisualizer(QMainWindow):
         fp = [d for d in dt_frame if d['id'] not in matched_dt]
         fn = [g for g in gt_frame if g['id'] not in matched_gt]
         
-        return tp, fp, fn
+        return tp, fp, fn, ignored_gt
         
     def update_view(self):
         if not self.current_video_name or not self.current_frame_id: return
         
+        idx = self.list_frames.currentRow()
         frame_info = next((f for f in self.frames_list if f['id'] == self.current_frame_id), None)
         if not frame_info: return
         
-        path = self.get_frame_path(frame_info['file_name'])
+        img = self.read_frame_image(frame_info, idx if idx >= 0 else 0)
         
         pixmap = None
-        if path:
-            if path.lower().endswith(('.mp4', '.avi', '.mkv')):
-                self.lbl_image.setText("Please set base path to extracted frame images.\nDirect video reading is not fully supported.")
-                return
-            else:
-                img = cv2.imread(path)
-                if img is not None:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    h, w, c = img.shape
-                    qimg = QImage(img.data, w, h, w*c, QImage.Format_RGB888)
-                    pixmap = QPixmap.fromImage(qimg)
+        if img is not None:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            h, w, c = img_rgb.shape
+            qimg = QImage(img_rgb.data, w, h, w*c, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
         
         if pixmap is None:
             w, h = frame_info.get('width', 1920), frame_info.get('height', 1080)
@@ -242,33 +307,42 @@ class EvaluatorVisualizer(QMainWindow):
         painter = QPainter(pixmap)
         
         class_filter = self.combo_class.currentData()
-        type_filter = self.combo_type.currentText()
         
-        tp, fp, fn = self.get_matches(self.current_frame_id, class_filter)
+        tp, fp, fn, ignored_gt = self.get_matches(self.current_frame_id, class_filter)
         
-        def draw_box(box, color, label):
+        def draw_box(box, color, label, is_dashed=False):
             x, y, w, h = box
-            painter.setPen(QPen(color, 3))
+            pen = QPen(color, 3, Qt.DashLine if is_dashed else Qt.SolidLine)
+            painter.setPen(pen)
             painter.drawRect(int(x), int(y), int(w), int(h))
             painter.setPen(Qt.white)
             painter.setBackground(color)
             painter.setBackgroundMode(Qt.OpaqueMode)
             painter.drawText(int(x), int(y)-5, label)
 
-        if "All" in type_filter or "TP" in type_filter:
-            for d in tp:
-                cat_name = self.categories.get(d['category_id'], str(d['category_id']))
-                draw_box(d['bbox'], Qt.green, f"TP: {cat_name} {d.get('score',1):.2f}")
-                
-        if "All" in type_filter or "FP" in type_filter:
-            for d in fp:
-                cat_name = self.categories.get(d['category_id'], str(d['category_id']))
-                draw_box(d['bbox'], Qt.red, f"FP: {cat_name} {d.get('score',1):.2f}")
-                
-        if "All" in type_filter or "FN" in type_filter:
+        # 1. Ignored / Non-Eval GTs
+        if self.chk_show_tn.isChecked():
+            for g in ignored_gt:
+                cat_name = self.categories.get(g['category_id'], str(g['category_id']))
+                draw_box(g['bbox'], QColor(160, 160, 160), f"[IGNORED] {cat_name}", is_dashed=True)
+
+        # 2. GT Missed (FN)
+        if self.chk_show_gt.isChecked() and self.chk_show_fn.isChecked():
             for g in fn:
                 cat_name = self.categories.get(g['category_id'], str(g['category_id']))
-                draw_box(g['bbox'], Qt.blue, f"FN: {cat_name} (Missed)")
+                draw_box(g['bbox'], QColor(255, 152, 0), f"FN: {cat_name} (Missed)", is_dashed=True)
+
+        # 3. DT True Positives (TP)
+        if self.chk_show_dt.isChecked() and self.chk_show_tp.isChecked():
+            for d in tp:
+                cat_name = self.categories.get(d['category_id'], str(d['category_id']))
+                draw_box(d['bbox'], QColor(0, 229, 255), f"TP: {cat_name} {d.get('score',1):.2f}")
+
+        # 4. DT False Positives (FP)
+        if self.chk_show_dt.isChecked() and self.chk_show_fp.isChecked():
+            for d in fp:
+                cat_name = self.categories.get(d['category_id'], str(d['category_id']))
+                draw_box(d['bbox'], QColor(255, 45, 85), f"FP: {cat_name} {d.get('score',1):.2f}", is_dashed=True)
                 
         painter.end()
         self.lbl_image.setPixmap(pixmap.scaled(self.lbl_image.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -282,7 +356,6 @@ class EvaluatorVisualizer(QMainWindow):
     def jump_match(self, direction):
         if not self.frames_list: return
         class_filter = self.combo_class.currentData()
-        type_filter = self.combo_type.currentText()
         
         idx = self.list_frames.currentRow()
         while True:
@@ -292,13 +365,12 @@ class EvaluatorVisualizer(QMainWindow):
                 break
                 
             frame_id = self.frames_list[idx]['id']
-            tp, fp, fn = self.get_matches(frame_id, class_filter)
+            tp, fp, fn, _ = self.get_matches(frame_id, class_filter)
             
             found = False
-            if "TP" in type_filter and tp: found = True
-            elif "FP" in type_filter and fp: found = True
-            elif "FN" in type_filter and fn: found = True
-            elif "All" in type_filter and (tp or fp or fn): found = True
+            if self.chk_show_tp.isChecked() and tp: found = True
+            elif self.chk_show_fp.isChecked() and fp: found = True
+            elif self.chk_show_fn.isChecked() and fn: found = True
             
             if found:
                 self.list_frames.setCurrentRow(idx)

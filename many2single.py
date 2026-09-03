@@ -242,7 +242,11 @@ def normalize_name(name: str) -> str:
     return name.strip().lower()
 
 
-def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, fourcc: str = "avc1"):
+def merge_dataset_generator(folder: Path, out_video: Path, out_labels: Path, fourcc: str = "avc1"):
+    """
+    Generator that merges a folder of (video, annotation.txt) pairs into a single video + label file.
+    Yields (progress_percent: int, status_message: str).
+    """
     if not folder.is_dir():
         raise ValueError(f"'{folder}' is not a directory")
 
@@ -250,15 +254,13 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
     if not pairs:
         raise ValueError(f"No valid video/label pairs found in '{folder}'")
 
-    print(f"Found {len(pairs)} video/label pairs (in order):")
-    for p in pairs:
-        print(f"  [{p['name']}]: {p['video_path'].name}  |  {p['label_path'].name}")
+    yield 2, f"Found {len(pairs)} video/label pairs. Scanning headers..."
 
     # ---- Pass 1: parse all headers, build global class list, and read all label lines ----
     global_names = []          # display names, first-appearance order
     global_name_to_idx = {}    # normalized name -> global idx
-
-    per_video_data = []  # list of dicts: {name, video_path, local_idx_to_global_idx, label_lines}
+    per_video_data = []        # list of dicts: {name, video_path, local_idx_to_global_idx, label_lines}
+    total_est_frames = 0
 
     for p in pairs:
         with open(p["label_path"], "r", encoding="utf-8") as f:
@@ -285,6 +287,7 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
         while body_lines and body_lines[-1].strip() == "":
             body_lines.pop()
 
+        total_est_frames += len(body_lines)
         per_video_data.append({
             "name": p["name"],
             "video_path": p["video_path"],
@@ -292,10 +295,6 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
             "local_idx_to_global_idx": local_idx_to_global_idx,
             "body_lines": body_lines,
         })
-
-    print(f"\nGlobal class list ({len(global_names)} classes):")
-    for i, name in enumerate(global_names):
-        print(f"  {i}: {name}")
 
     # ---- Pass 2: open first video to get fps/resolution for the writer ----
     first_cap = cv2.VideoCapture(str(per_video_data[0]["video_path"]))
@@ -305,8 +304,6 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
     width = int(first_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(first_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     first_cap.release()
-
-    print(f"\nOutput video params: {width}x{height} @ {fps:.3f}fps")
 
     fourcc_val = cv2.VideoWriter_fourcc(*fourcc)
     writer = cv2.VideoWriter(str(out_video), fourcc_val, fps, (width, height))
@@ -321,19 +318,15 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
     total_frames_in = 0
     total_frames_kept = 0
     total_frames_deleted = 0
+    total_vids = len(per_video_data)
 
-    for vd in per_video_data:
+    for v_idx, vd in enumerate(per_video_data):
         cap = cv2.VideoCapture(str(vd["video_path"]))
         if not cap.isOpened():
             raise ValueError(f"ERROR: could not open {vd['video_path']}")
 
         n_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         n_label_lines = len(vd["body_lines"])
-        if n_video_frames != n_label_lines:
-            print(f"WARNING: {vd['video_path'].name} has {n_video_frames} frames but "
-                  f"{vd['label_path'].name} has {n_label_lines} label lines. "
-                  f"Will process min({n_video_frames},{n_label_lines}).", file=sys.stderr)
-
         local_idx_to_global_idx = vd["local_idx_to_global_idx"]
 
         frame_idx = 0
@@ -342,8 +335,6 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
             if not ret:
                 break
             if frame_idx >= n_label_lines:
-                print(f"WARNING: {vd['video_path'].name} has more frames than label lines; "
-                      f"stopping at frame {frame_idx} for this video", file=sys.stderr)
                 break
 
             total_frames_in += 1
@@ -377,9 +368,11 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
             total_frames_kept += 1
             frame_idx += 1
 
+            if total_frames_in % 10 == 0:
+                pct = min(98, int((total_frames_in / max(1, total_est_frames)) * 95) + 3)
+                yield pct, f"Merging [{v_idx + 1}/{total_vids}] {vd['video_path'].name} ({frame_idx}/{n_label_lines} frames)..."
+
         cap.release()
-        print(f"Processed {vd['video_path'].name}: {frame_idx} frames read, "
-              f"{n_video_frames - frame_idx if n_video_frames > frame_idx else 0} unread remainder")
 
     writer.release()
 
@@ -393,13 +386,18 @@ def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, 
         f.write("\n".join(header_lines) + "\n")
         f.write("\n".join(out_label_lines) + "\n")
 
-    print(f"\nDone.")
-    print(f"  Frames read total:    {total_frames_in}")
-    print(f"  Frames deleted:       {total_frames_deleted}")
-    print(f"  Frames kept/written:  {total_frames_kept}")
-    print(f"  Output video:  {out_video}")
-    print(f"  Output labels: {out_labels}")
-    return True, f"Merged successfully. Frames kept: {total_frames_kept}"
+    summary_msg = f"Merged {total_vids} videos successfully! ({total_frames_kept} frames kept, {total_frames_deleted} deleted)"
+    yield 100, summary_msg
+    return True, summary_msg
+
+
+def merge_dataset_programmatic(folder: Path, out_video: Path, out_labels: Path, fourcc: str = "avc1"):
+    """Synchronous programmatic wrapper for CLI and direct callers."""
+    gen = merge_dataset_generator(folder, out_video, out_labels, fourcc=fourcc)
+    last_item = None
+    for item in gen:
+        last_item = item
+    return True, last_item[1] if isinstance(last_item, tuple) else "Merged successfully."
 
 
 def main():

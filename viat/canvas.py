@@ -152,8 +152,17 @@ class VideoCanvas(QWidget):
         self.eval_filter = "ALL"          # "ALL", "ERRORS", "FP", "FN", "TP"
         self.eval_conf_thr = 0.50
         self.eval_iou_thr = 0.50
+        self.eval_show_dt = True
+        self.eval_show_gt = True
+        self.eval_show_tp = True
+        self.eval_show_fp = True
+        self.eval_show_fn = True
+        self.eval_show_tn = True
+        self.eval_class_filter = "ALL"
+        self.eval_class_mapping = {}
+        self.eval_target_classes = []
         self.eval_error_frames = set()   # set of frame_idx with FP or FN
-        self.eval_matched_frames = {}    # frame_idx -> {'tps': [...], 'fps': [...], 'fns': [...]}
+        self.eval_matched_frames = {}    # frame_idx -> {'tps': [...], 'fps': [...], 'fns': [...], 'ignored_gts': [...]}
         self.eval_selected_prediction = None
         self.eval_hovered_prediction = None
 
@@ -1097,6 +1106,26 @@ class VideoCanvas(QWidget):
                 annotation = None
             else:
                 annotation = self.find_annotation_at_pos(event.pos())
+
+            # Handle prediction selection in Evaluation Inspection Mode
+            if getattr(self, "eval_mode", False):
+                curr_f = getattr(self.main_window, 'current_frame', 0)
+                raw_preds = self.eval_predictions.get(curr_f, [])
+                active_preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
+                clicked_pred = None
+                for p in reversed(active_preds):
+                    pb = p.get('bbox', [0, 0, 0, 0])
+                    px1, py1, pw, ph = pb if isinstance(pb, (list, tuple)) else [pb.x(), pb.y(), pb.width(), pb.height()]
+                    q_rect = QRect(int(px1), int(py1), int(pw), int(ph))
+                    disp_rect = self.image_to_display_rect(q_rect)
+                    if disp_rect.contains(event.pos()):
+                        clicked_pred = p
+                        break
+                if clicked_pred is not None:
+                    self.eval_selected_prediction = clicked_pred
+                    self.update()
+                else:
+                    self.eval_selected_prediction = None
             
             # If we found an annotation, handle selection and dragging
             if annotation:
@@ -2583,6 +2612,24 @@ class VideoCanvas(QWidget):
             self.recompute_eval_matches()
         self.update()
 
+    def set_eval_classes(self, class_mapping=None, target_classes=None):
+        """Sets class mapping and target classes to distinguish evaluated vs ignored classes."""
+        self.eval_class_mapping = class_mapping or {}
+        self.eval_target_classes = list(target_classes) if target_classes else []
+        self.recompute_eval_matches()
+        self.update()
+
+    def set_eval_visibility_flags(self, show_dt=True, show_gt=True, show_tp=True, show_fp=True, show_fn=True, show_tn=True, class_filter="ALL"):
+        """Sets display flags for Detections, GT, TP, FP, FN, and Ignored GTs (TN/Non-Eval)."""
+        self.eval_show_dt = bool(show_dt)
+        self.eval_show_gt = bool(show_gt)
+        self.eval_show_tp = bool(show_tp)
+        self.eval_show_fp = bool(show_fp)
+        self.eval_show_fn = bool(show_fn)
+        self.eval_show_tn = bool(show_tn)
+        self.eval_class_filter = str(class_filter) if class_filter else "ALL"
+        self.update()
+
     def set_eval_predictions(self, predictions_dict: dict, conf_thr=0.50, iou_thr=0.50):
         """
         Sets the predictions dictionary.
@@ -2612,15 +2659,30 @@ class VideoCanvas(QWidget):
         self.eval_filter = str(filter_mode).upper()
         self.update()
 
+    def _is_class_ignored(self, cls_name_or_id):
+        """Checks if a GT class was excluded or ignored in evaluation."""
+        if not hasattr(self, 'eval_class_mapping') or not self.eval_class_mapping:
+            if hasattr(self, 'eval_target_classes') and self.eval_target_classes:
+                return str(cls_name_or_id) not in self.eval_target_classes
+            return False
+
+        mapping = self.eval_class_mapping
+        mapped = mapping.get(cls_name_or_id, mapping.get(str(cls_name_or_id), cls_name_or_id))
+        if mapped == "__IGNORE__" or str(mapped).upper().startswith("[IGNORE]"):
+            return True
+        if hasattr(self, 'eval_target_classes') and self.eval_target_classes:
+            return str(mapped) not in self.eval_target_classes
+        return False
+
     def recompute_eval_matches(self):
         """
-        Recomputes True Positives, False Positives, and False Negatives across all frames
-        using current eval_conf_thr and eval_iou_thr. Updates eval_error_frames.
+        Recomputes True Positives, False Positives, False Negatives, and Ignored GTs (TNs)
+        across all frames using current eval_conf_thr and eval_iou_thr. Updates eval_error_frames.
         """
         self.eval_error_frames = set()
         self.eval_matched_frames = {}
 
-        total_tp, total_fp, total_fn = 0, 0, 0
+        total_tp, total_fp, total_fn, total_tn = 0, 0, 0, 0
 
         # Get all relevant frame indices
         all_frames = set(self.eval_predictions.keys())
@@ -2634,35 +2696,38 @@ class VideoCanvas(QWidget):
         all_frames.add(curr_frame)
 
         for f_idx in all_frames:
-            # 1. Get GT boxes for frame
-            gt_boxes = []
+            # 1. Get GT boxes for frame, categorizing into evaluated vs ignored
+            eval_gt_boxes = []
+            ignored_gt_boxes = []
+
+            raw_anns = []
             if hasattr(self.main_window, 'frame_annotations') and f_idx in self.main_window.frame_annotations:
-                anns = self.main_window.frame_annotations[f_idx]
-                for ann in anns:
-                    r = ann.rect
-                    gt_boxes.append({
-                        'bbox': [r.x(), r.y(), r.width(), r.height()],
-                        'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
-                        'ann': ann
-                    })
+                raw_anns = self.main_window.frame_annotations[f_idx]
             elif f_idx == curr_frame:
-                for ann in self.annotations:
-                    r = ann.rect
-                    gt_boxes.append({
-                        'bbox': [r.x(), r.y(), r.width(), r.height()],
-                        'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
-                        'ann': ann
-                    })
+                raw_anns = self.annotations
+
+            for ann in raw_anns:
+                r = ann.rect
+                c_name = getattr(ann, 'class_name', getattr(self, 'current_class', 'Object'))
+                gt_item = {
+                    'bbox': [r.x(), r.y(), r.width(), r.height()],
+                    'class_name': c_name,
+                    'ann': ann,
+                    'is_ignored': self._is_class_ignored(c_name)
+                }
+                if gt_item['is_ignored']:
+                    ignored_gt_boxes.append(gt_item)
+                else:
+                    eval_gt_boxes.append(gt_item)
 
             # 2. Get Predictions for frame above confidence threshold
             raw_preds = self.eval_predictions.get(f_idx, [])
             preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
 
-            # 3. Match GT and Predictions
-            gt_matched = [False] * len(gt_boxes)
+            # 3. Match Evaluated GT and Predictions
+            gt_matched = [False] * len(eval_gt_boxes)
             pred_matched = [False] * len(preds)
 
-            # Sort predictions descending by score
             sorted_pred_indices = sorted(range(len(preds)), key=lambda i: preds[i].get('score', 0), reverse=True)
 
             for p_i in sorted_pred_indices:
@@ -2673,7 +2738,7 @@ class VideoCanvas(QWidget):
 
                 best_iou = 0.0
                 best_g = -1
-                for g_i, gt in enumerate(gt_boxes):
+                for g_i, gt in enumerate(eval_gt_boxes):
                     if gt_matched[g_i]:
                         continue
                     gb = gt['bbox']
@@ -2698,16 +2763,19 @@ class VideoCanvas(QWidget):
 
             frame_tps = [preds[i] for i, m in enumerate(pred_matched) if m]
             frame_fps = [preds[i] for i, m in enumerate(pred_matched) if not m]
-            frame_fns = [gt_boxes[i] for i, m in enumerate(gt_matched) if not m]
+            frame_fns = [eval_gt_boxes[i] for i, m in enumerate(gt_matched) if not m]
 
             total_tp += len(frame_tps)
             total_fp += len(frame_fps)
             total_fn += len(frame_fns)
+            total_tn += len(ignored_gt_boxes)
 
             self.eval_matched_frames[f_idx] = {
                 'tps': frame_tps,
                 'fps': frame_fps,
                 'fns': frame_fns,
+                'ignored_gts': ignored_gt_boxes,
+                'eval_gt_boxes': eval_gt_boxes,
                 'gt_matched': gt_matched,
                 'pred_matched': pred_matched
             }
@@ -2718,16 +2786,17 @@ class VideoCanvas(QWidget):
         # Notify dock if available
         if hasattr(self.main_window, 'evaluation_inspector_dock') and self.main_window.evaluation_inspector_dock:
             dock = self.main_window.evaluation_inspector_dock
-            dock.update_metrics_display(total_tp, total_fp, total_fn)
+            dock.update_metrics_display(total_tp, total_fp, total_fn, total_tn)
             dock.update_error_frames_list(self.eval_error_frames)
 
     def get_eval_metrics_summary(self):
-        """Returns aggregate TP, FP, FN, Precision, Recall, F1 for active thresholds."""
-        total_tp, total_fp, total_fn = 0, 0, 0
+        """Returns aggregate TP, FP, FN, TN, Precision, Recall, F1 for active thresholds."""
+        total_tp, total_fp, total_fn, total_tn = 0, 0, 0, 0
         for data in self.eval_matched_frames.values():
             total_tp += len(data.get('tps', []))
             total_fp += len(data.get('fps', []))
             total_fn += len(data.get('fns', []))
+            total_tn += len(data.get('ignored_gts', []))
 
         precision = (total_tp / (total_tp + total_fp)) if (total_tp + total_fp) > 0 else 0.0
         recall = (total_tp / (total_tp + total_fn)) if (total_tp + total_fn) > 0 else 0.0
@@ -2737,6 +2806,7 @@ class VideoCanvas(QWidget):
             'tp': total_tp,
             'fp': total_fp,
             'fn': total_fn,
+            'tn': total_tn,
             'precision': precision,
             'recall': recall,
             'f1': f1,
@@ -2775,8 +2845,8 @@ class VideoCanvas(QWidget):
 
     def draw_evaluation_overlay(self, painter, update_rect):
         """
-        Draws Ground Truth and Model Predictions in Evaluation Inspection Mode.
-        Clearly annotates every bounding box with its CLASS NAME and EVALUATION STATUS.
+        Draws Ground Truth (TP, FN, Ignored/Non-Eval) and Model Predictions (TP, FP)
+        with individual visibility toggles for DT, GT, TP, FP, FN, and Ignored GTs.
         """
         curr_frame = getattr(self.main_window, 'current_frame', 0)
 
@@ -2786,89 +2856,113 @@ class VideoCanvas(QWidget):
             self.recompute_eval_matches()
             frame_match_data = self.eval_matched_frames.get(curr_frame, {})
 
+        eval_gt_boxes = frame_match_data.get('eval_gt_boxes', [])
+        ignored_gt_boxes = frame_match_data.get('ignored_gts', [])
         gt_matched = frame_match_data.get('gt_matched', [])
         pred_matched = frame_match_data.get('pred_matched', [])
 
-        # 1. Collect Ground Truth annotations
-        gt_boxes = []
-        for ann in self.annotations:
-            r = ann.rect
-            gt_boxes.append({
-                'rect': r,
-                'class_name': getattr(ann, 'class_name', getattr(self, 'current_class', 'Object')),
-                'ann': ann
-            })
+        show_dt = getattr(self, 'eval_show_dt', True)
+        show_gt = getattr(self, 'eval_show_gt', True)
+        show_tp = getattr(self, 'eval_show_tp', True)
+        show_fp = getattr(self, 'eval_show_fp', True)
+        show_fn = getattr(self, 'eval_show_fn', True)
+        show_tn = getattr(self, 'eval_show_tn', True)
+        c_filter = getattr(self, 'eval_class_filter', 'ALL')
 
-        # 2. Collect Predictions above confidence threshold
-        raw_preds = self.eval_predictions.get(curr_frame, [])
-        active_preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
-
-        # 3. Draw Ground Truths
-        for g_idx, gt in enumerate(gt_boxes):
-            is_tp = gt_matched[g_idx] if g_idx < len(gt_matched) else False
-            disp_rect = self.image_to_display_rect(gt['rect'])
-            if disp_rect.width() <= 0 or disp_rect.height() <= 0:
-                continue
-
-            cls_name = gt.get('class_name', 'Object')
-
-            if is_tp:
-                # True Positive Ground Truth (Vibrant Green)
-                if self.eval_filter in ["FP", "FN", "ERRORS"]:
+        # 1. Draw Ignored / Non-Evaluated Ground Truth boxes (TN / Non-Eval)
+        if show_tn:
+            for ign_gt in ignored_gt_boxes:
+                cls_name = ign_gt.get('class_name', 'Object')
+                if c_filter != "ALL" and str(cls_name).lower() != str(c_filter).lower():
                     continue
-                border_color = QColor(0, 230, 118)  # Green
-                bg_badge = QColor(0, 180, 80, 220)
-                badge_text = f"[GT: TP] {cls_name}"
-                pen = QPen(border_color, 2, Qt.SolidLine)
-            else:
-                # False Negative / Missed Object (Vibrant Orange)
-                if self.eval_filter in ["FP", "TP"]:
+
+                r = ign_gt['ann'].rect
+                disp_rect = self.image_to_display_rect(r)
+                if disp_rect.width() <= 0 or disp_rect.height() <= 0:
                     continue
-                border_color = QColor(255, 152, 0)  # Orange
-                bg_badge = QColor(230, 100, 0, 230)
-                badge_text = f"[FN: MISSED] {cls_name}"
-                pen = QPen(border_color, 3, Qt.DashLine)
 
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(disp_rect)
-            self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255))
+                border_color = QColor(160, 160, 160, 200)
+                bg_badge = QColor(90, 90, 90, 220)
+                badge_text = f"[IGNORED GT] {cls_name}"
+                pen = QPen(border_color, 2, Qt.DotLine)
 
-        # 4. Draw Predictions
-        for p_idx, p in enumerate(active_preds):
-            is_tp = pred_matched[p_idx] if p_idx < len(pred_matched) else False
-            pb = p.get('bbox', [0, 0, 0, 0])
-            px1, py1, pw, ph = pb if isinstance(pb, (list, tuple)) else [pb.x(), pb.y(), pb.width(), pb.height()]
-            q_rect = QRect(int(px1), int(py1), int(pw), int(ph))
-            disp_rect = self.image_to_display_rect(q_rect)
-            if disp_rect.width() <= 0 or disp_rect.height() <= 0:
-                continue
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(disp_rect)
+                self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(230, 230, 230))
 
-            score = p.get('score', 1.0)
-            cls_name = p.get('class_name', str(p.get('class_id', 'Object')))
-            is_selected = (p == self.eval_selected_prediction)
-
-            if is_tp:
-                # True Positive Prediction (Cyan)
-                if self.eval_filter in ["FP", "FN", "ERRORS"]:
+        # 2. Draw Evaluated Ground Truths (TP and FN)
+        if show_gt:
+            for g_idx, gt in enumerate(eval_gt_boxes):
+                is_tp = gt_matched[g_idx] if g_idx < len(gt_matched) else False
+                cls_name = gt.get('class_name', 'Object')
+                if c_filter != "ALL" and str(cls_name).lower() != str(c_filter).lower():
                     continue
-                border_color = QColor(0, 229, 255)  # Cyan
-                bg_badge = QColor(0, 160, 200, 230)
-                badge_text = f"[TP] {cls_name} ({score:.2f})"
-                pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.SolidLine)
-                fill_color = QColor(0, 229, 255, 20)
-            else:
-                # False Positive Prediction (Vibrant Red)
-                if self.eval_filter in ["FN", "TP"]:
-                    continue
-                border_color = QColor(255, 45, 85)  # Red
-                bg_badge = QColor(220, 20, 60, 235)
-                badge_text = f"[FP] {cls_name} ({score:.2f})"
-                pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.DashLine)
-                fill_color = QColor(255, 45, 85, 30)
 
-            painter.setPen(pen)
-            painter.setBrush(QBrush(fill_color))
-            painter.drawRect(disp_rect)
-            self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255), is_pred=True)
+                disp_rect = self.image_to_display_rect(gt['ann'].rect)
+                if disp_rect.width() <= 0 or disp_rect.height() <= 0:
+                    continue
+
+                if is_tp:
+                    if not show_tp or self.eval_filter in ["FP", "FN", "ERRORS"]:
+                        continue
+                    border_color = QColor(0, 230, 118)  # Green
+                    bg_badge = QColor(0, 180, 80, 220)
+                    badge_text = f"[GT: TP] {cls_name}"
+                    pen = QPen(border_color, 2, Qt.SolidLine)
+                else:
+                    if not show_fn or self.eval_filter in ["FP", "TP"]:
+                        continue
+                    border_color = QColor(255, 152, 0)  # Orange
+                    bg_badge = QColor(230, 100, 0, 230)
+                    badge_text = f"[FN: MISSED] {cls_name}"
+                    pen = QPen(border_color, 3, Qt.DashLine)
+
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(disp_rect)
+                self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255))
+
+        # 3. Draw Model Predictions (TP and FP)
+        if show_dt:
+            raw_preds = self.eval_predictions.get(curr_frame, [])
+            active_preds = [p for p in raw_preds if p.get('score', 1.0) >= self.eval_conf_thr]
+
+            for p_idx, p in enumerate(active_preds):
+                is_tp = pred_matched[p_idx] if p_idx < len(pred_matched) else False
+                cls_name = p.get('class_name', str(p.get('class_id', 'Object')))
+                if c_filter != "ALL" and str(cls_name).lower() != str(c_filter).lower():
+                    continue
+
+                pb = p.get('bbox', [0, 0, 0, 0])
+                px1, py1, pw, ph = pb if isinstance(pb, (list, tuple)) else [pb.x(), pb.y(), pb.width(), pb.height()]
+                q_rect = QRect(int(px1), int(py1), int(pw), int(ph))
+                disp_rect = self.image_to_display_rect(q_rect)
+                if disp_rect.width() <= 0 or disp_rect.height() <= 0:
+                    continue
+
+                score = p.get('score', 1.0)
+                is_selected = (p == self.eval_selected_prediction)
+
+                if is_tp:
+                    if not show_tp or self.eval_filter in ["FP", "FN", "ERRORS"]:
+                        continue
+                    border_color = QColor(0, 229, 255)  # Cyan
+                    bg_badge = QColor(0, 160, 200, 230)
+                    badge_text = f"[TP] {cls_name} ({score:.2f})"
+                    pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.SolidLine)
+                    fill_color = QColor(0, 229, 255, 20)
+                else:
+                    if not show_fp or self.eval_filter in ["FN", "TP"]:
+                        continue
+                    border_color = QColor(255, 45, 85)  # Red
+                    bg_badge = QColor(220, 20, 60, 235)
+                    badge_text = f"[FP] {cls_name} ({score:.2f})"
+                    pen = QPen(QColor(255, 255, 0) if is_selected else border_color, 3 if is_selected else 2, Qt.DashLine)
+                    fill_color = QColor(255, 45, 85, 30)
+
+                painter.setPen(pen)
+                painter.setBrush(QBrush(fill_color))
+                painter.drawRect(disp_rect)
+                self._draw_eval_badge(painter, disp_rect, badge_text, bg_badge, QColor(255, 255, 255), is_pred=True)
 

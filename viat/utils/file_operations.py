@@ -1241,18 +1241,17 @@ def import_coco_annotations(filename, bbox_class):
         score = ann.get("score", None)
 
         x, y, w, h = bbox
-        # Create annotation object
+        # Create annotation object using QRect — BoundingBox takes (rect, class_name, ...)
+        from PyQt5.QtCore import QRect as _QRect
+        rect = _QRect(int(x), int(y), int(w), int(h))
         annotation = bbox_class(
-            x=int(x),
-            y=int(y),
-            width=int(w),
-            height=int(h),
-            class_name=class_name,
-            attributes=ann.get("attributes", {}),
+            rect,
+            class_name,
+            ann.get("attributes", {}),
             source="detected",
             score=score,
         )
-        # Optionally, set frame/image info if needed
+        # Set frame index from image metadata if available
         if "frame_id" in images.get(image_id, {}):
             annotation.frame = images[image_id]["frame_id"]
         annotations.append(annotation)

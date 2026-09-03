@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QDoubleSpinBox,
     QComboBox,
+    QCheckBox,
     QGroupBox,
     QFrame,
     QListWidget,
@@ -126,6 +127,8 @@ class EvaluationInspectorDock(QDockWidget):
         self.lbl_fp.setStyleSheet("color: #ff334b;")
         self.lbl_fn = QLabel("FN: <b>0</b>")
         self.lbl_fn.setStyleSheet("color: #ff9900;")
+        self.lbl_tn = QLabel("Ignored: <b>0</b>")
+        self.lbl_tn.setStyleSheet("color: #888888;")
 
         self.lbl_precision = QLabel("Precision: <b>0.0%</b>")
         self.lbl_recall = QLabel("Recall: <b>0.0%</b>")
@@ -134,9 +137,10 @@ class EvaluationInspectorDock(QDockWidget):
         m_layout.addWidget(self.lbl_tp, 0, 0)
         m_layout.addWidget(self.lbl_fp, 0, 1)
         m_layout.addWidget(self.lbl_fn, 0, 2)
-        m_layout.addWidget(self.lbl_precision, 1, 0)
-        m_layout.addWidget(self.lbl_recall, 1, 1)
-        m_layout.addWidget(self.lbl_f1, 1, 2)
+        m_layout.addWidget(self.lbl_tn, 0, 3)
+        m_layout.addWidget(self.lbl_precision, 1, 0, 1, 2)
+        m_layout.addWidget(self.lbl_recall, 1, 2)
+        m_layout.addWidget(self.lbl_f1, 1, 3)
 
         layout.addWidget(self.metrics_box)
 
@@ -185,29 +189,73 @@ class EvaluationInspectorDock(QDockWidget):
 
         layout.addWidget(thr_box)
 
-        # 4. View Filter
-        filter_box = QGroupBox("Filter View")
+        # 4. Visibility Ticks & Class Filters
+        filter_box = QGroupBox("Visibility Ticks & Filters")
         filter_box.setStyleSheet("QGroupBox { font-weight: bold; }")
         flt_layout = QVBoxLayout(filter_box)
+        flt_layout.setSpacing(6)
 
-        self.combo_filter = QComboBox()
-        self.combo_filter.addItems([
-            "Show All (GT + Predictions)",
-            "Only Errors (FP + FN)",
-            "Only False Positives (FP)",
-            "Only False Negatives (FN)",
-            "Only True Positives (TP)"
-        ])
-        self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
-        flt_layout.addWidget(self.combo_filter)
+        # Class Filter Dropdown
+        c_row = QHBoxLayout()
+        c_row.addWidget(QLabel("Class Filter:"))
+        self.combo_class_filter = QComboBox()
+        self.combo_class_filter.addItem("All Classes", "ALL")
+        self.combo_class_filter.currentIndexChanged.connect(self._on_visibility_ticks_changed)
+        c_row.addWidget(self.combo_class_filter)
+        flt_layout.addLayout(c_row)
+
+        # 2x3 Grid of Checkboxes
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        self.chk_show_dt = QCheckBox("Detections (DT)")
+        self.chk_show_dt.setChecked(True)
+        self.chk_show_dt.setToolTip("Show / Hide all model detection boxes")
+        self.chk_show_dt.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        self.chk_show_gt = QCheckBox("Ground Truth (GT)")
+        self.chk_show_gt.setChecked(True)
+        self.chk_show_gt.setToolTip("Show / Hide evaluated Ground Truth boxes")
+        self.chk_show_gt.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        self.chk_show_tp = QCheckBox("TP (True Positives)")
+        self.chk_show_tp.setChecked(True)
+        self.chk_show_tp.setStyleSheet("QCheckBox { color: #00e5ff; font-weight: bold; }")
+        self.chk_show_tp.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        self.chk_show_fp = QCheckBox("FP (False Positives)")
+        self.chk_show_fp.setChecked(True)
+        self.chk_show_fp.setStyleSheet("QCheckBox { color: #ff334b; font-weight: bold; }")
+        self.chk_show_fp.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        self.chk_show_fn = QCheckBox("FN (False Negatives)")
+        self.chk_show_fn.setChecked(True)
+        self.chk_show_fn.setStyleSheet("QCheckBox { color: #ff9900; font-weight: bold; }")
+        self.chk_show_fn.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        self.chk_show_tn = QCheckBox("Ignored / Non-Eval GTs")
+        self.chk_show_tn.setChecked(True)
+        self.chk_show_tn.setStyleSheet("QCheckBox { color: #aaaaaa; font-style: italic; }")
+        self.chk_show_tn.setToolTip("Show or hide GT annotations whose classes were marked [IGNORE] or excluded from evaluation")
+        self.chk_show_tn.stateChanged.connect(self._on_visibility_ticks_changed)
+
+        grid.addWidget(self.chk_show_dt, 0, 0)
+        grid.addWidget(self.chk_show_gt, 0, 1)
+        grid.addWidget(self.chk_show_tp, 1, 0)
+        grid.addWidget(self.chk_show_fp, 1, 1)
+        grid.addWidget(self.chk_show_fn, 2, 0)
+        grid.addWidget(self.chk_show_tn, 2, 1)
+
+        flt_layout.addLayout(grid)
 
         # Color legend
         legend = QLabel(
-            '<div style="font-size:11px; line-height: 1.6;">'
-            '<span style="color:#00e5ff;">■ Cyan:</span> <b>True Positive (TP)</b><br>'
-            '<span style="color:#ff334b;">■ Red:</span> <b>False Positive (FP)</b><br>'
-            '<span style="color:#ff9900;">■ Orange:</span> <b>False Negative (FN / Missed)</b><br>'
-            '<span style="color:#00ff78;">■ Green:</span> <b>Ground Truth (GT)</b>'
+            '<div style="font-size:11px; line-height: 1.5; margin-top: 4px;">'
+            '<span style="color:#00e5ff;">■ Cyan:</span> <b>TP DT</b> &nbsp;|&nbsp; '
+            '<span style="color:#00ff78;">■ Green:</span> <b>TP GT</b><br>'
+            '<span style="color:#ff334b;">■ Red:</span> <b>FP (False Alarm)</b> &nbsp;|&nbsp; '
+            '<span style="color:#ff9900;">■ Orange:</span> <b>FN (Missed GT)</b><br>'
+            '<span style="color:#aaaaaa;">■ Gray (Dashed):</span> <b>Ignored / Non-Eval GT</b>'
             '</div>'
         )
         flt_layout.addWidget(legend)
@@ -364,10 +412,46 @@ class EvaluationInspectorDock(QDockWidget):
         )
         self.spin_conf.setValue(default_conf)
 
-    def update_metrics_display(self, tp, fp, fn):
+    def _on_visibility_ticks_changed(self):
+        if hasattr(self.main_window, 'canvas') and self.main_window.canvas:
+            show_dt = self.chk_show_dt.isChecked()
+            show_gt = self.chk_show_gt.isChecked()
+            show_tp = self.chk_show_tp.isChecked()
+            show_fp = self.chk_show_fp.isChecked()
+            show_fn = self.chk_show_fn.isChecked()
+            show_tn = self.chk_show_tn.isChecked()
+            c_filter = self.combo_class_filter.currentData() or self.combo_class_filter.currentText()
+            self.main_window.canvas.set_eval_visibility_flags(
+                show_dt=show_dt,
+                show_gt=show_gt,
+                show_tp=show_tp,
+                show_fp=show_fp,
+                show_fn=show_fn,
+                show_tn=show_tn,
+                class_filter=c_filter
+            )
+
+    def set_available_classes(self, class_list):
+        """Populates class filter dropdown with list of classes."""
+        self.combo_class_filter.blockSignals(True)
+        current = self.combo_class_filter.currentText()
+        self.combo_class_filter.clear()
+        self.combo_class_filter.addItem("All Classes", "ALL")
+        for c in class_list:
+            if c and str(c) not in ("ALL", "__IGNORE__"):
+                self.combo_class_filter.addItem(str(c), str(c))
+        idx = self.combo_class_filter.findText(current)
+        if idx >= 0:
+            self.combo_class_filter.setCurrentIndex(idx)
+        else:
+            self.combo_class_filter.setCurrentIndex(0)
+        self.combo_class_filter.blockSignals(False)
+
+    def update_metrics_display(self, tp, fp, fn, tn=0):
         self.lbl_tp.setText(f"TP: <b>{tp}</b>")
         self.lbl_fp.setText(f"FP: <b>{fp}</b>")
         self.lbl_fn.setText(f"FN: <b>{fn}</b>")
+        self.lbl_tn.setText(f"Ignored: <b>{tn}</b>")
 
         precision = (tp / (tp + fp) * 100.0) if (tp + fp) > 0 else 0.0
         recall = (tp / (tp + fn) * 100.0) if (tp + fn) > 0 else 0.0

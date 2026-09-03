@@ -92,6 +92,10 @@ class VideoInfo:
     def base_name(self) -> str:
         return os.path.splitext(self.filename)[0]
 
+    @property
+    def name(self) -> str:
+        return self.base_name
+
     def update_status(self):
         """Update status based on whether annotation_file exists and has content."""
         if self.annotation_file and os.path.isfile(self.annotation_file):

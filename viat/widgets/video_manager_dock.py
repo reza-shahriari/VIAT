@@ -17,6 +17,7 @@ class VideoManagerDock(QDockWidget):
     next_video_requested = pyqtSignal()
     next_unannotated_requested = pyqtSignal()
     fast_export_requested = pyqtSignal()
+    convert_to_yolo_requested = pyqtSignal()
     sam_tracking_toggled = pyqtSignal(bool)
     remove_video_requested = pyqtSignal()
     
@@ -123,6 +124,13 @@ class VideoManagerDock(QDockWidget):
         self.btn_sam_track.setEnabled(False)
         self.btn_sam_track.toggled.connect(self.sam_tracking_toggled.emit)
         layout.addWidget(self.btn_sam_track)
+
+        # Convert to YOLO button (for Video Dataset mode)
+        self.btn_convert_yolo = QPushButton("📦 Convert to YOLO...")
+        self.btn_convert_yolo.setToolTip("Convert entire video dataset to YOLO image dataset with smart cropping and class balancing")
+        self.btn_convert_yolo.clicked.connect(self.convert_to_yolo_requested.emit)
+        self.btn_convert_yolo.hide()
+        layout.addWidget(self.btn_convert_yolo)
         
         self.setWidget(widget)
         
@@ -134,6 +142,8 @@ class VideoManagerDock(QDockWidget):
             self.filter_container.show()
             self.btn_next_unannotated.show()
             self.btn_fast_export.show()
+            self.btn_convert_yolo.show()
+            self.btn_convert_yolo.setEnabled(True)
             self.lbl_list_title.setText("Dataset Videos:")
             self.btn_remove.setText("🗑 Remove Video from Dataset")
             self.set_active(True)
@@ -142,6 +152,7 @@ class VideoManagerDock(QDockWidget):
             self.filter_container.hide()
             self.btn_next_unannotated.hide()
             self.btn_fast_export.hide()
+            self.btn_convert_yolo.hide()
             self.lbl_list_title.setText("Videos:")
             self.btn_remove.setText("Remove Cut (All frames)")
             
