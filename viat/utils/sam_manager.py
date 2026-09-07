@@ -415,8 +415,18 @@ class SamManager:
                     kwargs['bboxes'] = [[float(b) for b in box]]
                 else:
                     kwargs['bboxes'] = box
-            if text_prompt and ("fastsam" in model_type.lower() or "sam3" in model_type.lower()):
+            if text_prompt and "fastsam" in model_type.lower():
                 kwargs['texts'] = text_prompt
+            elif text_prompt and "sam3" in model_type.lower():
+                # SAM3's *video* predictor does not support text prompts for
+                # temporal propagation (only SAM3SemanticPredictor does, used
+                # for the frame-by-frame 'detect' strategy in zero_shot_manager.py).
+                # Passing 'texts' here would raise a TypeError deep inside
+                # ultralytics, so surface a clear message instead of crashing.
+                yield False, ("SAM3 text prompts are not supported for temporal video "
+                    "tracking. Use points or a box for tracking, or switch to the "
+                    "'Detect' (frame-by-frame) strategy to use a text prompt with SAM3.")
+                return
 
             import tempfile
             import uuid
