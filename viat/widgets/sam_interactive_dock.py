@@ -12,6 +12,7 @@ class SAMInteractiveDock(QDockWidget):
     clear_requested = pyqtSignal()
     undo_requested = pyqtSignal()
     model_changed = pyqtSignal(str)
+    add_to_queue_requested = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__("Interactive Tracking Menu", parent)
@@ -189,6 +190,12 @@ class SAMInteractiveDock(QDockWidget):
         self.btn_preview.setToolTip("Preview SAM segmentation mask on current frame (Shortcut: Z)")
         self.btn_track = QPushButton("Execute Tracking [C]")
         self.btn_track.setToolTip("Execute SAM tracking / detection (Shortcut: C)")
+        self.btn_add_to_queue = QPushButton("+ Add to Track Queue")
+        self.btn_add_to_queue.setToolTip(
+            "Save the current prompt, class, model and scope as a queued job\n"
+            "instead of running it now. Build up jobs across many videos, then\n"
+            "run them all sequentially from the Track Queue panel."
+        )
         
         self.btn_track.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         
@@ -196,11 +203,13 @@ class SAMInteractiveDock(QDockWidget):
         self.btn_clear.clicked.connect(self.clear_requested.emit)
         self.btn_preview.clicked.connect(self.preview_requested.emit)
         self.btn_track.clicked.connect(self.on_track_clicked)
+        self.btn_add_to_queue.clicked.connect(self.add_to_queue_requested.emit)
         
         self.layout.addWidget(self.btn_undo)
         self.layout.addWidget(self.btn_clear)
         self.layout.addWidget(self.btn_preview)
         self.layout.addWidget(self.btn_track)
+        self.layout.addWidget(self.btn_add_to_queue)
         
         self._update_execute_button_label()
         
@@ -269,6 +278,19 @@ class SAMInteractiveDock(QDockWidget):
             self.spin_end.setValue(total_frames)
 
     def on_track_clicked(self):
+        result = self.compute_track_params()
+        if result is None:
+            return
+        strategy, start_f, end_f, direction = result
+        self.track_requested.emit(strategy, start_f, end_f, direction)
+
+    def compute_track_params(self):
+        """Compute (strategy, start_f, end_f, direction) from the current dock
+        state, exactly as Execute would use them, without emitting the
+        track_requested signal. Returns None if the user cancelled a prompt
+        (e.g. the start-frame-mismatch dialog) or the range is invalid.
+        Used both by the Execute button and by the Track Queue to capture a
+        job's scope without immediately running it."""
         scope = self.cmb_scope.currentIndex()
         direction = self.get_direction()
         use_frame_by_frame = self.chk_frame_by_frame.isChecked() and scope > 0
@@ -292,9 +314,17 @@ class SAMInteractiveDock(QDockWidget):
             strategy = "detect" if use_frame_by_frame else "range"
             s_val = self.spin_start.value() - 1
             e_val = self.spin_end.value() - 1
-            if s_val > e_val:
-                QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
-                return
+            if direction == "backward":
+                # Start Frame is where tracking begins (higher frame number),
+                # End Frame is where it stops (lower frame number).
+                if s_val < e_val:
+                    QMessageBox.warning(self, "Invalid Range",
+                        "For backward tracking, Start frame must be >= End frame.")
+                    return None
+            else:
+                if s_val > e_val:
+                    QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
+                    return None
                 
             if s_val != self.current_frame:
                 msg_box = QMessageBox(self)
@@ -315,13 +345,18 @@ class SAMInteractiveDock(QDockWidget):
                 
                 clicked_button = msg_box.clickedButton()
                 if clicked_button == btn_cancel:
-                    return
+                    return None
                 elif clicked_button == btn_change:
                     self.spin_start.setValue(self.current_frame + 1)
                     s_val = self.current_frame
-                    if s_val > e_val:
-                        self.spin_end.setValue(max(self.current_frame + 1, self.total_frames))
-                        e_val = self.spin_end.value() - 1
+                    if direction == "backward":
+                        if s_val < e_val:
+                            self.spin_end.setValue(1)
+                            e_val = 0
+                    else:
+                        if s_val > e_val:
+                            self.spin_end.setValue(max(self.current_frame + 1, self.total_frames))
+                            e_val = self.spin_end.value() - 1
                 
             if direction == "backward":
                 start_f = e_val
@@ -333,7 +368,7 @@ class SAMInteractiveDock(QDockWidget):
                 start_f = s_val
                 end_f = e_val
 
-        self.track_requested.emit(strategy, start_f, end_f, direction)
+        return (strategy, start_f, end_f, direction)
 
     def get_save_segmentation(self):
         return self.chk_save_seg.isChecked()

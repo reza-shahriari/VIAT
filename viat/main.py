@@ -15,7 +15,7 @@ import random
 import math
 import cv2
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QLabel, QAction, QFileDialog, QStatusBar, QComboBox, QMessageBox, QListWidget, QListWidgetItem, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QLineEdit, QColorDialog, QActionGroup, QGroupBox, QDoubleSpinBox, QApplication, QProgressBar, QCheckBox, QTextEdit, QProgressDialog, QPlainTextEdit
-from PyQt5.QtCore import Qt, QTimer, QRect, QDateTime, QEvent, QThread, pyqtSignal,QRectF
+from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QDateTime, QEvent, QThread, pyqtSignal,QRectF
 from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -589,6 +589,10 @@ class VideoAnnotationTool(QMainWindow):
         self.video_dataset_index = 0
         self.deleted_frames = set()
         self.deleted_annotations = {}
+        self.track_queue = []
+        self.batch_log = []
+        self._queue_running = False
+        self._queue_stop_requested = False
         self.labeler_analytics = {
             "prompts": [],
             "tool_usage": {
@@ -644,6 +648,7 @@ class VideoAnnotationTool(QMainWindow):
         layout.setContentsMargins(5, 5, 5, 5)
         self.resize(1200, 800)
         self.setup_sam_interactive()
+        self.setup_track_queue()
         self.setup_empty_frames_manager()
         self.setup_uncertain_frames_manager()
         self.setup_class_frames_manager()
@@ -1173,12 +1178,27 @@ class VideoAnnotationTool(QMainWindow):
                 on_sam_clear_requested)
             self.sam_interactive_dock.model_changed.connect(self.
                 on_sam_model_changed)
+            self.sam_interactive_dock.add_to_queue_requested.connect(self.
+                on_add_current_prompt_to_queue)
             view_menu = self.menuBar().addMenu('&SAM Tracking')
             self.action_sam_interactive = view_menu.addAction(
                 'Toggle SAM Interactive Mode')
             self.action_sam_interactive.setCheckable(True)
             self.action_sam_interactive.triggered.connect(self.
                 toggle_sam_interactive_mode)
+
+    def setup_track_queue(self):
+        """Set up the Track Queue Dock signals."""
+        if hasattr(self, 'track_queue_dock') and self.track_queue_dock:
+            dock = self.track_queue_dock
+            dock.add_current_requested.connect(self.on_add_current_prompt_to_queue)
+            dock.run_queue_requested.connect(self.on_run_track_queue)
+            dock.stop_queue_requested.connect(self.on_stop_track_queue)
+            dock.remove_job_requested.connect(self.on_remove_track_queue_job)
+            dock.move_job_requested.connect(self.on_move_track_queue_job)
+            dock.clear_queue_requested.connect(self.on_clear_track_queue)
+            dock.save_queue_requested.connect(self.on_save_track_queue)
+            dock.load_queue_requested.connect(self.on_load_track_queue)
 
     def setup_evaluation_inspector(self):
         """Set up Evaluation Inspector Dock signals and menu actions."""
@@ -2351,7 +2371,24 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
 
-    def on_sam_track_requested(self, strategy, start_f, end_f, direction="forward"):
+    def _warn_or_log(self, batch_job, title, message):
+        """Show a blocking QMessageBox in interactive mode, or append to the
+        batch log (and the Track Queue dock, if present) when running as part
+        of a queued batch job. Never blocks on user input during a batch run."""
+        if batch_job is not None:
+            if not hasattr(self, 'batch_log'):
+                self.batch_log = []
+            entry = f"[{title}] {message}"
+            self.batch_log.append(entry)
+            if hasattr(self, 'track_queue_dock') and self.track_queue_dock:
+                try:
+                    self.track_queue_dock.append_log(batch_job.get('job_id'), entry)
+                except Exception:
+                    pass
+        else:
+            QMessageBox.warning(self, title, message)
+
+    def on_sam_track_requested(self, strategy, start_f, end_f, direction="forward", batch_job=None):
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
             if not hasattr(self, 'image_files') or not self.image_files:
                 return
@@ -2367,7 +2404,7 @@ class VideoAnnotationTool(QMainWindow):
             # 1. Forward Pass (prompt_frame -> max(start_f, end_f))
             fwd_end = max(start_f, end_f)
             if prompt_frame < fwd_end:
-                self.on_sam_track_requested(strategy, prompt_frame, fwd_end, direction="forward")
+                self.on_sam_track_requested(strategy, prompt_frame, fwd_end, direction="forward", batch_job=batch_job)
 
             # Restore prompt state on prompt_frame for backward pass
             self.canvas.sam_prompt_points = saved_points if saved_points else []
@@ -2382,7 +2419,7 @@ class VideoAnnotationTool(QMainWindow):
             # 2. Backward Pass (prompt_frame -> min(start_f, end_f))
             bwd_end = min(start_f, end_f)
             if prompt_frame > bwd_end:
-                self.on_sam_track_requested(strategy, prompt_frame, bwd_end, direction="backward")
+                self.on_sam_track_requested(strategy, prompt_frame, bwd_end, direction="backward", batch_job=batch_job)
             return
 
         is_backward = (direction == "backward") or (start_f > end_f)
@@ -2394,6 +2431,10 @@ class VideoAnnotationTool(QMainWindow):
         
         if sam_blur_checked:
             should_blur = True
+        elif batch_job is not None:
+            # No user present to answer the dialog during a batch run; fall back
+            # to whatever the job captured for its blur setting.
+            should_blur = bool(batch_job.get('should_blur', False))
         elif auto_blur_global:
             reply = QMessageBox.question(self, "Blur Tracking Results?",
                 "Global 'Auto Blur All New Labels' is enabled, but the 'Automatically Blur Tracked Objects' setting in the SAM panel is not checked.\n\n"
@@ -2406,8 +2447,16 @@ class VideoAnnotationTool(QMainWindow):
             else:
                 return
 
-        blur_shape = getattr(self.sam_interactive_dock, 'get_blur_shape', lambda: 'segmentation')()
-        blur_margin = getattr(self.sam_interactive_dock, 'get_blur_margin', lambda: 0)()
+        blur_shape = batch_job.get('blur_shape') if batch_job is not None else None
+        if blur_shape is None:
+            blur_shape = getattr(self.sam_interactive_dock, 'get_blur_shape', lambda: 'segmentation')()
+        blur_margin = batch_job.get('blur_margin') if batch_job is not None else None
+        if blur_margin is None:
+            blur_margin = getattr(self.sam_interactive_dock, 'get_blur_margin', lambda: 0)()
+        if batch_job is not None:
+            save_segmentation = bool(batch_job.get('save_segmentation', False))
+        else:
+            save_segmentation = self.sam_interactive_dock.get_save_segmentation()
 
         def _apply_sam_blur(frame_idx, poly, b_rect):
             if blur_shape == "segmentation" and poly:
@@ -2445,14 +2494,20 @@ class VideoAnnotationTool(QMainWindow):
                     if getattr(ann, 'is_sam_preview', False):
                         box = [ann.rect.left(), ann.rect.top(), ann.rect.right(), ann.rect.bottom()]
                         break
-        text_prompt = self.sam_interactive_dock.get_text_prompt()
+        text_prompt = batch_job.get('text_prompt') if batch_job is not None else None
+        if text_prompt is None:
+            text_prompt = self.sam_interactive_dock.get_text_prompt()
         if not points and not box and not text_prompt:
-            QMessageBox.warning(self, 'No Prompts',
+            self._warn_or_log(batch_job, 'No Prompts',
                 'Please add at least one point, bounding box, or text prompt.')
             return
-            
-        tracker_engine = getattr(self.sam_interactive_dock, 'get_tracker_engine', lambda: 'sam')()
-        model_type = self.sam_interactive_dock.get_model_type()
+
+        tracker_engine = batch_job.get('tracker_engine') if batch_job is not None else None
+        if tracker_engine is None:
+            tracker_engine = getattr(self.sam_interactive_dock, 'get_tracker_engine', lambda: 'sam')()
+        model_type = batch_job.get('model_type') if batch_job is not None else None
+        if model_type is None:
+            model_type = self.sam_interactive_dock.get_model_type()
         
         initial_polygon = None
         if tracker_engine in ['ettrack', 'ostrack', 'ostrack_trt', 'ostrack_engine']:
@@ -2511,7 +2566,7 @@ class VideoAnnotationTool(QMainWindow):
                 model_type = "OSTrack"
             success, msg = manager.load_model(model_type)
             if not success:
-                QMessageBox.warning(self, "Tracker Error", msg)
+                self._warn_or_log(batch_job, "Tracker Error", msg)
                 return
         else:
             if 'sam3' in model_type.lower():
@@ -2522,17 +2577,24 @@ class VideoAnnotationTool(QMainWindow):
                 manager = self.sam_manager
         classes = list(self.canvas.class_colors.keys())
         if not classes:
-            QMessageBox.warning(self, 'No Classes',
+            self._warn_or_log(batch_job, 'No Classes',
                 'Please define at least one class before tracking.')
             return
-        current_idx = classes.index(self.canvas.current_class
-            ) if self.canvas.current_class in classes else 0
-        from PyQt5.QtWidgets import QInputDialog
-        target_class, ok = QInputDialog.getItem(self,
-            'Tracked Object Class', 'Select class for the tracked object:',
-            classes, current_idx, False)
-        if not ok or not target_class:
-            return
+        if batch_job is not None:
+            target_class = batch_job.get('target_class')
+            if not target_class or target_class not in classes:
+                self._warn_or_log(batch_job, 'Invalid Class',
+                    f"Job's target class '{target_class}' is not defined in this project. Skipping job.")
+                return
+        else:
+            current_idx = classes.index(self.canvas.current_class
+                ) if self.canvas.current_class in classes else 0
+            from PyQt5.QtWidgets import QInputDialog
+            target_class, ok = QInputDialog.getItem(self,
+                'Tracked Object Class', 'Select class for the tracked object:',
+                classes, current_idx, False)
+            if not ok or not target_class:
+                return
         self.save_undo_state(range(min(start_f, end_f), max(start_f, end_f) + 1))
         self.set_active_class(target_class)
         self.canvas.annotations = [a for a in self.canvas.annotations if 
@@ -2559,7 +2621,7 @@ class VideoAnnotationTool(QMainWindow):
                         tracker_title = "OSTrack TRT"
                     else:
                         tracker_title = "OSTrack"
-                    QMessageBox.warning(self, 'Invalid Scope', f'{tracker_title} cannot be used for a single frame. Please select a range or Whole Video.')
+                    self._warn_or_log(batch_job, 'Invalid Scope', f'{tracker_title} cannot be used for a single frame. Please select a range or Whole Video.')
                     return
                 self.statusBar.showMessage('Generating mask for single frame...')
                 QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -2581,7 +2643,7 @@ class VideoAnnotationTool(QMainWindow):
                     QApplication.restoreOverrideCursor()
 
                 if frame is None:
-                    QMessageBox.warning(self, 'Error', 'Could not read the frame.')
+                    self._warn_or_log(batch_job, 'Error', 'Could not read the frame.')
                     return
                 polygon = manager.predict_mask_from_prompt(frame, points=points,
                     labels=labels, box=box, text_prompt=text_prompt)
@@ -2606,14 +2668,13 @@ class VideoAnnotationTool(QMainWindow):
                     ann = BoundingBox(ann_rect, target_class, attributes=
                         default_attributes, color=self.canvas.class_colors.get(
                         target_class, QColor(0, 255, 0)), source='sam_tracked',
-                        segmentation=polygon if self.sam_interactive_dock.
-                        get_save_segmentation() else None)
+                        segmentation=polygon if save_segmentation else None)
                     if should_blur:
                         _apply_sam_blur(start_f, polygon, ann_rect)
                     else:
                         self.frame_annotations[start_f].append(ann)
                 else:
-                    QMessageBox.warning(self, 'Tracking Error',
+                    self._warn_or_log(batch_job, 'Tracking Error',
                         'No object detected.')
                 return
             if strategy == 'detect':
@@ -2626,9 +2687,12 @@ class VideoAnnotationTool(QMainWindow):
                         tracker_title = "OSTrack TRT"
                     else:
                         tracker_title = "OSTrack"
-                    QMessageBox.warning(self, 'Invalid Strategy', f'{tracker_title} is a temporal tracker and cannot be used for frame-by-frame detection.')
+                    self._warn_or_log(batch_job, 'Invalid Strategy', f'{tracker_title} is a temporal tracker and cannot be used for frame-by-frame detection.')
                     return
-                det_model_type = self.sam_interactive_dock.get_det_model_type()
+                if batch_job is not None:
+                    det_model_type = batch_job.get('det_model_type')
+                else:
+                    det_model_type = self.sam_interactive_dock.get_det_model_type()
                 zero_shot_model = None
                 if det_model_type:
                     if not hasattr(self, 'zero_shot_manager'
@@ -2646,7 +2710,7 @@ class VideoAnnotationTool(QMainWindow):
                         , checkpoints_dir)
                     prog_load.close()
                     if not success:
-                        QMessageBox.warning(self, 'Error',
+                        self._warn_or_log(batch_job, 'Error',
                             f'Failed to load Zero-Shot Model:\n{msg}')
                         return
                     zero_shot_model = self.zero_shot_manager.detector
@@ -2719,8 +2783,7 @@ class VideoAnnotationTool(QMainWindow):
                         ann = BoundingBox(ann_rect, target_class, attributes=
                             default_attributes, color=self.canvas.class_colors.get(
                             target_class, QColor(0, 255, 0)), source='sam_detected',
-                            segmentation=polygon if self.sam_interactive_dock.
-                            get_save_segmentation() else None)
+                            segmentation=polygon if save_segmentation else None)
                         if should_blur:
                             _apply_sam_blur(f_idx, polygon, ann_rect)
                         else:
@@ -2806,7 +2869,7 @@ class VideoAnnotationTool(QMainWindow):
                     self.set_current_frame(current_f)
                     QApplication.processEvents()
                     if not success:
-                        QMessageBox.warning(self, 'Tracking Error', track_res)
+                        self._warn_or_log(batch_job, 'Tracking Error', str(track_res))
                         break
                     tracked_boxes = track_res['boxes']
                     tracked_polygons = track_res['polygons']
@@ -2820,7 +2883,7 @@ class VideoAnnotationTool(QMainWindow):
                         default_attributes = {'Size': -1, 'Quality': -1}
                         if hasattr(self, 'get_default_attributes_for_class'):
                             default_attributes = self.get_default_attributes_for_class(target_class)
-                        ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if self.sam_interactive_dock.get_save_segmentation() else None)
+                        ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if save_segmentation else None)
                         if should_blur:
                             _apply_sam_blur(current_f, polygon, rect)
                         else:
@@ -2845,7 +2908,7 @@ class VideoAnnotationTool(QMainWindow):
                         chunk_labels = None
                         chunk_text_prompt = None
                     else:
-                        QMessageBox.warning(self, 'Tracking Lost', f'Lost object at frame {current_f-step}. Aborting remaining frames.')
+                        self._warn_or_log(batch_job, 'Tracking Lost', f'Lost object at frame {current_f-step}. Aborting remaining frames for this track.')
                         break
                         
                 current_chunk_start = current_chunk_end + step
@@ -2853,7 +2916,7 @@ class VideoAnnotationTool(QMainWindow):
             logger.error(f"Error during SAM tracking: {e}")
             import traceback
             traceback.print_exc()
-            QMessageBox.critical(self, "Tracking Error", f"An error occurred during tracking:\n{e}")
+            self._warn_or_log(batch_job, "Tracking Error", f"An error occurred during tracking:\n{e}")
         finally:
             if progress is not None:
                 try:
@@ -2870,6 +2933,249 @@ class VideoAnnotationTool(QMainWindow):
                 self.statusBar.showMessage('SAM processing completed.', 5000)
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.setFocus()
+
+    # ------------------------------------------------------------------
+    # Track Queue: batch SAM tracking jobs, built up interactively and
+    # run sequentially (e.g. overnight) without blocking on dialogs.
+    # ------------------------------------------------------------------
+    def _current_video_identifier(self):
+        """Return (video_switch_mode, video_identifier, display_name) describing
+        which video is currently active, for embedding into a queued job."""
+        if getattr(self, 'is_video_dataset', False) and getattr(self, 'video_filename', None):
+            return 'dataset', self.video_filename, os.path.basename(self.video_filename)
+        if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups'):
+            current_vid = None
+            for vid_name, indices in self.video_groups.items():
+                if self.current_frame in indices:
+                    current_vid = vid_name
+                    break
+            if current_vid:
+                return 'grouped', current_vid, current_vid
+        video_name = getattr(self, 'video_filename', None)
+        return None, video_name, (os.path.basename(video_name) if video_name else 'current video')
+
+    def on_add_current_prompt_to_queue(self):
+        """Capture the current SAM prompt + settings as a queued job, without
+        running it. Mirrors the prompt-reading logic in on_sam_track_requested,
+        but stores it for later instead of tracking immediately."""
+        if not hasattr(self, 'sam_interactive_dock'):
+            return
+        if not getattr(self.canvas, 'sam_interactive_mode', False):
+            QMessageBox.information(self, 'SAM Interactive Mode Off',
+                'Enable SAM Interactive Mode and add a prompt (points/box/text) before adding it to the queue.')
+            return
+
+        result = self.sam_interactive_dock.compute_track_params()
+        if result is None:
+            return
+        strategy, start_f, end_f, direction = result
+
+        points = [[p.x(), p.y()] for p in self.canvas.sam_prompt_points] if self.canvas.sam_prompt_points else []
+        labels = list(self.canvas.sam_prompt_labels) if self.canvas.sam_prompt_labels else []
+        box = None
+        if self.canvas.sam_prompt_box:
+            r = self.canvas.sam_prompt_box
+            box = [r.x(), r.y(), r.width(), r.height()]
+        text_prompt = self.sam_interactive_dock.get_text_prompt()
+
+        if not points and not box and not text_prompt:
+            QMessageBox.warning(self, 'No Prompts',
+                'Please add at least one point, bounding box, or text prompt before adding to the queue.')
+            return
+
+        classes = list(self.canvas.class_colors.keys())
+        if not classes:
+            QMessageBox.warning(self, 'No Classes', 'Please define at least one class before queuing a job.')
+            return
+        current_idx = classes.index(self.canvas.current_class) if self.canvas.current_class in classes else 0
+        from PyQt5.QtWidgets import QInputDialog
+        target_class, ok = QInputDialog.getItem(self, 'Tracked Object Class',
+            'Select class for this queued job:', classes, current_idx, False)
+        if not ok or not target_class:
+            return
+
+        video_switch_mode, video_identifier, video_display = self._current_video_identifier()
+
+        import uuid
+        job_id = uuid.uuid4().hex
+        job = {
+            'job_id': job_id,
+            'status': 'pending',
+            'strategy': strategy,
+            'start_f': start_f,
+            'end_f': end_f,
+            'direction': direction,
+            'points': points,
+            'labels': labels,
+            'box': box,
+            'text_prompt': text_prompt,
+            'target_class': target_class,
+            'model_type': self.sam_interactive_dock.get_model_type(),
+            'tracker_engine': getattr(self.sam_interactive_dock, 'get_tracker_engine', lambda: 'sam')(),
+            'det_model_type': self.sam_interactive_dock.get_det_model_type(),
+            'should_blur': self.sam_interactive_dock.get_blur_tracked_objects(),
+            'blur_shape': getattr(self.sam_interactive_dock, 'get_blur_shape', lambda: 'segmentation')(),
+            'blur_margin': getattr(self.sam_interactive_dock, 'get_blur_margin', lambda: 0)(),
+            'save_segmentation': self.sam_interactive_dock.get_save_segmentation(),
+            'video_switch_mode': video_switch_mode,
+            'video_identifier': video_identifier,
+            'video_display': video_display,
+        }
+        job['display'] = self._job_display_text(job)
+        self.track_queue.append(job)
+        self._refresh_track_queue_dock()
+        if hasattr(self, 'track_queue_dock'):
+            self.track_queue_dock.show()
+            self.track_queue_dock.raise_()
+        self.statusBar.showMessage(f"Added job to queue: {job['display']}", 4000)
+
+    def _job_display_text(self, job):
+        scope = {'frame': 'current frame', 'video': 'whole video',
+                  'range': f"frames {job['start_f']+1}-{job['end_f']+1}",
+                  'detect': f"detect {job['start_f']+1}-{job['end_f']+1}"}.get(job['strategy'], job['strategy'])
+        return f"{job.get('video_display','video')} | {job.get('target_class','?')} | {scope} | {job.get('direction','forward')}"
+
+    def _refresh_track_queue_dock(self):
+        if hasattr(self, 'track_queue_dock') and self.track_queue_dock:
+            self.track_queue_dock.set_jobs(self.track_queue)
+
+    def on_remove_track_queue_job(self, job_id):
+        if getattr(self, '_queue_running', False):
+            QMessageBox.information(self, 'Queue Running', 'Stop the queue before editing it.')
+            return
+        self.track_queue = [j for j in self.track_queue if j['job_id'] != job_id]
+        self._refresh_track_queue_dock()
+
+    def on_move_track_queue_job(self, job_id, direction):
+        if getattr(self, '_queue_running', False):
+            return
+        idx = next((i for i, j in enumerate(self.track_queue) if j['job_id'] == job_id), None)
+        if idx is None:
+            return
+        new_idx = idx + direction
+        if 0 <= new_idx < len(self.track_queue):
+            self.track_queue[idx], self.track_queue[new_idx] = self.track_queue[new_idx], self.track_queue[idx]
+            self._refresh_track_queue_dock()
+
+    def on_clear_track_queue(self):
+        if getattr(self, '_queue_running', False):
+            QMessageBox.information(self, 'Queue Running', 'Stop the queue before clearing it.')
+            return
+        self.track_queue = []
+        self._refresh_track_queue_dock()
+
+    def on_save_track_queue(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save Track Queue', '', 'JSON Files (*.json)')
+        if not path:
+            return
+        try:
+            with open(path, 'w') as f:
+                json.dump(self.track_queue, f, indent=2)
+            self.statusBar.showMessage(f'Saved {len(self.track_queue)} job(s) to {path}', 4000)
+        except Exception as e:
+            QMessageBox.warning(self, 'Save Failed', str(e))
+
+    def on_load_track_queue(self):
+        if getattr(self, '_queue_running', False):
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Load Track Queue', '', 'JSON Files (*.json)')
+        if not path:
+            return
+        try:
+            with open(path, 'r') as f:
+                jobs = json.load(f)
+            import uuid
+            for job in jobs:
+                job['status'] = 'pending'
+                job.setdefault('job_id', uuid.uuid4().hex)
+                job['display'] = self._job_display_text(job)
+            self.track_queue.extend(jobs)
+            self._refresh_track_queue_dock()
+            self.statusBar.showMessage(f'Loaded {len(jobs)} job(s) from {path}', 4000)
+        except Exception as e:
+            QMessageBox.warning(self, 'Load Failed', str(e))
+
+    def on_stop_track_queue(self):
+        if getattr(self, '_queue_running', False):
+            self._queue_stop_requested = True
+            self.statusBar.showMessage('Stopping queue after the current job finishes...', 4000)
+
+    def on_run_track_queue(self):
+        if getattr(self, '_queue_running', False):
+            return
+        pending_jobs = [j for j in self.track_queue if j.get('status') not in ('done',)]
+        if not pending_jobs:
+            QMessageBox.information(self, 'Track Queue', 'No pending jobs in the queue.')
+            return
+
+        self._queue_running = True
+        self._queue_stop_requested = False
+        total = len(pending_jobs)
+        for i, job in enumerate(pending_jobs):
+            if self._queue_stop_requested:
+                job['status'] = 'stopped'
+                if hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.update_job_status(job['job_id'], 'stopped')
+                continue
+            job['status'] = 'running'
+            if hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.update_job_status(job['job_id'], 'running')
+            self.statusBar.showMessage(f"Running queued job {i+1}/{total}: {job.get('display','')}")
+            QApplication.processEvents()
+            try:
+                self._run_single_track_job(job)
+                if job['status'] == 'running':
+                    job['status'] = 'done'
+            except Exception as e:
+                job['status'] = 'failed'
+                logger.error(f"Track queue job {job['job_id']} crashed: {e}")
+                if hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(job['job_id'], f"Job crashed: {e}")
+            if hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.update_job_status(job['job_id'], job['status'])
+            QApplication.processEvents()
+
+        self._queue_running = False
+        done = sum(1 for j in self.track_queue if j['status'] == 'done')
+        failed = sum(1 for j in self.track_queue if j['status'] == 'failed')
+        lost = sum(1 for j in self.track_queue if j['status'] == 'lost')
+        stopped = sum(1 for j in self.track_queue if j['status'] == 'stopped')
+        self.statusBar.showMessage('Track queue finished.', 5000)
+        QMessageBox.information(self, 'Batch Queue Finished',
+            f"{done} completed, {failed} failed, {lost} lost object, {stopped} stopped.\n"
+            "See the Batch Log in the Track Queue panel for per-job details.")
+
+    def _run_single_track_job(self, job):
+        """Run a single queued job: switch to its video if needed, restore its
+        prompt state onto the canvas, then track it via the normal SAM
+        tracking path in batch mode (no blocking dialogs)."""
+        switch_mode = job.get('video_switch_mode')
+        video_identifier = job.get('video_identifier')
+        if switch_mode == 'dataset' and video_identifier:
+            ok = self.switch_to_dataset_video(video_identifier, save_current=True)
+            if not ok:
+                job['status'] = 'failed'
+                if hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(job['job_id'], f"Could not switch to video: {video_identifier}")
+                return
+        elif switch_mode == 'grouped' and video_identifier:
+            self.on_video_selected(video_identifier)
+
+        pts = job.get('points') or []
+        self.canvas.sam_prompt_points = [QPoint(int(x), int(y)) for x, y in pts]
+        self.canvas.sam_prompt_labels = list(job.get('labels') or [])
+        box = job.get('box')
+        self.canvas.sam_prompt_box = QRect(box[0], box[1], box[2], box[3]) if box else None
+
+        was_len = len(self.batch_log)
+        self.on_sam_track_requested(job['strategy'], job['start_f'], job['end_f'],
+            job.get('direction', 'forward'), batch_job=job)
+        # If a "Tracking Lost" entry was logged for this job, reflect that in its status
+        new_entries = self.batch_log[was_len:]
+        if any('Tracking Lost' in e for e in new_entries):
+            job['status'] = 'lost'
+        elif any(e.startswith('[Tracking Error]') or e.startswith('[Error]') for e in new_entries):
+            job['status'] = 'failed'
 
     @log_exceptions
     def viat_finish_integration(self):
@@ -8628,6 +8934,23 @@ Do you want to scan the entire video now for duplicate frames?
         return super().eventFilter(obj, event)
 
     @log_exceptions
+    def clear_all_annotations_in_frame(self):
+        """Quickly remove all labels/annotations on the current frame (Ctrl+B),
+        without marking the frame itself as deleted (see delete_current_frame
+        for that, bound to Shift+X)."""
+        if not self.canvas.annotations:
+            self.statusBar.showMessage('No labels on this frame to remove.', 3000)
+            return
+        count = len(self.canvas.annotations)
+        self.save_undo_state()
+        self.canvas.annotations.clear()
+        self.frame_annotations[self.current_frame] = []
+        self.canvas.update()
+        self.project_modified = True
+        if hasattr(self, 'annotation_dock'):
+            self.annotation_dock.update_annotation_list()
+        self.statusBar.showMessage(f'Removed {count} label(s) from frame {self.current_frame + 1}. (Ctrl+Z to undo)', 4000)
+
     def delete_current_frame(self):
         """Toggle frame deletion status (mark as REMOVED or RESTORE)."""
         if not hasattr(self, 'deleted_frames'):
@@ -8666,6 +8989,9 @@ Do you want to scan the entire video now for duplicate frames?
             current_index = self.method_selector.currentIndex()
             new_index = (current_index + 1) % self.method_selector.count()
             self.method_selector.setCurrentIndex(new_index)
+            return
+        if event.key() == Qt.Key_B and event.modifiers() & Qt.ControlModifier:
+            self.clear_all_annotations_in_frame()
             return
         if event.key() == Qt.Key_B:
             if hasattr(self, 'annotation_dock'):

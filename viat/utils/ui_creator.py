@@ -28,6 +28,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
 from viat.widgets.sam_interactive_dock import SAMInteractiveDock
+from viat.widgets.track_queue_dock import TrackQueueDock
 from viat.widgets.empty_frames_dock import EmptyFramesManagerDock
 from viat.widgets.uncertain_frames_dock import UncertainFramesManagerDock
 from viat.widgets.class_frames_dock import ClassFramesManagerDock
@@ -246,6 +247,7 @@ class UICreator:
                 getattr(self.main_window, 'annotation_dock', None),
                 getattr(self.main_window, 'class_dock', None),
                 getattr(self.main_window, 'sam_interactive_dock', None),
+                getattr(self.main_window, 'track_queue_dock', None),
                 getattr(self.main_window, 'empty_frames_dock', None),
                 getattr(self.main_window, 'class_frames_dock', None),
                 getattr(self.main_window, 'uncertain_frames_dock', None),
@@ -307,6 +309,14 @@ class UICreator:
             _make_right_dock_toggler('sam_interactive_dock')
         )
         view_menu.addAction(self.toggle_sam_action)
+
+        # Track Queue Dock (batch SAM tracking jobs)
+        self.toggle_track_queue_action = QAction("Track Queue Panel", self.main_window, checkable=True)
+        self.toggle_track_queue_action.setChecked(False)
+        self.toggle_track_queue_action.triggered.connect(
+            _make_right_dock_toggler('track_queue_dock')
+        )
+        view_menu.addAction(self.toggle_track_queue_action)
 
         # Empty Frames Manager
         self.toggle_empty_frames_action = QAction("Empty Frames Manager", self.main_window, checkable=True)
@@ -781,6 +791,13 @@ class UICreator:
         )
         self.main_window.sam_interactive_dock.hide() # Hidden by default
 
+        # Track Queue dock (batch tracking jobs, run sequentially/overnight)
+        self.main_window.track_queue_dock = TrackQueueDock(self.main_window)
+        self.main_window.addDockWidget(
+            Qt.RightDockWidgetArea, self.main_window.track_queue_dock
+        )
+        self.main_window.track_queue_dock.hide() # Hidden by default
+
         # Empty Frames Manager dock
         self.main_window.empty_frames_dock = EmptyFramesManagerDock(self.main_window)
         self.main_window.addDockWidget(
@@ -844,6 +861,7 @@ class UICreator:
             self.main_window.class_dock,
             self.main_window.evaluation_inspector_dock,
             self.main_window.sam_interactive_dock,
+            self.main_window.track_queue_dock,
             self.main_window.empty_frames_dock,
             self.main_window.class_frames_dock,
             self.main_window.uncertain_frames_dock,
@@ -872,6 +890,7 @@ class UICreator:
             (getattr(self.main_window, 'class_dock', None), getattr(self, 'toggle_classes_action', None)),
             (getattr(self.main_window, 'evaluation_inspector_dock', None), getattr(self, 'toggle_eval_inspector_action', None)),
             (getattr(self.main_window, 'sam_interactive_dock', None), getattr(self, 'toggle_sam_action', None)),
+            (getattr(self.main_window, 'track_queue_dock', None), getattr(self, 'toggle_track_queue_action', None)),
             (getattr(self.main_window, 'empty_frames_dock', None), getattr(self, 'toggle_empty_frames_action', None)),
             (getattr(self.main_window, 'class_frames_dock', None), getattr(self, 'toggle_class_frames_action', None)),
             (getattr(self.main_window, 'uncertain_frames_dock', None), getattr(self, 'toggle_uncertain_frames_action', None)),
