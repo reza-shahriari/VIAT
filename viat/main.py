@@ -2607,7 +2607,7 @@ class VideoAnnotationTool(QMainWindow):
         try:
             total_steps = abs(end_f - start_f) + 1
             progress = QProgressDialog(progress_label, 'Cancel', 0, total_steps, self)
-            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowModality(Qt.NonModal)
             progress.show()
             QApplication.processEvents()
 
@@ -2952,7 +2952,35 @@ class VideoAnnotationTool(QMainWindow):
             if current_vid:
                 return 'grouped', current_vid, current_vid
         video_name = getattr(self, 'video_filename', None)
-        return None, video_name, (os.path.basename(video_name) if video_name else 'current video')
+        if video_name:
+            return 'plain', video_name, os.path.basename(video_name)
+        return None, video_name, 'current video'
+
+    def _switch_to_plain_video(self, video_path, save_current=True):
+        """Switch the active video when neither Video Dataset mode nor
+        extracted-frame video_mode is in use -- i.e. the common case of videos
+        opened one at a time via File > Open Video. Exports/saves the current
+        video's results first (so nothing is lost switching away from it),
+        then loads the target video fresh."""
+        if not video_path or not os.path.isfile(video_path):
+            return False
+        if getattr(self, 'video_filename', None) and os.path.abspath(self.video_filename) == os.path.abspath(video_path):
+            return True
+        if save_current and getattr(self, 'video_filename', None):
+            self.export_current_video_results()
+        self.project_file = None
+        self.image_dataset_info = None
+        self.is_image_dataset = False
+        self.canvas.annotations = []
+        self.frame_annotations = {}
+        self.deleted_frames = set()
+        self.deleted_annotations = {}
+        self.current_frame = 0
+        self.frame_hashes = {}
+        self.duplicate_frames_cache = {}
+        self.load_video_file(video_path)
+        self.auto_import_video_annotations(video_path)
+        return bool(getattr(self, 'video_filename', None)) and os.path.abspath(self.video_filename) == os.path.abspath(video_path)
 
     def on_add_current_prompt_to_queue(self):
         """Capture the current SAM prompt + settings as a queued job, without
@@ -3022,18 +3050,42 @@ class VideoAnnotationTool(QMainWindow):
             'video_display': video_display,
         }
         job['display'] = self._job_display_text(job)
+
+        if self.track_queue and self._jobs_are_duplicate(self.track_queue[-1], job):
+            QMessageBox.information(self, 'Duplicate Job',
+                "This prompt is identical to the last job already in the queue "
+                "(same video, prompt, class, and range). Not adding a duplicate.")
+            return
+
         self.track_queue.append(job)
         self._refresh_track_queue_dock()
+        self.on_sam_clear_requested()
         if hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.show()
             self.track_queue_dock.raise_()
         self.statusBar.showMessage(f"Added job to queue: {job['display']}", 4000)
 
+    def _jobs_are_duplicate(self, job_a, job_b):
+        """True if two jobs would run the exact same tracking work: same video,
+        prompt (points/box/text), class, model settings, and range/direction."""
+        compare_keys = (
+            'video_switch_mode', 'video_identifier', 'strategy', 'start_f', 'end_f',
+            'direction', 'points', 'labels', 'box', 'text_prompt', 'target_class',
+            'model_type', 'tracker_engine', 'det_model_type',
+        )
+        return all(job_a.get(k) == job_b.get(k) for k in compare_keys)
+
     def _job_display_text(self, job):
         scope = {'frame': 'current frame', 'video': 'whole video',
                   'range': f"frames {job['start_f']+1}-{job['end_f']+1}",
                   'detect': f"detect {job['start_f']+1}-{job['end_f']+1}"}.get(job['strategy'], job['strategy'])
-        return f"{job.get('video_display','video')} | {job.get('target_class','?')} | {scope} | {job.get('direction','forward')}"
+        model_label = job.get('tracker_engine', 'sam')
+        if job.get('model_type'):
+            model_label = job['model_type']
+        blur_label = ''
+        if job.get('should_blur'):
+            blur_label = f" | BLUR({job.get('blur_shape', 'segmentation')})"
+        return f"{job.get('video_display','video')} | {job.get('target_class','?')} | {scope} | {job.get('direction','forward')} | {model_label}{blur_label}"
 
     def _refresh_track_queue_dock(self):
         if hasattr(self, 'track_queue_dock') and self.track_queue_dock:
@@ -3135,6 +3187,11 @@ class VideoAnnotationTool(QMainWindow):
                 self.track_queue_dock.update_job_status(job['job_id'], job['status'])
             QApplication.processEvents()
 
+        try:
+            self.export_current_video_results()
+        except Exception as e:
+            logger.error(f"Final export after queue finished failed: {e}")
+
         self._queue_running = False
         done = sum(1 for j in self.track_queue if j['status'] == 'done')
         failed = sum(1 for j in self.track_queue if j['status'] == 'failed')
@@ -3160,6 +3217,13 @@ class VideoAnnotationTool(QMainWindow):
                 return
         elif switch_mode == 'grouped' and video_identifier:
             self.on_video_selected(video_identifier)
+        elif switch_mode == 'plain' and video_identifier:
+            ok = self._switch_to_plain_video(video_identifier, save_current=True)
+            if not ok:
+                job['status'] = 'failed'
+                if hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(job['job_id'], f"Could not switch to video: {video_identifier}")
+                return
 
         pts = job.get('points') or []
         self.canvas.sam_prompt_points = [QPoint(int(x), int(y)) for x, y in pts]
@@ -3350,22 +3414,41 @@ class VideoAnnotationTool(QMainWindow):
             self.duplicate_frames_cache = {}
             self.load_video_file(filename)
 
-    @log_exceptions
-    def fast_export_video_and_next(self):
-        """Fast export to Raya with classes TXT and load next video."""
+    def _queue_safe_export_path(self, path):
+        """While the Track Queue is running, never silently overwrite a file
+        that already existed before this run (it may be prior manual work).
+        Returns an alternate path with a '_queue', '_queue2', ... suffix if
+        needed; returns path unchanged otherwise (or outside a queue run)."""
+        if not getattr(self, '_queue_running', False) or not os.path.exists(path):
+            return path
+        base, ext = os.path.splitext(path)
+        candidate = f"{base}_queue{ext}"
+        n = 2
+        while os.path.exists(candidate):
+            candidate = f"{base}_queue{n}{ext}"
+            n += 1
+        return candidate
+
+    def export_current_video_results(self, batch_job=None):
+        """Export the current video's annotations (Raya-with-classes TXT) and,
+        if any blur regions exist, the blurred video too. This is the export
+        half of 'Fast Export Video & Next' (Ctrl+Shift+E), factored out so the
+        Track Queue can run it automatically between videos. Returns True on
+        success, False on failure (errors are logged instead of shown as a
+        popup when batch_job is provided, so an overnight run doesn't stall)."""
         if not hasattr(self, 'video_filename') or not self.video_filename:
-            return
+            return False
 
         has_blurs = hasattr(self, 'blur_manager') and bool(self.blur_manager.blur_regions)
 
-        # 1. Export Raya with classes
         default_dir = os.path.dirname(self.video_filename)
         default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
-        
+
         if has_blurs:
             export_path = os.path.join(default_dir, default_filename + '_blurred.txt')
         else:
             export_path = os.path.join(default_dir, default_filename + '.txt')
+        export_path = self._queue_safe_export_path(export_path)
 
         from viat.utils.file_operations import export_raya_with_classes_annotations
         all_annotations = []
@@ -3375,10 +3458,10 @@ class VideoAnnotationTool(QMainWindow):
                 annotation_copy = copy.copy(annotation)
                 annotation_copy.frame = frame_num
                 all_annotations.append(annotation_copy)
-                
+
         if not all_annotations and self.canvas.annotations:
             all_annotations = list(self.canvas.annotations)
-            
+
         classes = list(self.canvas.class_colors.keys())
         try:
             deleted = getattr(self, 'deleted_frames', set())
@@ -3387,24 +3470,46 @@ class VideoAnnotationTool(QMainWindow):
             self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
             if hasattr(self, 'video_manager_dock'):
                 self.video_manager_dock.update_video_status(self.video_filename, True)
+            if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                    f"Exported annotations: {os.path.basename(export_path)}")
         except Exception as e:
-            QMessageBox.critical(self, 'Error', f'Failed to fast export: {str(e)}')
             import traceback
             traceback.print_exc()
-            return
-            
+            self._warn_or_log(batch_job, 'Error', f'Failed to fast export: {str(e)}')
+            return False
+
         if hasattr(self, 'auto_save_project_on_fast_export_act') and self.auto_save_project_on_fast_export_act.isChecked():
-            target_json = os.path.join(default_dir, default_filename + '.json')
+            target_json = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '.json'))
             self.save_project(target_json)
             self.project_file = target_json
-            
+
         if hasattr(self, 'clip_cuts_dock'):
             self.export_clip_cuts(auto_export_dir=default_dir)
             self.clip_cuts_dock.clear_all()
-            
+
         if has_blurs:
-            self.export_blurred_video(interactive=False)
-            
+            blurred_video_path = self._queue_safe_export_path(
+                os.path.join(default_dir, default_filename + '_blurred' + os.path.splitext(self.video_filename)[1]))
+            self.export_blurred_video(interactive=False, output_path=blurred_video_path)
+            if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                    f"Exported blurred video ({len(self.blur_manager.blur_regions)} blur region(s)): {os.path.basename(blurred_video_path)}")
+        elif getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+            self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                "No blur regions were created for this video (blur was off, or no job requested it).")
+
+        return True
+
+    @log_exceptions
+    def fast_export_video_and_next(self):
+        """Fast export to Raya with classes TXT and load next video."""
+        if not hasattr(self, 'video_filename') or not self.video_filename:
+            return
+        default_dir = os.path.dirname(self.video_filename)
+        if not self.export_current_video_results():
+            return
+
         # 2. Advance to next video
         if getattr(self, 'is_video_dataset', False) and hasattr(self, 'video_dataset_info') and self.video_dataset_info:
             all_vids = self.video_dataset_info.all_videos
@@ -3686,13 +3791,18 @@ class VideoAnnotationTool(QMainWindow):
                 self.autosave_timer.start(self.autosave_interval)
             if not from_dataset:
                 if self.duplicate_frames_enabled and not self.frame_hashes:
-                    reply = QMessageBox.question(self,
-                        'Duplicate Frame Detection',
-                        """Would you like to scan this video for duplicate frames?
+                    if getattr(self, '_queue_running', False):
+                        if hasattr(self, 'track_queue_dock'):
+                            self.track_queue_dock.append_log(None,
+                                f"Skipped duplicate-frame scan for {os.path.basename(filename)} (queue running).")
+                    else:
+                        reply = QMessageBox.question(self,
+                            'Duplicate Frame Detection',
+                            """Would you like to scan this video for duplicate frames?
 (This will help automatically propagate annotations)"""
-                        , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                    if reply == QMessageBox.Yes:
-                        QTimer.singleShot(500, self.scan_video_for_duplicates)
+                            , QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                        if reply == QMessageBox.Yes:
+                            QTimer.singleShot(500, self.scan_video_for_duplicates)
                 elif self.duplicate_frames_enabled and self.frame_hashes:
                     duplicate_count = sum(len(frames) - 1 for frames in self.
                         duplicate_frames_cache.values() if len(frames) > 1)
@@ -3701,7 +3811,8 @@ class VideoAnnotationTool(QMainWindow):
                         , 5000)
                 if not hasattr(self, '_loading_from_project'
                     ) or not self._loading_from_project:
-                    self.check_for_annotation_files(filename)
+                    if not getattr(self, '_queue_running', False):
+                        self.check_for_annotation_files(filename)
                     
             return True
         else:
@@ -3787,9 +3898,9 @@ class VideoAnnotationTool(QMainWindow):
         if getattr(self, 'video_filename', None) and os.path.abspath(self.video_filename) == os.path.abspath(target_vinfo.path):
             return True
 
-        # 1. Auto-save current video annotations if present
+        # 1. Auto-save current video annotations (+ blurred video, if any) if present
         if save_current and getattr(self, 'video_filename', None):
-            self.auto_save_current_video_annotations()
+            self.export_current_video_results()
 
         # 2. Reset canvas and frame annotation state for new video
         self.canvas.annotations = []
@@ -6303,7 +6414,7 @@ First error: {errors[0]}"""
 
     @log_exceptions
     @log_exceptions
-    def export_blurred_video(self, interactive=True):
+    def export_blurred_video(self, interactive=True, output_path=None):
         """Export the current video or image dataset with blurs baked into the frames/files."""
         is_video = hasattr(self, 'video_filename') and self.video_filename and getattr(self, 'cap', None) is not None
         is_image_ds = getattr(self, 'is_image_dataset', False) or (hasattr(self, 'image_files') and bool(self.image_files))
@@ -6322,8 +6433,11 @@ First error: {errors[0]}"""
             self.export_blurred_image_dataset(interactive=interactive)
             return
 
-        base, ext = os.path.splitext(self.video_filename)
-        output_filename = f"{base}_blurred{ext}"
+        if output_path:
+            output_filename = output_path
+        else:
+            base, ext = os.path.splitext(self.video_filename)
+            output_filename = f"{base}_blurred{ext}"
         
         if interactive:
             reply = QMessageBox.question(self, 'Export Blurred Video',
@@ -6334,7 +6448,7 @@ First error: {errors[0]}"""
                 return
             
         progress = QProgressDialog("Exporting blurred video...", "Cancel", 0, self.total_frames, self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.NonModal)
         progress.show()
         
         # Get video properties
@@ -8574,7 +8688,7 @@ Do you want to scan the entire video now for duplicate frames?
         from PyQt5.QtWidgets import QProgressDialog
         progress = QProgressDialog('Tracking object...', 'Cancel', 
             start_frame + 1, end_frame, self)
-        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowModality(Qt.NonModal)
         progress.show()
         last_successful_frame = start_frame
         f_idx = start_frame

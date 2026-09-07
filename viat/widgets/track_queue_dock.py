@@ -108,8 +108,6 @@ class TrackQueueDock(QDockWidget):
         for job in jobs:
             item = QListWidgetItem(self._format_job(job))
             item.setData(Qt.UserRole, job.get('job_id'))
-            color = STATUS_COLORS.get(job.get('status', 'pending'), '#888888')
-            item.setForeground(Qt.black)
             item.setToolTip(job.get('display', ''))
             self.list_widget.addItem(item)
 

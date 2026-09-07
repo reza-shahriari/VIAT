@@ -120,7 +120,8 @@ sam3_src*
 # Models and Weights
 weights/
 *.pt
-
+*.bin
+*.engine
 # Datasets and Temporary Files
 test_dataset/
 temp.jpg

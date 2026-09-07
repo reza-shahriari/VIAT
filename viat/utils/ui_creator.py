@@ -792,9 +792,11 @@ class UICreator:
         self.main_window.sam_interactive_dock.hide() # Hidden by default
 
         # Track Queue dock (batch tracking jobs, run sequentially/overnight)
+        # Placed on the LEFT (not tabified with SAM Interactive) so both panels
+        # can be visible side by side while queuing/running jobs.
         self.main_window.track_queue_dock = TrackQueueDock(self.main_window)
         self.main_window.addDockWidget(
-            Qt.RightDockWidgetArea, self.main_window.track_queue_dock
+            Qt.LeftDockWidgetArea, self.main_window.track_queue_dock
         )
         self.main_window.track_queue_dock.hide() # Hidden by default
 
@@ -861,7 +863,6 @@ class UICreator:
             self.main_window.class_dock,
             self.main_window.evaluation_inspector_dock,
             self.main_window.sam_interactive_dock,
-            self.main_window.track_queue_dock,
             self.main_window.empty_frames_dock,
             self.main_window.class_frames_dock,
             self.main_window.uncertain_frames_dock,
