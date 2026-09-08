@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QFileDialog, QAbstractItemView
 )
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor
 
 STATUS_COLORS = {
     'pending': '#888888',
@@ -30,6 +31,7 @@ class TrackQueueDock(QDockWidget):
     clear_queue_requested = pyqtSignal()
     save_queue_requested = pyqtSignal()
     load_queue_requested = pyqtSignal()
+    set_video_folders_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Track Queue", parent)
@@ -83,6 +85,18 @@ class TrackQueueDock(QDockWidget):
         row3.addWidget(self.btn_load)
         layout.addLayout(row3)
 
+        row_folders = QHBoxLayout()
+        self.btn_set_folders = QPushButton("Set Video Folders...")
+        self.btn_set_folders.setToolTip(
+            "Point at the folder(s) that hold this queue's videos on THIS computer.\n"
+            "Use this after loading a queue that was authored on another PC -- the\n"
+            "videos are matched by filename, so they don't need to be in the same\n"
+            "folder layout as the original machine, and can span multiple folders."
+        )
+        self.btn_set_folders.clicked.connect(self.set_video_folders_requested.emit)
+        row_folders.addWidget(self.btn_set_folders)
+        layout.addLayout(row_folders)
+
         row4 = QHBoxLayout()
         self.btn_run = QPushButton("\u25b6 Run Queue")
         self.btn_run.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
@@ -109,24 +123,33 @@ class TrackQueueDock(QDockWidget):
             item = QListWidgetItem(self._format_job(job))
             item.setData(Qt.UserRole, job.get('job_id'))
             item.setToolTip(job.get('display', ''))
+            self._apply_status_color(item, job.get('status', 'pending'))
             self.list_widget.addItem(item)
 
     def update_job_status(self, job_id, status):
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             if item.data(Qt.UserRole) == job_id:
-                text = item.text().split(' \u2014 ')[0]
+                text = item.text().rsplit(' \u2014 ', 1)[0]
                 item.setText(f"{text} \u2014 {status.upper()}")
+                self._apply_status_color(item, status)
                 return
 
     def append_log(self, job_id, message):
         prefix = f"[{job_id[:8]}] " if job_id else ""
         self.log_view.appendPlainText(f"{prefix}{message}")
 
+    def _apply_status_color(self, item, status):
+        color = STATUS_COLORS.get(status, STATUS_COLORS['pending'])
+        item.setForeground(QColor(color))
+
     def _format_job(self, job):
         base = job.get('display', 'Job')
         status = job.get('status', 'pending')
-        return f"{base} \u2014 {status.upper()}"
+        # Blur vs plain-track is easy to lose track of across a long queue,
+        # so lead every row with an unambiguous badge for it.
+        badge = "\U0001F512 BLUR" if job.get('should_blur') else "\U0001F3AF TRACK"
+        return f"[{badge}] {base} \u2014 {status.upper()}"
 
     # -- selection helpers -----------------------------------------------
     def _selected_job_id(self):

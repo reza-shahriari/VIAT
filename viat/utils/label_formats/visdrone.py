@@ -22,6 +22,110 @@ Fields:
         11: others
     - truncation: 0 (no truncation), 1 (partial 1%~50%), 2 (heavy >50%)
     - occlusion: 0 (no occlusion), 1 (partial 1%~50%), 2 (heavy >50%)
+
+Internal Representation:
+    - Truncation and occlusion are merged into a single 'occlusion' attribute dictionary.
+    - Structure: attributes["occlusion"] = {"truncation": <int>, "occlusion": <int>}
+"""
+
+import os
+from .base import LabelFormat, LabelParseError
+
+VISDRONE_CLASSES = [
+    "ignored_region",   # 0
+    "pedestrian",       # 1
+    "person",           # 2
+    "bicycle",          # 3
+    "car",              # 4
+    "van",              # 5
+    "truck",            # 6
+    "tricycle",         # 7
+    "awning-tricycle",  # 8
+    "bus",              # 9
+    "motor",            # 10
+    "others",           # 11
+]
+
+# Standard 10 target classes (excluding ignored_region and others)
+VISDRONE_TARGET_CLASSES = [
+    "pedestrian",
+    "person",
+    "bicycle",
+    "car",
+    "van",
+    "truck",
+    "tricycle",
+    "awning-tricycle",
+    "bus",
+    "motor",
+]
+
+
+class VisDroneLabelFormat(LabelFormat):
+    name = "visdrone"
+    extensions = (".txt",)
+    per_image = True
+
+    def find_label_file(self, image_path, label_dirs):
+        """Return the label file path for image_path or None.
+
+        Tries matching by stem in:
+          - provided label_dirs (e.g. annotations/ or labels/)
+          - sibling 'annotations' folder next to 'images'
+          - same folder as image
+        """
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        for d in label_dirs:
+            for ext in self.extensions:
+                cand = os.path.join(d, stem + ext)
+                if os.path.isfile(cand):
+                    return cand
+
+        # Check sibling 'annotations' directory if image is in 'images'
+        img_dir = os.path.dirname(image_path)
+        parent_dir = os.path.dirname(img_dir)
+        ann_sibling = os.path.join(parent_dir, "annotations")
+        if os.path.isdir(ann_sibling):
+            cand = os.path.join(ann_sibling, stem + ".txt")
+            if os.path.isfile(cand):
+                return cand
+
+        # Same folder as image
+        cand = os.path.join(img_dir, stem + ".txt")
+        if os.path.isfile(cand):
+            return cand
+
+        return None
+
+"""
+VisDrone label-format plugin for VIAT.
+
+VisDrone annotation format:
+    <bbox_left>,<bbox_top>,<bbox_width>,<bbox_height>,<score>,<object_category>,<truncation>,<occlusion>
+
+Fields:
+    - bbox_left, bbox_top, bbox_width, bbox_height: pixel coordinates (top-left, width, height)
+    - score: confidence score (1 for ground truth, [0, 1] for predictions)
+    - object_category:
+        0: ignored regions
+        1: pedestrian
+        2: person
+        3: bicycle
+        4: car
+        5: van
+        6: truck
+        7: tricycle
+        8: awning-tricycle
+        9: bus
+        10: motor
+        11: others
+    - truncation: 0 (no truncation), 1 (partial 1%~50%), 2 (heavy >50%)
+    - occlusion: 0 (no occlusion), 1 (partial 1%~50%), 2 (heavy >50%)
+
+Internal Representation:
+    - Truncation and occlusion are merged into a single 'occlusion' attribute.
+    - The value is calculated as the maximum of the original truncation and occlusion values.
+    - Structure: attributes["occlusion"] = <int (0, 1, or 2)>
 """
 
 import os
@@ -105,6 +209,10 @@ class VisDroneLabelFormat(LabelFormat):
             list of dicts, each with keys:
                 class_name, class_index, x, y, w, h (pixels),
                 source, score, attributes, segmentation
+            where 'attributes' contains:
+                - occlusion: an integer representing the max of truncation and occlusion.
+                - score: the confidence score
+                - category_id: the original category ID
         """
         boxes = []
         if not os.path.isfile(label_path):
@@ -153,9 +261,11 @@ class VisDroneLabelFormat(LabelFormat):
                 else:
                     class_name = f"category_{cat_id}"
 
+                # Merge truncation and occlusion: take the max value
+                merged_occlusion = max(truncation, occlusion)
+
                 attributes = {
-                    "truncation": truncation,
-                    "occlusion": occlusion,
+                    "occlusion": merged_occlusion,
                     "score": score,
                     "category_id": cat_id,
                 }
@@ -176,7 +286,12 @@ class VisDroneLabelFormat(LabelFormat):
         return boxes
 
     def dump(self, boxes, image_size, classes=None):
-        """Serialize boxes back to VisDrone format."""
+        """Serialize boxes back to VisDrone format.
+        
+        Expects the 'attributes' dict to contain the merged 'occlusion' value.
+        Since the original distinct values are merged in load, this function writes
+        the merged value to both the truncation and occlusion fields in the file.
+        """
         class_map = classes if classes else VISDRONE_CLASSES
         lines = []
         for b in boxes:
@@ -188,8 +303,13 @@ class VisDroneLabelFormat(LabelFormat):
             score_val = int(score) if score == int(score) else round(score, 3)
 
             attrs = b.get("attributes", {}) or {}
-            truncation = int(attrs.get("truncation", 0))
-            occlusion = int(attrs.get("occlusion", 0))
+            
+            # Retrieve the merged occlusion value
+            merged_val = int(attrs.get("occlusion", 0))
+            
+            # Apply the value to both truncation and occlusion fields
+            truncation = merged_val
+            occlusion = merged_val
 
             cls_name = b.get("class_name", "")
             if "category_id" in attrs:
@@ -204,3 +324,4 @@ class VisDroneLabelFormat(LabelFormat):
             lines.append(f"{x},{y},{w},{h},{score_val},{cat_id},{truncation},{occlusion}\n")
 
         return "".join(lines)
+   

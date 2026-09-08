@@ -1199,6 +1199,7 @@ class VideoAnnotationTool(QMainWindow):
             dock.clear_queue_requested.connect(self.on_clear_track_queue)
             dock.save_queue_requested.connect(self.on_save_track_queue)
             dock.load_queue_requested.connect(self.on_load_track_queue)
+            dock.set_video_folders_requested.connect(self.on_set_track_queue_video_folders)
 
     def setup_evaluation_inspector(self):
         """Set up Evaluation Inspector Dock signals and menu actions."""
@@ -1405,6 +1406,15 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'canvas'):
             self.canvas.set_eval_predictions(predictions_dict, default_conf, iou_thr)
             self.canvas.set_eval_mode(True)
+
+        # The Video Manager dock may have been shown as a side effect of loading
+        # the ground-truth folder as a video dataset (see
+        # load_evaluation_dataset_into_inspector). Switching videos through it
+        # bypasses load_eval_video_sequence's GT/predictions sync entirely, so
+        # keep it closed for the duration of evaluation inspection; use the
+        # Evaluation Inspector's own video switcher instead.
+        if hasattr(self, 'video_manager_dock'):
+            self.video_manager_dock.hide()
 
         if hasattr(self, 'evaluation_inspector_dock') and self.evaluation_inspector_dock:
             dock = self.evaluation_inspector_dock
@@ -2426,15 +2436,18 @@ class VideoAnnotationTool(QMainWindow):
         step = -1 if is_backward else 1
 
         auto_blur_global = getattr(self, 'auto_blur_labels', False)
-        sam_blur_checked = self.sam_interactive_dock.get_blur_tracked_objects()
         should_blur = False
-        
-        if sam_blur_checked:
-            should_blur = True
-        elif batch_job is not None:
-            # No user present to answer the dialog during a batch run; fall back
-            # to whatever the job captured for its blur setting.
+
+        if batch_job is not None:
+            # Batch/queued jobs each captured their own blur setting when they
+            # were added to the queue -- always honor that, regardless of
+            # whatever the SAM panel's live "Automatically Blur" checkbox
+            # happens to be set to right now (it applies only to interactive,
+            # non-batch tracking). Otherwise every job in the queue would
+            # inherit whichever state the checkbox was left in.
             should_blur = bool(batch_job.get('should_blur', False))
+        elif self.sam_interactive_dock.get_blur_tracked_objects():
+            should_blur = True
         elif auto_blur_global:
             reply = QMessageBox.question(self, "Blur Tracking Results?",
                 "Global 'Auto Blur All New Labels' is enabled, but the 'Automatically Blur Tracked Objects' setting in the SAM panel is not checked.\n\n"
@@ -2465,7 +2478,13 @@ class VideoAnnotationTool(QMainWindow):
                 self.blur_manager.add_bbox_region(frame_idx, b_rect, self.canvas.blur_kernel, margin=blur_margin)
             if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
                 self.remove_annotations_under_blur(frame_idx)
-            
+            if batch_job is not None and hasattr(self, '_queue_run_stats'):
+                self._queue_run_stats['blurs'] += 1
+
+        def _record_box_created():
+            if batch_job is not None and hasattr(self, '_queue_run_stats'):
+                self._queue_run_stats['boxes'] += 1
+
         if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
             current_vid = None
             for vid_name, indices in self.video_groups.items():
@@ -2673,6 +2692,7 @@ class VideoAnnotationTool(QMainWindow):
                         _apply_sam_blur(start_f, polygon, ann_rect)
                     else:
                         self.frame_annotations[start_f].append(ann)
+                        _record_box_created()
                 else:
                     self._warn_or_log(batch_job, 'Tracking Error',
                         'No object detected.')
@@ -2788,6 +2808,7 @@ class VideoAnnotationTool(QMainWindow):
                             _apply_sam_blur(f_idx, polygon, ann_rect)
                         else:
                             self.frame_annotations[f_idx].append(ann)
+                            _record_box_created()
                         detected_count += 1
                         self.load_current_frame_annotations()
                         self.update_frame_display()
@@ -2888,6 +2909,7 @@ class VideoAnnotationTool(QMainWindow):
                             _apply_sam_blur(current_f, polygon, rect)
                         else:
                             self.frame_annotations[current_f].append(ann)
+                            _record_box_created()
                     self.load_current_frame_annotations()
                     self.update_frame_display()
                     processed_count += 1
@@ -3060,6 +3082,7 @@ class VideoAnnotationTool(QMainWindow):
         self.track_queue.append(job)
         self._refresh_track_queue_dock()
         self.on_sam_clear_requested()
+        self.sam_interactive_dock.mark_added_to_queue()
         if hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.show()
             self.track_queue_dock.raise_()
@@ -3117,9 +3140,13 @@ class VideoAnnotationTool(QMainWindow):
         self._refresh_track_queue_dock()
 
     def on_save_track_queue(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Save Track Queue', '', 'JSON Files (*.json)')
+        from datetime import datetime
+        default_name = f"track_queue_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        path, _ = QFileDialog.getSaveFileName(self, 'Save Track Queue', default_name, 'JSON Files (*.json)')
         if not path:
             return
+        if not path.lower().endswith('.json'):
+            path += '.json'
         try:
             with open(path, 'w') as f:
                 json.dump(self.track_queue, f, indent=2)
@@ -3144,8 +3171,91 @@ class VideoAnnotationTool(QMainWindow):
             self.track_queue.extend(jobs)
             self._refresh_track_queue_dock()
             self.statusBar.showMessage(f'Loaded {len(jobs)} job(s) from {path}', 4000)
+            # This queue was very likely authored on a different computer (that's
+            # the whole point of sharing it) -- its video paths won't resolve here.
+            self._resolve_missing_job_videos(jobs)
+            self._refresh_track_queue_dock()
         except Exception as e:
             QMessageBox.warning(self, 'Load Failed', str(e))
+
+    def on_set_track_queue_video_folders(self):
+        """Manually (re)point the Track Queue at folder(s) holding its videos
+        on this machine. Useful if new folders were added, or if some jobs
+        still failed to resolve right after loading."""
+        self._resolve_missing_job_videos(self.track_queue, force_prompt=True)
+        self._refresh_track_queue_dock()
+
+    def _resolve_missing_job_videos(self, jobs, force_prompt=False):
+        """Videos referenced by 'plain' (File > Open Video) jobs are stored as
+        an absolute path from the authoring machine, which won't exist once the
+        queue is shared to another PC. Since the videos are the same *filename*
+        on every machine, ask the user for the folder(s) that hold them here
+        (they may be split across more than one folder) and re-point each job
+        at the local file with a matching name."""
+        missing = [j for j in jobs if j.get('video_switch_mode') == 'plain'
+                   and j.get('video_identifier') and not os.path.isfile(j['video_identifier'])]
+        if not missing and not force_prompt:
+            return
+        if not missing:
+            QMessageBox.information(self, 'Track Queue Videos',
+                'Every job in the queue already resolves to a video on this computer.')
+            return
+
+        missing_names = sorted({os.path.basename(j['video_identifier']) for j in missing})
+        reply = QMessageBox.question(self, 'Videos Not Found',
+            f"{len(missing_names)} referenced video(s) were not found at their original "
+            "location (this queue was likely authored on another computer).\n\n"
+            "Select the folder(s) where these videos live on this computer? "
+            "They'll be matched by filename, so they don't need to match the "
+            "original folder layout, and can be split across several folders.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return
+
+        search_dirs = []
+        while True:
+            folder = QFileDialog.getExistingDirectory(
+                self, f'Select Folder Containing Videos ({len(search_dirs)} added so far)')
+            if not folder:
+                break
+            search_dirs.append(folder)
+            more = QMessageBox.question(self, 'Add Another Folder?',
+                "Videos can be split across multiple folders.\nAdd another folder to search?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if more != QMessageBox.Yes:
+                break
+        if not search_dirs:
+            return
+
+        self.track_queue_video_search_dirs = list(dict.fromkeys(
+            getattr(self, 'track_queue_video_search_dirs', []) + search_dirs))
+
+        video_exts = ('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.m4v')
+        name_index = {}
+        for d in self.track_queue_video_search_dirs:
+            for root, _, files in os.walk(d):
+                for fname in files:
+                    if fname.lower().endswith(video_exts) and fname not in name_index:
+                        name_index[fname] = os.path.join(root, fname)
+
+        resolved, unresolved = 0, []
+        for j in missing:
+            bname = os.path.basename(j['video_identifier'])
+            found = name_index.get(bname)
+            if found:
+                j['video_identifier'] = found
+                j['video_display'] = bname
+                j['display'] = self._job_display_text(j)
+                resolved += 1
+            else:
+                unresolved.append(bname)
+
+        msg = f"Resolved {resolved}/{len(missing)} video path(s) from the selected folder(s)."
+        if unresolved:
+            msg += "\n\nStill not found (check spelling/extension or add another folder):\n" + "\n".join(unresolved[:20])
+            if len(unresolved) > 20:
+                msg += f"\n...and {len(unresolved) - 20} more."
+        QMessageBox.information(self, 'Video Path Resolution', msg)
 
     def on_stop_track_queue(self):
         if getattr(self, '_queue_running', False):
@@ -3160,8 +3270,15 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.information(self, 'Track Queue', 'No pending jobs in the queue.')
             return
 
+        # Safety net: catch any job whose video still doesn't resolve on this
+        # machine *before* starting, rather than failing partway through an
+        # unattended run.
+        self._resolve_missing_job_videos(pending_jobs)
+        self._refresh_track_queue_dock()
+
         self._queue_running = True
         self._queue_stop_requested = False
+        self._queue_run_stats = {'boxes': 0, 'blurs': 0}
         total = len(pending_jobs)
         for i, job in enumerate(pending_jobs):
             if self._queue_stop_requested:
@@ -3197,9 +3314,15 @@ class VideoAnnotationTool(QMainWindow):
         failed = sum(1 for j in self.track_queue if j['status'] == 'failed')
         lost = sum(1 for j in self.track_queue if j['status'] == 'lost')
         stopped = sum(1 for j in self.track_queue if j['status'] == 'stopped')
+        stats = getattr(self, '_queue_run_stats', {'boxes': 0, 'blurs': 0})
+        benchmark = (f"Tracked {total} prompt(s): created {stats['boxes']} bounding box(es) "
+                     f"and {stats['blurs']} blur region(s).")
         self.statusBar.showMessage('Track queue finished.', 5000)
+        if hasattr(self, 'track_queue_dock'):
+            self.track_queue_dock.append_log(None, benchmark)
         QMessageBox.information(self, 'Batch Queue Finished',
-            f"{done} completed, {failed} failed, {lost} lost object, {stopped} stopped.\n"
+            f"{done} completed, {failed} failed, {lost} lost object, {stopped} stopped.\n\n"
+            f"{benchmark}\n\n"
             "See the Batch Log in the Track Queue panel for per-job details.")
 
     def _run_single_track_job(self, job):
@@ -3479,10 +3602,21 @@ class VideoAnnotationTool(QMainWindow):
             self._warn_or_log(batch_job, 'Error', f'Failed to fast export: {str(e)}')
             return False
 
-        if hasattr(self, 'auto_save_project_on_fast_export_act') and self.auto_save_project_on_fast_export_act.isChecked():
+        # Always save the full VIAT project JSON when exporting from the Track
+        # Queue -- the Raya-with-classes TXT only carries boxes/classes, but
+        # the project JSON also carries blur regions, so this is what makes
+        # blur work shareable between the PC that ran SAM and whoever
+        # rechecks the labels afterwards. Outside the queue, keep respecting
+        # the user's explicit auto-save-on-export preference.
+        should_save_project_json = getattr(self, '_queue_running', False) or (
+            hasattr(self, 'auto_save_project_on_fast_export_act') and self.auto_save_project_on_fast_export_act.isChecked())
+        if should_save_project_json:
             target_json = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '.json'))
             self.save_project(target_json)
             self.project_file = target_json
+            if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                    f"Saved project JSON (includes blur data): {os.path.basename(target_json)}")
 
         if hasattr(self, 'clip_cuts_dock'):
             self.export_clip_cuts(auto_export_dir=default_dir)
@@ -4881,6 +5015,13 @@ Would you like to load it?"""
         self.update_frame_display()
 
     def on_video_selected(self, video_name):
+        if getattr(self, 'canvas', None) and getattr(self.canvas, 'eval_mode', False) \
+                and hasattr(self, 'eval_dataset_context') and self.eval_dataset_context:
+            # In evaluation inspection, always go through the eval-aware loader
+            # so ground truth / predictions stay in sync with whatever video is
+            # on screen, even if the Video Manager dock got reopened manually.
+            self.load_eval_video_sequence(video_name)
+            return
         if getattr(self, 'is_video_dataset', False):
             self.switch_to_dataset_video(video_name, save_current=True)
             return
@@ -6435,6 +6576,7 @@ First error: {errors[0]}"""
 
         if output_path:
             output_filename = output_path
+            ext = os.path.splitext(output_path)[1]
         else:
             base, ext = os.path.splitext(self.video_filename)
             output_filename = f"{base}_blurred{ext}"
