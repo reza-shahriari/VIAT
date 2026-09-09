@@ -129,6 +129,12 @@ class VideoCanvas(QWidget):
         self.sam_preview_polygon = None
         self.sam_preview_rect = None
         self.sam_preview_class = None
+        # Previews for prompts already added to the Track Queue, kept on
+        # screen (per frame index) after the live prompt is cleared, so
+        # queuing several objects on the same frame doesn't lose track of
+        # which ones are already queued. {frame_idx: [{'polygon', 'rect',
+        # 'class', 'job_id'}, ...]}
+        self.queued_job_previews = {}
 
         # Blur pen tool state
         self.blur_pen_active = False   # True when Blur Mode + Pen are both on
@@ -610,6 +616,40 @@ class VideoCanvas(QWidget):
                         badge_rect = QRect(d_rect.left(), max(0, d_rect.top() - 18), 90, 16)
                         painter.drawRect(badge_rect)
                         painter.drawText(badge_rect, int(Qt.AlignCenter), "SAM Preview")
+
+                    # Draw previews for prompts already added to the Track
+                    # Queue on THIS frame -- stays on screen after the live
+                    # prompt/preview is cleared for the next object, so
+                    # queuing several objects on one frame doesn't lose track
+                    # of which ones are already queued.
+                    cur_frame_for_queue = getattr(self.main_window, 'current_frame', -1) if hasattr(self, 'main_window') else -1
+                    for entry in getattr(self, 'queued_job_previews', {}).get(cur_frame_for_queue, []):
+                        q_cls_color = self.class_colors.get(entry.get('class'), QColor(255, 255, 255))
+                        polygon = entry.get('polygon')
+                        if polygon:
+                            from PyQt5.QtGui import QPolygonF
+                            from PyQt5.QtCore import QPointF
+                            q_poly = QPolygonF()
+                            for pt in polygon:
+                                disp_pt = self.image_to_display_point(pt[0], pt[1])
+                                if disp_pt:
+                                    q_poly.append(QPointF(disp_pt))
+                            if not q_poly.isEmpty():
+                                painter.setBrush(QBrush(QColor(q_cls_color.red(), q_cls_color.green(), q_cls_color.blue(), 60)))
+                                painter.setPen(QPen(q_cls_color, 2, Qt.SolidLine))
+                                painter.drawPolygon(q_poly)
+                        rect = entry.get('rect')
+                        if rect:
+                            q_d_rect = self.image_to_display_rect(rect)
+                            painter.setPen(QPen(q_cls_color, 2, Qt.SolidLine))
+                            painter.setBrush(Qt.NoBrush)
+                            painter.drawRect(q_d_rect)
+                            painter.setPen(QPen(Qt.white))
+                            painter.setBrush(QBrush(QColor(0, 0, 0, 170)))
+                            badge_text = "Blur Queue" if entry.get('should_blur') else "Queued"
+                            q_badge = QRect(q_d_rect.left(), max(0, q_d_rect.top() - 18), 90, 16)
+                            painter.drawRect(q_badge)
+                            painter.drawText(q_badge, int(Qt.AlignCenter), badge_text)
 
                 # Draw REMOVED overlay banner if current frame is marked as deleted/removed
                 if hasattr(self, 'main_window') and self.main_window:

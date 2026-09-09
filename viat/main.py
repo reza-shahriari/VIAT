@@ -3004,6 +3004,44 @@ class VideoAnnotationTool(QMainWindow):
         self.auto_import_video_annotations(video_path)
         return bool(getattr(self, 'video_filename', None)) and os.path.abspath(self.video_filename) == os.path.abspath(video_path)
 
+    def _capture_job_thumbnail(self, points, labels, box):
+        """Render a small snapshot of the current frame showing exactly what
+        was prompted -- the same mask preview drawn by 'Preview Mask [Z]' if
+        one was generated, plus the box/points -- so the Track Queue can show
+        each job as a picture instead of a wall of text."""
+        frame = getattr(self.canvas, 'current_frame_array', None)
+        if frame is None:
+            return None
+        try:
+            import cv2
+            import numpy as np
+            import base64
+            img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).copy()
+            polygon = getattr(self.canvas, 'sam_preview_polygon', None)
+            if polygon:
+                pts = np.array(polygon, dtype=np.int32).reshape(-1, 1, 2)
+                overlay = img.copy()
+                cv2.fillPoly(overlay, [pts], (0, 200, 0))
+                img = cv2.addWeighted(overlay, 0.35, img, 0.65, 0)
+                cv2.polylines(img, [pts], True, (0, 220, 0), 2)
+            if box:
+                x, y, w, h = box
+                cv2.rectangle(img, (int(x), int(y)), (int(x + w), int(y + h)), (0, 200, 255), 2)
+            for (px, py), lbl in zip(points or [], labels or []):
+                color = (0, 255, 0) if lbl == 1 else (0, 0, 255)
+                cv2.circle(img, (int(px), int(py)), 6, color, -1)
+            h, w = img.shape[:2]
+            target_w = 200
+            if w > 0:
+                img = cv2.resize(img, (target_w, max(1, int(h * target_w / w))))
+            ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if not ok:
+                return None
+            return base64.b64encode(buf.tobytes()).decode('ascii')
+        except Exception as e:
+            logger.error(f"Could not capture Track Queue job thumbnail: {e}")
+            return None
+
     def on_add_current_prompt_to_queue(self):
         """Capture the current SAM prompt + settings as a queued job, without
         running it. Mirrors the prompt-reading logic in on_sam_track_requested,
@@ -3070,6 +3108,7 @@ class VideoAnnotationTool(QMainWindow):
             'video_switch_mode': video_switch_mode,
             'video_identifier': video_identifier,
             'video_display': video_display,
+            'thumbnail': self._capture_job_thumbnail(points, labels, box),
         }
         job['display'] = self._job_display_text(job)
 
@@ -3081,8 +3120,25 @@ class VideoAnnotationTool(QMainWindow):
 
         self.track_queue.append(job)
         self._refresh_track_queue_dock()
+
+        # Keep this prompt's mask/box drawn on the frame after it's cleared
+        # for the next object -- with several objects queued on the same
+        # frame, this is what stops the user from losing track of which
+        # ones are already queued.
+        if not hasattr(self.canvas, 'queued_job_previews'):
+            self.canvas.queued_job_previews = {}
+        preview_rect = self.canvas.sam_prompt_box or getattr(self.canvas, 'sam_preview_rect', None)
+        preview_polygon = list(self.canvas.sam_preview_polygon) if getattr(self.canvas, 'sam_preview_polygon', None) else None
+        self.canvas.queued_job_previews.setdefault(self.current_frame, []).append({
+            'job_id': job_id,
+            'polygon': preview_polygon,
+            'rect': preview_rect,
+            'class': target_class,
+            'should_blur': job.get('should_blur', False),
+        })
+
         self.on_sam_clear_requested()
-        self.sam_interactive_dock.mark_added_to_queue()
+        self.canvas.update()
         if hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.show()
             self.track_queue_dock.raise_()
@@ -3114,11 +3170,25 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self, 'track_queue_dock') and self.track_queue_dock:
             self.track_queue_dock.set_jobs(self.track_queue)
 
+    def _discard_queued_job_preview(self, job_id):
+        """Remove a job's persistent on-canvas preview (see
+        on_add_current_prompt_to_queue), e.g. once it's removed from the
+        queue or has actually been run."""
+        previews = getattr(self.canvas, 'queued_job_previews', None)
+        if not previews:
+            return
+        for frame_idx in list(previews.keys()):
+            previews[frame_idx] = [e for e in previews[frame_idx] if e.get('job_id') != job_id]
+            if not previews[frame_idx]:
+                del previews[frame_idx]
+        self.canvas.update()
+
     def on_remove_track_queue_job(self, job_id):
         if getattr(self, '_queue_running', False):
             QMessageBox.information(self, 'Queue Running', 'Stop the queue before editing it.')
             return
         self.track_queue = [j for j in self.track_queue if j['job_id'] != job_id]
+        self._discard_queued_job_preview(job_id)
         self._refresh_track_queue_dock()
 
     def on_move_track_queue_job(self, job_id, direction):
@@ -3137,6 +3207,9 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.information(self, 'Queue Running', 'Stop the queue before clearing it.')
             return
         self.track_queue = []
+        if hasattr(self.canvas, 'queued_job_previews'):
+            self.canvas.queued_job_previews = {}
+            self.canvas.update()
         self._refresh_track_queue_dock()
 
     def on_save_track_queue(self):
@@ -3287,6 +3360,7 @@ class VideoAnnotationTool(QMainWindow):
                     self.track_queue_dock.update_job_status(job['job_id'], 'stopped')
                 continue
             job['status'] = 'running'
+            self._discard_queued_job_preview(job['job_id'])
             if hasattr(self, 'track_queue_dock'):
                 self.track_queue_dock.update_job_status(job['job_id'], 'running')
             self.statusBar.showMessage(f"Running queued job {i+1}/{total}: {job.get('display','')}")
@@ -3325,6 +3399,41 @@ class VideoAnnotationTool(QMainWindow):
             f"{benchmark}\n\n"
             "See the Batch Log in the Track Queue panel for per-job details.")
 
+    def _reload_deleted_frames_from_txt(self, batch_job=None):
+        """Look for a Raya-with-classes TXT next to the current video and
+        merge any DELETED frame markers it contains into self.deleted_frames.
+        Both switch_to_dataset_video and _switch_to_plain_video already do
+        this via auto_import_video_annotations() -- but only when they
+        actually switch to a different video. If the queue job's video is
+        already the one open (no switch happens), or if the TXT was edited
+        or re-exported after the video was loaded, that never re-runs. So:
+        mark frames as deleted (Shift+X), Fast Export the TXT, then Run
+        Queue -- this picks that TXT's deleted frames up before tracking."""
+        if not getattr(self, 'video_filename', None):
+            return
+        v_dir = os.path.dirname(self.video_filename)
+        v_base = os.path.splitext(os.path.basename(self.video_filename))[0]
+        txt_path = os.path.join(v_dir, v_base + '.txt')
+        if not os.path.isfile(txt_path):
+            return
+        try:
+            from viat.utils.file_operations import import_raya_with_classes_annotations
+            class_mapping = {i: c for i, c in enumerate(self.canvas.class_colors.keys())}
+            _, deleted = import_raya_with_classes_annotations(txt_path, BoundingBox, class_mapping)
+            if not deleted:
+                return
+            existing = set(getattr(self, 'deleted_frames', set()) or set())
+            merged = existing | set(deleted)
+            added = len(merged) - len(existing)
+            if added:
+                self.deleted_frames = merged
+                self.canvas.update()
+                if hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                        f"Picked up {added} deleted frame(s) from {os.path.basename(txt_path)}")
+        except Exception as e:
+            logger.error(f"Could not read deleted frames from {txt_path}: {e}")
+
     def _run_single_track_job(self, job):
         """Run a single queued job: switch to its video if needed, restore its
         prompt state onto the canvas, then track it via the normal SAM
@@ -3347,6 +3456,8 @@ class VideoAnnotationTool(QMainWindow):
                 if hasattr(self, 'track_queue_dock'):
                     self.track_queue_dock.append_log(job['job_id'], f"Could not switch to video: {video_identifier}")
                 return
+
+        self._reload_deleted_frames_from_txt(job)
 
         pts = job.get('points') or []
         self.canvas.sam_prompt_points = [QPoint(int(x), int(y)) for x, y in pts]
@@ -3553,25 +3664,23 @@ class VideoAnnotationTool(QMainWindow):
         return candidate
 
     def export_current_video_results(self, batch_job=None):
-        """Export the current video's annotations (Raya-with-classes TXT) and,
-        if any blur regions exist, the blurred video too. This is the export
-        half of 'Fast Export Video & Next' (Ctrl+Shift+E), factored out so the
-        Track Queue can run it automatically between videos. Returns True on
-        success, False on failure (errors are logged instead of shown as a
-        popup when batch_job is provided, so an overnight run doesn't stall)."""
+        """Export the current video's annotations to exactly two files: a
+        Raya-with-classes TXT (boxes + classes + deleted-frame markers) and
+        the full VIAT project JSON (same, plus blur regions, so blur work is
+        shareable with whoever rechecks the labels on another PC). This is
+        the export half of 'Fast Export Video & Next' (Ctrl+Shift+E),
+        factored out so the Track Queue can run it automatically between
+        videos. Returns True on success, False on failure (errors are logged
+        instead of shown as a popup when batch_job is provided, so an
+        overnight run doesn't stall). Exporting the blurred video itself or
+        the clip cuts is a separate, explicit action (File menu) -- it is
+        not bundled into this automatic export."""
         if not hasattr(self, 'video_filename') or not self.video_filename:
             return False
 
-        has_blurs = hasattr(self, 'blur_manager') and bool(self.blur_manager.blur_regions)
-
         default_dir = os.path.dirname(self.video_filename)
         default_filename = os.path.splitext(os.path.basename(self.video_filename))[0]
-
-        if has_blurs:
-            export_path = os.path.join(default_dir, default_filename + '_blurred.txt')
-        else:
-            export_path = os.path.join(default_dir, default_filename + '.txt')
-        export_path = self._queue_safe_export_path(export_path)
+        export_path = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '.txt'))
 
         from viat.utils.file_operations import export_raya_with_classes_annotations
         all_annotations = []
@@ -3602,36 +3711,16 @@ class VideoAnnotationTool(QMainWindow):
             self._warn_or_log(batch_job, 'Error', f'Failed to fast export: {str(e)}')
             return False
 
-        # Always save the full VIAT project JSON when exporting from the Track
-        # Queue -- the Raya-with-classes TXT only carries boxes/classes, but
-        # the project JSON also carries blur regions, so this is what makes
-        # blur work shareable between the PC that ran SAM and whoever
-        # rechecks the labels afterwards. Outside the queue, keep respecting
-        # the user's explicit auto-save-on-export preference.
-        should_save_project_json = getattr(self, '_queue_running', False) or (
-            hasattr(self, 'auto_save_project_on_fast_export_act') and self.auto_save_project_on_fast_export_act.isChecked())
-        if should_save_project_json:
-            target_json = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '.json'))
-            self.save_project(target_json)
-            self.project_file = target_json
-            if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
-                self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
-                    f"Saved project JSON (includes blur data): {os.path.basename(target_json)}")
-
-        if hasattr(self, 'clip_cuts_dock'):
-            self.export_clip_cuts(auto_export_dir=default_dir)
-            self.clip_cuts_dock.clear_all()
-
-        if has_blurs:
-            blurred_video_path = self._queue_safe_export_path(
-                os.path.join(default_dir, default_filename + '_blurred' + os.path.splitext(self.video_filename)[1]))
-            self.export_blurred_video(interactive=False, output_path=blurred_video_path)
-            if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
-                self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
-                    f"Exported blurred video ({len(self.blur_manager.blur_regions)} blur region(s)): {os.path.basename(blurred_video_path)}")
-        elif getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+        # Always save the full VIAT project JSON alongside the TXT -- it's
+        # what carries blur regions and deleted-frame state, so it's what
+        # makes that work shareable between the PC that ran SAM and whoever
+        # rechecks the labels afterwards.
+        target_json = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '.json'))
+        self.save_project(target_json)
+        self.project_file = target_json
+        if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
-                "No blur regions were created for this video (blur was off, or no job requested it).")
+                f"Saved project JSON: {os.path.basename(target_json)}")
 
         return True
 
@@ -3881,7 +3970,13 @@ class VideoAnnotationTool(QMainWindow):
         if not getattr(self, '_loading_from_project', False):
             if hasattr(self, 'blur_manager') and self.blur_manager is not None:
                 self.blur_manager.clear_all()
-            
+
+        # Queued-prompt preview overlays are keyed by frame index, which is
+        # only meaningful for the video they were drawn on -- drop them when
+        # switching videos so they don't reappear over unrelated frames.
+        if hasattr(self.canvas, 'queued_job_previews'):
+            self.canvas.queued_job_previews = {}
+
         self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
         if not self.cap.isOpened():
             QMessageBox.critical(self, 'Error', f'Could not open video file:\n{filename}')

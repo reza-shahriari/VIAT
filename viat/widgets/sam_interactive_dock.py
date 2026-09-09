@@ -31,11 +31,8 @@ class SAMInteractiveDock(QDockWidget):
         status_layout = QVBoxLayout()
         self.lbl_points = QLabel("Points: 0 Positive, 0 Negative")
         self.lbl_box = QLabel("Bounding Box: Not Set")
-        self.lbl_queue_status = QLabel("No active prompt")
-        self.lbl_queue_status.setStyleSheet("color: #888888; font-style: italic;")
         status_layout.addWidget(self.lbl_points)
         status_layout.addWidget(self.lbl_box)
-        status_layout.addWidget(self.lbl_queue_status)
         self.status_group.setLayout(status_layout)
         self.layout.addWidget(self.status_group)
 
@@ -212,19 +209,9 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.btn_clear)
         self.layout.addWidget(self.btn_preview)
         self.layout.addWidget(self.btn_track)
-
-        # Preview of what "+ Add to Track Queue" will actually record, so the
-        # user doesn't have to remember whether blur is armed for this object.
-        self.lbl_add_preview = QLabel()
-        self.lbl_add_preview.setStyleSheet("font-weight: bold;")
-        self.lbl_add_preview.setWordWrap(True)
-        self.chk_blur_tracked.toggled.connect(self._update_add_preview)
-        self.cmb_scope.currentIndexChanged.connect(self._update_add_preview)
-        self.layout.addWidget(self.lbl_add_preview)
         self.layout.addWidget(self.btn_add_to_queue)
-        
+
         self._update_execute_button_label()
-        self._update_add_preview()
 
         self.layout.addStretch()
         self.setWidget(self.widget)
@@ -270,39 +257,9 @@ class SAMInteractiveDock(QDockWidget):
     def on_model_changed(self, index):
         self.model_changed.emit(self.get_model_type())
 
-    def _update_add_preview(self):
-        """Describe, in plain language, exactly what '+ Add to Track Queue'
-        will record right now -- most importantly whether this object will
-        be blurred or just tracked -- so it's decided before it's queued,
-        not discovered after an overnight run."""
-        action = "Track + BLUR" if self.chk_blur_tracked.isChecked() else "Track only (no blur)"
-        scope = self.cmb_scope.currentText()
-        self.lbl_add_preview.setText(f"Will queue as: {action} — {scope}")
-        self.lbl_add_preview.setStyleSheet(
-            "font-weight: bold; color: #E53935;" if self.chk_blur_tracked.isChecked()
-            else "font-weight: bold; color: #4CAF50;"
-        )
-
     def update_status(self, num_pos, num_neg, has_box):
         self.lbl_points.setText(f"Points: {num_pos} Positive, {num_neg} Negative")
         self.lbl_box.setText("Bounding Box: Set" if has_box else "Bounding Box: Not Set")
-        if num_pos or num_neg or has_box:
-            self.mark_prompt_dirty()
-        else:
-            self.lbl_queue_status.setText("No active prompt")
-            self.lbl_queue_status.setStyleSheet("color: #888888; font-style: italic;")
-
-    def mark_prompt_dirty(self):
-        """Call whenever the on-canvas prompt changes. Signals that the
-        current prompt has NOT been added to the Track Queue yet, so the
-        user doesn't lose track of which object they've already queued."""
-        self.lbl_queue_status.setText("⚠ Not added to queue yet")
-        self.lbl_queue_status.setStyleSheet("color: #E67E22; font-weight: bold;")
-
-    def mark_added_to_queue(self):
-        """Call right after a job is successfully appended to the queue."""
-        self.lbl_queue_status.setText("✓ Added to queue")
-        self.lbl_queue_status.setStyleSheet("color: #4CAF50; font-weight: bold;")
 
     def update_frame_info(self, current_frame, total_frames):
         is_new_media = (getattr(self, 'total_frames', -1) != total_frames)

@@ -792,8 +792,9 @@ class UICreator:
         self.main_window.sam_interactive_dock.hide() # Hidden by default
 
         # Track Queue dock (batch tracking jobs, run sequentially/overnight)
-        # Placed on the LEFT (not tabified with SAM Interactive) so both panels
-        # can be visible side by side while queuing/running jobs.
+        # Placed on the LEFT, tabbed together with the Video Manager dock
+        # below (see tabifyDockWidget after both are created) so they share
+        # one panel instead of splitting the left side of the window.
         self.main_window.track_queue_dock = TrackQueueDock(self.main_window)
         self.main_window.addDockWidget(
             Qt.LeftDockWidgetArea, self.main_window.track_queue_dock
@@ -827,6 +828,15 @@ class UICreator:
             Qt.LeftDockWidgetArea, self.main_window.video_manager_dock
         )
         self.main_window.video_manager_dock.hide() # Hidden by default
+
+        # Tab the Track Queue and Video Manager docks together instead of
+        # stacking them on top of each other in the left area -- opening
+        # both used to split the left panel vertically, which got cramped
+        # and hard to read. Tabbed, only one shows at a time and the user
+        # switches between them with the tab bar.
+        self.main_window.tabifyDockWidget(
+            self.main_window.track_queue_dock, self.main_window.video_manager_dock
+        )
 
         # Crop Settings dock
         self.main_window.crop_settings_dock = CropSettingsDock(self.main_window)
