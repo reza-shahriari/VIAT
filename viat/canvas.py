@@ -1316,9 +1316,9 @@ class VideoCanvas(QWidget):
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
                             if hasattr(bbox, 'segmentation') and bbox.segmentation:
-                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel)
+                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel, origin="manual")
                             else:
-                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel, origin="manual")
                                 
                             if hasattr(self.main_window, 'remove_annotations_under_blur'):
                                 self.main_window.remove_annotations_under_blur(cur_f)
@@ -1474,9 +1474,9 @@ class VideoCanvas(QWidget):
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
                             if hasattr(annotation, 'segmentation') and annotation.segmentation:
-                                blur_mgr.add_polygon_region(cur_f, annotation.segmentation, self.blur_kernel)
+                                blur_mgr.add_polygon_region(cur_f, annotation.segmentation, self.blur_kernel, origin="manual")
                             else:
-                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel, origin="manual")
                                 
                             if hasattr(self.main_window, 'remove_annotations_under_blur'):
                                 self.main_window.remove_annotations_under_blur(cur_f)
@@ -2013,9 +2013,9 @@ class VideoCanvas(QWidget):
                         if blur_mgr is not None:
                             cur_f = getattr(self.main_window, 'current_frame', 0)
                             if hasattr(bbox, 'segmentation') and bbox.segmentation:
-                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel)
+                                blur_mgr.add_polygon_region(cur_f, bbox.segmentation, self.blur_kernel, origin="manual")
                             else:
-                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel)
+                                blur_mgr.add_bbox_region(cur_f, rect, self.blur_kernel, origin="manual")
                                 
                             if hasattr(self.main_window, 'remove_annotations_under_blur'):
                                 self.main_window.remove_annotations_under_blur(cur_f)
@@ -2123,9 +2123,9 @@ class VideoCanvas(QWidget):
                     cur_frame = getattr(self.main_window, 'current_frame', 0)
                     if blur_mgr is not None:
                         if hasattr(self.selected_annotation, 'segmentation') and self.selected_annotation.segmentation:
-                            blur_mgr.add_polygon_region(cur_frame, self.selected_annotation.segmentation, self.blur_kernel)
+                            blur_mgr.add_polygon_region(cur_frame, self.selected_annotation.segmentation, self.blur_kernel, origin="converted_from_box")
                         else:
-                            blur_mgr.add_bbox_region(cur_frame, self.selected_annotation.rect, self.blur_kernel)
+                            blur_mgr.add_bbox_region(cur_frame, self.selected_annotation.rect, self.blur_kernel, origin="converted_from_box")
                             
                         if getattr(self.main_window, 'auto_remove_under_blur', False) and hasattr(self.main_window, 'remove_annotations_under_blur'):
                             self.main_window.remove_annotations_under_blur(cur_frame)

@@ -590,6 +590,11 @@ class VideoAnnotationTool(QMainWindow):
         self.deleted_frames = set()
         self.deleted_annotations = {}
         self.track_queue = []
+        # deleted_frames captured per referenced video, so a saved queue.json
+        # carries "which frames were deleted on this video" along with it --
+        # makes deleted-frame state shareable across PCs the same way the
+        # queue's jobs already are.
+        self.track_queue_deleted_frames_by_video = {}
         self.batch_log = []
         self._queue_running = False
         self._queue_stop_requested = False
@@ -989,7 +994,7 @@ class VideoAnnotationTool(QMainWindow):
                     self.blur_manager = BlurManager()
                     
                 for ann in to_blur:
-                    self.blur_manager.add_bbox_region(f_idx, ann.rect, blur_kernel)
+                    self.blur_manager.add_bbox_region(f_idx, ann.rect, blur_kernel, origin="converted_from_box")
                     blurred_count += 1
                     
                 if settings["remove_bbox"]:
@@ -2473,9 +2478,9 @@ class VideoAnnotationTool(QMainWindow):
 
         def _apply_sam_blur(frame_idx, poly, b_rect):
             if blur_shape == "segmentation" and poly:
-                self.blur_manager.add_polygon_region(frame_idx, poly, self.canvas.blur_kernel, margin=blur_margin)
+                self.blur_manager.add_polygon_region(frame_idx, poly, self.canvas.blur_kernel, margin=blur_margin, origin="tracking")
             else:
-                self.blur_manager.add_bbox_region(frame_idx, b_rect, self.canvas.blur_kernel, margin=blur_margin)
+                self.blur_manager.add_bbox_region(frame_idx, b_rect, self.canvas.blur_kernel, margin=blur_margin, origin="tracking")
             if getattr(self, 'auto_remove_under_blur', False) and hasattr(self, 'remove_annotations_under_blur'):
                 self.remove_annotations_under_blur(frame_idx)
             if batch_job is not None and hasattr(self, '_queue_run_stats'):
@@ -3082,7 +3087,18 @@ class VideoAnnotationTool(QMainWindow):
         if not ok or not target_class:
             return
 
+        # Always (re)generate the SAM mask preview for the prompt exactly as
+        # it stands right now, on this frame -- don't rely on the user having
+        # pressed "Preview Mask [Z]" themselves. Without this, sam_preview_
+        # polygon/rect can still be holding a stale mask from an earlier
+        # object/frame that WAS previewed, which is what made both the queue
+        # thumbnail and the on-canvas preview look wrong for any prompt that
+        # wasn't manually previewed itself.
+        self.on_sam_preview_requested()
+
         video_switch_mode, video_identifier, video_display = self._current_video_identifier()
+        if video_identifier:
+            self.track_queue_deleted_frames_by_video[video_identifier] = sorted(getattr(self, 'deleted_frames', set()))
 
         import uuid
         job_id = uuid.uuid4().hex
@@ -3221,8 +3237,16 @@ class VideoAnnotationTool(QMainWindow):
         if not path.lower().endswith('.json'):
             path += '.json'
         try:
+            # Include each referenced video's deleted-frame markers alongside
+            # the jobs, so this one file is enough to hand to someone else --
+            # they don't need a separate project export just to know which
+            # frames were deleted.
+            payload = {
+                'jobs': self.track_queue,
+                'deleted_frames_by_video': self.track_queue_deleted_frames_by_video,
+            }
             with open(path, 'w') as f:
-                json.dump(self.track_queue, f, indent=2)
+                json.dump(payload, f, indent=2)
             self.statusBar.showMessage(f'Saved {len(self.track_queue)} job(s) to {path}', 4000)
         except Exception as e:
             QMessageBox.warning(self, 'Save Failed', str(e))
@@ -3235,7 +3259,16 @@ class VideoAnnotationTool(QMainWindow):
             return
         try:
             with open(path, 'r') as f:
-                jobs = json.load(f)
+                loaded = json.load(f)
+            # Backward-compatible with older queue files, which were just a
+            # bare list of jobs with no deleted-frame info attached.
+            if isinstance(loaded, dict):
+                jobs = loaded.get('jobs', [])
+                for video_id, frames in (loaded.get('deleted_frames_by_video') or {}).items():
+                    existing = set(self.track_queue_deleted_frames_by_video.get(video_id, []))
+                    self.track_queue_deleted_frames_by_video[video_id] = sorted(existing | set(frames))
+            else:
+                jobs = loaded
             import uuid
             for job in jobs:
                 job['status'] = 'pending'
@@ -3313,13 +3346,18 @@ class VideoAnnotationTool(QMainWindow):
 
         resolved, unresolved = 0, []
         for j in missing:
-            bname = os.path.basename(j['video_identifier'])
+            old_id = j['video_identifier']
+            bname = os.path.basename(old_id)
             found = name_index.get(bname)
             if found:
                 j['video_identifier'] = found
                 j['video_display'] = bname
                 j['display'] = self._job_display_text(j)
                 resolved += 1
+                if old_id in self.track_queue_deleted_frames_by_video:
+                    old_frames = set(self.track_queue_deleted_frames_by_video.pop(old_id))
+                    new_frames = set(self.track_queue_deleted_frames_by_video.get(found, []))
+                    self.track_queue_deleted_frames_by_video[found] = sorted(old_frames | new_frames)
             else:
                 unresolved.append(bname)
 
@@ -3434,6 +3472,25 @@ class VideoAnnotationTool(QMainWindow):
         except Exception as e:
             logger.error(f"Could not read deleted frames from {txt_path}: {e}")
 
+    def _apply_queue_deleted_frames(self, job):
+        """Merge in the deleted frames recorded for this job's video inside
+        the queue.json itself (see on_save_track_queue/on_load_track_queue)
+        -- covers the case where whoever is running the queue has only the
+        video + the shared queue.json and no TXT/project file for it yet."""
+        video_identifier = job.get('video_identifier')
+        frames = self.track_queue_deleted_frames_by_video.get(video_identifier)
+        if not frames:
+            return
+        existing = set(getattr(self, 'deleted_frames', set()) or set())
+        merged = existing | set(frames)
+        added = len(merged) - len(existing)
+        if added:
+            self.deleted_frames = merged
+            self.canvas.update()
+            if hasattr(self, 'track_queue_dock'):
+                self.track_queue_dock.append_log(job.get('job_id'),
+                    f"Picked up {added} deleted frame(s) from the queue file")
+
     def _run_single_track_job(self, job):
         """Run a single queued job: switch to its video if needed, restore its
         prompt state onto the canvas, then track it via the normal SAM
@@ -3458,6 +3515,7 @@ class VideoAnnotationTool(QMainWindow):
                 return
 
         self._reload_deleted_frames_from_txt(job)
+        self._apply_queue_deleted_frames(job)
 
         pts = job.get('points') or []
         self.canvas.sam_prompt_points = [QPoint(int(x), int(y)) for x, y in pts]
@@ -3649,19 +3707,10 @@ class VideoAnnotationTool(QMainWindow):
             self.load_video_file(filename)
 
     def _queue_safe_export_path(self, path):
-        """While the Track Queue is running, never silently overwrite a file
-        that already existed before this run (it may be prior manual work).
-        Returns an alternate path with a '_queue', '_queue2', ... suffix if
-        needed; returns path unchanged otherwise (or outside a queue run)."""
-        if not getattr(self, '_queue_running', False) or not os.path.exists(path):
-            return path
-        base, ext = os.path.splitext(path)
-        candidate = f"{base}_queue{ext}"
-        n = 2
-        while os.path.exists(candidate):
-            candidate = f"{base}_queue{n}{ext}"
-            n += 1
-        return candidate
+        """Export path for the Track Queue's automatic per-video export.
+        Always the plain path (no '_queue' suffix) -- the Track Queue is
+        expected to update these files in place, same as a normal export."""
+        return path
 
     def export_current_video_results(self, batch_job=None):
         """Export the current video's annotations to exactly two files: a
@@ -7208,7 +7257,7 @@ Would you like to load it?"""
             current_frame = self.current_frame
             if getattr(self, 'auto_blur_labels', False):
                 if hasattr(self, 'blur_manager') and self.blur_manager is not None:
-                    self.blur_manager.add_bbox_region(current_frame, new_annotation.rect, getattr(self.canvas, 'blur_kernel', 151))
+                    self.blur_manager.add_bbox_region(current_frame, new_annotation.rect, getattr(self.canvas, 'blur_kernel', 151), origin="manual")
                     if hasattr(self, '_refresh_blur_display'):
                         self._refresh_blur_display()
                     self.statusBar.showMessage('Annotation pasted as blur region', 2000)
@@ -7439,9 +7488,9 @@ Would you like to load it?"""
             
             for f in range(start_f, end_f + 1):
                 if has_seg:
-                    self.blur_manager.add_polygon_region(f, annotation.segmentation, kernel)
+                    self.blur_manager.add_polygon_region(f, annotation.segmentation, kernel, origin="converted_from_box")
                 else:
-                    self.blur_manager.add_bbox_region(f, annotation.rect, kernel)
+                    self.blur_manager.add_bbox_region(f, annotation.rect, kernel, origin="converted_from_box")
                     
                 if remove_under:
                     self.remove_annotations_under_blur(f, threshold=0.7)
@@ -7827,7 +7876,7 @@ Do you want to scan the entire video now for duplicate frames?
                     processed_hashes.add(frame_hash)
                 if getattr(self, 'auto_blur_labels', False):
                     for ann in current_annotations:
-                        self.blur_manager.add_bbox_region(frame_num, ann.rect, getattr(self.canvas, 'blur_kernel', 151))
+                        self.blur_manager.add_bbox_region(frame_num, ann.rect, getattr(self.canvas, 'blur_kernel', 151), origin="converted_from_box")
                 else:
                     self.frame_annotations[frame_num] = [self.clone_annotation(
                         ann) for ann in current_annotations]
@@ -8754,7 +8803,7 @@ Do you want to scan the entire video now for duplicate frames?
                 int(box[3] - box[1]))
             if getattr(self, 'auto_blur_labels', False):
                 if hasattr(self, 'blur_manager') and self.blur_manager is not None:
-                    self.blur_manager.add_bbox_region(f_idx, rect, getattr(self.canvas, 'blur_kernel', 151))
+                    self.blur_manager.add_bbox_region(f_idx, rect, getattr(self.canvas, 'blur_kernel', 151), origin="converted_from_box")
                 continue
 
             color = self.canvas.class_colors.get(ann_dict['class_name'],

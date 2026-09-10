@@ -1758,7 +1758,7 @@ class AnnotationDock(QDockWidget):
                     if action == "Blur":
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
-                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
+                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151), origin="converted_from_box")
                     elif action == "Shift Position":
                         ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
                     elif action == "Sync Attributes & Class":

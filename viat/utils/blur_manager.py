@@ -7,10 +7,20 @@ Blur regions are stored as metadata and applied non-destructively:
 
 Data format per frame:
     blur_regions[frame_idx] = [
-        {"type": "pen"|"bbox", "x": int, "y": int,
-         "w": int, "h": int, "kernel": int},
+        {"type": "pen"|"bbox"|"polygon", "x": int, "y": int,
+         "w": int, "h": int, "kernel": int, "origin": str},
         ...
     ]
+
+"origin" records *why* the region was created, independent of "type" (which
+is just its shape): "tracking" (produced by SAM Track Queue / interactive
+SAM tracking), "manual" (hand-drawn pen/box/polygon, or a freshly-drawn/
+pasted/magic-wand annotation that auto-blur intercepted), or
+"converted_from_box" (an already-existing annotation -- of any origin -- was
+turned into a blur region afterward, via "Blur this annotation", a bulk
+Auto-Blur pass, or a batch/duplicate/detection pipeline). This is what lets
+a labeler-payment report tell manual blur work apart from blur that was a
+free byproduct of tracking.
 """
 
 import cv2
@@ -29,15 +39,15 @@ class BlurManager:
     # ------------------------------------------------------------------
 
     def add_pen_stroke(self, frame_idx: int, cx: int, cy: int,
-                       radius: int, kernel: int):
+                       radius: int, kernel: int, origin: str = "manual"):
         """Add a square pen patch centred at (cx, cy) with given radius."""
         x = max(0, cx - radius)
         y = max(0, cy - radius)
         w = radius * 2
         h = radius * 2
-        self._add_region(frame_idx, "pen", x, y, w, h, kernel)
+        self._add_region(frame_idx, "pen", x, y, w, h, kernel, origin)
 
-    def add_bbox_region(self, frame_idx: int, rect, kernel: int, margin: int = 0):
+    def add_bbox_region(self, frame_idx: int, rect, kernel: int, margin: int = 0, origin: str = "manual"):
         """Add a blur region that covers a QRect bounding box, optionally expanded by margin."""
         if margin > 0:
             x = max(0, int(rect.x() - margin))
@@ -52,10 +62,10 @@ class BlurManager:
         self._add_region(
             frame_idx, "bbox",
             x, y, w, h,
-            kernel
+            kernel, origin
         )
 
-    def add_polygon_region(self, frame_idx: int, polygon, kernel: int, margin: int = 0):
+    def add_polygon_region(self, frame_idx: int, polygon, kernel: int, margin: int = 0, origin: str = "manual"):
         """Add a blur region defined by a polygon, optionally dilated by margin."""
         if not polygon:
             return
@@ -98,17 +108,17 @@ class BlurManager:
         self.blur_regions[frame_idx].append({
             "type": "polygon", "x": int(x), "y": int(y),
             "w": int(w), "h": int(h), "kernel": kernel,
-            "points": poly_list
+            "points": poly_list, "origin": origin
         })
 
-    def _add_region(self, frame_idx, rtype, x, y, w, h, kernel):
+    def _add_region(self, frame_idx, rtype, x, y, w, h, kernel, origin="manual"):
         if frame_idx not in self.blur_regions:
             self.blur_regions[frame_idx] = []
         # Ensure kernel is at least 3 and odd
         kernel = max(3, kernel | 1)
         self.blur_regions[frame_idx].append({
             "type": rtype, "x": x, "y": y,
-            "w": w, "h": h, "kernel": kernel
+            "w": w, "h": h, "kernel": kernel, "origin": origin
         })
 
     # ------------------------------------------------------------------
@@ -228,6 +238,7 @@ class BlurManager:
                             clean_item["w"] = int(round(clean_item.get("w", 0)))
                             clean_item["h"] = int(round(clean_item.get("h", 0)))
                             clean_item["kernel"] = max(3, int(round(clean_item.get("kernel", 151))) | 1)
+                            clean_item.setdefault("origin", "unknown")
                             clean_list.append(clean_item)
                     if clean_list:
                         self.blur_regions[frame_idx] = clean_list

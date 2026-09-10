@@ -688,7 +688,7 @@ class AnnotationManager:
                 blur_mgr = getattr(self.main_window, 'blur_manager', None)
                 if blur_mgr is not None:
                     cur_f = getattr(self.main_window, 'current_frame', 0)
-                    blur_mgr.add_bbox_region(cur_f, bbox.rect, getattr(self.canvas, 'blur_kernel', 151))
+                    blur_mgr.add_bbox_region(cur_f, bbox.rect, getattr(self.canvas, 'blur_kernel', 151), origin="manual")
                     if hasattr(self.main_window, '_refresh_blur_display'):
                         self.main_window._refresh_blur_display()
                     else:
@@ -1728,9 +1728,9 @@ class ClassManager:
             frames_affected += 1
             for ann in to_blur:
                 if hasattr(ann, 'segmentation') and ann.segmentation:
-                    self.main_window.blur_manager.add_polygon_region(frame_idx, ann.segmentation, blur_kernel)
+                    self.main_window.blur_manager.add_polygon_region(frame_idx, ann.segmentation, blur_kernel, origin="converted_from_box")
                 elif hasattr(ann, 'rect') and ann.rect:
-                    self.main_window.blur_manager.add_bbox_region(frame_idx, ann.rect, blur_kernel)
+                    self.main_window.blur_manager.add_bbox_region(frame_idx, ann.rect, blur_kernel, origin="converted_from_box")
                 total_blurred += 1
 
             # Remove bounding boxes of this class

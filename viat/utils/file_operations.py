@@ -1295,7 +1295,15 @@ def detect_annotation_format(filename):
             return "Raya with classes"
 
         # More flexible Raya format detection
-        if all("[]" in line or ('[' and '];' in line) for line in lines[1:] if "###" not in line and "names:" not in line and "-nc:" not in line) or all("[]" in line or ('[' and '];' in line) for line in lines):
+        # A line may also be a DELETED/DELETE marker (no brackets at all) for
+        # frames that were removed from the sequence.
+        def _is_raya_line(line):
+            stripped = line.rstrip(";").strip()
+            if stripped in ("DELETED", "DELETE"):
+                return True
+            return "[]" in line or ('[' and '];' in line)
+
+        if all(_is_raya_line(line) for line in lines[1:] if "###" not in line and "names:" not in line and "-nc:" not in line) or all(_is_raya_line(line) for line in lines):
             # Check if we didn't already match Raya with classes
             if not (len(lines) > 0 and lines[0].strip() == "###" and any("clasess:" in line or "classes:" in line for line in lines[:10])):
                 return "Raya"
