@@ -2922,42 +2922,84 @@ class VideoAnnotationTool(QMainWindow):
                 
                 current_f = current_chunk_start
                 last_box = None
-                
+                deleted_frames_set = getattr(self, 'deleted_frames', set())
+
+                def _remaining_all_deleted(frame_idx):
+                    # True when frame_idx and every frame from there to end_f (in
+                    # tracking direction) is marked deleted - i.e. the deleted
+                    # stretch runs to the end of the tracked range, so there is
+                    # nothing left worth tracking into.
+                    rng = range(frame_idx, end_f - 1, -1) if is_backward else range(frame_idx, end_f + 1)
+                    return all(f in deleted_frames_set for f in rng)
+
+                # Display lags one processed frame behind (n-1 while computing n):
+                # a frame's blur/annotation is only fully baked into blur_manager
+                # *after* it is processed below, so showing it immediately (before
+                # that happens) would race the blur render. Showing the previous,
+                # already fully-processed frame instead lets the user watch the
+                # prediction and blur as tracking runs, with no flash of
+                # unblurred/unannotated content.
+                prev_processed_frame = None
+                stop_chunk_early = False
+
                 for success, track_res in results_generator:
                     if progress.wasCanceled():
                         cancelled = True
                         break
-                    self.set_current_frame(current_f)
-                    QApplication.processEvents()
                     if not success:
                         self._warn_or_log(batch_job, 'Tracking Error', str(track_res))
                         break
                     tracked_boxes = track_res['boxes']
                     tracked_polygons = track_res['polygons']
+                    is_deleted = current_f in deleted_frames_set
                     if len(tracked_boxes) > 0:
                         t_box = tracked_boxes[0]
                         last_box = t_box
                         polygon = tracked_polygons[0] if len(tracked_polygons) > 0 else None
                         rect = QRect(t_box[0], t_box[1], t_box[2] - t_box[0], t_box[3] - t_box[1])
-                        if current_f not in self.frame_annotations:
-                            self.frame_annotations[current_f] = []
-                        default_attributes = {'Size': -1, 'Quality': -1}
-                        if hasattr(self, 'get_default_attributes_for_class'):
-                            default_attributes = self.get_default_attributes_for_class(target_class)
-                        ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if save_segmentation else None)
-                        if should_blur:
-                            _apply_sam_blur(current_f, polygon, rect)
-                        else:
-                            self.frame_annotations[current_f].append(ann)
-                            _record_box_created()
-                    self.load_current_frame_annotations()
-                    self.update_frame_display()
+                        # Keep feeding the tracker through deleted frames (so the
+                        # object position is re-acquired correctly after the gap),
+                        # but never write annotations/blur onto a deleted frame.
+                        if not is_deleted:
+                            if current_f not in self.frame_annotations:
+                                self.frame_annotations[current_f] = []
+                            default_attributes = {'Size': -1, 'Quality': -1}
+                            if hasattr(self, 'get_default_attributes_for_class'):
+                                default_attributes = self.get_default_attributes_for_class(target_class)
+                            ann = BoundingBox(rect, target_class, attributes=default_attributes, color=self.canvas.class_colors.get(target_class, QColor(0, 255, 0)), source='sam_tracked', segmentation=polygon if save_segmentation else None)
+                            if should_blur:
+                                _apply_sam_blur(current_f, polygon, rect)
+                            else:
+                                self.frame_annotations[current_f].append(ann)
+                                _record_box_created()
+
+                    if prev_processed_frame is not None:
+                        self.set_current_frame(prev_processed_frame)
+                        self.load_current_frame_annotations()
+                        self.update_frame_display()
+                        QApplication.processEvents()
+                    prev_processed_frame = current_f
+
                     processed_count += 1
                     progress.setValue(processed_count)
+
+                    if is_deleted and _remaining_all_deleted(current_f):
+                        # The deleted stretch runs to the end of this tracking
+                        # range - stop the whole tracking phase, no frames left
+                        # to usefully track into.
+                        stop_chunk_early = True
+                        break
+
                     current_f += step
 
-                if progress.wasCanceled():
-                    cancelled = True
+                if prev_processed_frame is not None:
+                    self.set_current_frame(prev_processed_frame)
+                    self.load_current_frame_annotations()
+                    self.update_frame_display()
+                    QApplication.processEvents()
+
+                if progress.wasCanceled() or stop_chunk_early:
+                    cancelled = cancelled or progress.wasCanceled()
                     break
                     
                 chunk_done = (current_chunk_end <= end_f) if is_backward else (current_chunk_end >= end_f)
@@ -3175,6 +3217,7 @@ class VideoAnnotationTool(QMainWindow):
             'Select class for this queued job:', classes, current_idx, False)
         if not ok or not target_class:
             return
+        self.set_active_class(target_class)
 
         # Always (re)generate the SAM mask preview for the prompt exactly as
         # it stands right now -- and, critically, on the frame the prompt
@@ -3255,7 +3298,6 @@ class VideoAnnotationTool(QMainWindow):
         self.canvas.update()
         if hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.show()
-            self.track_queue_dock.raise_()
         self.statusBar.showMessage(f"Added job to queue: {job['display']}", 4000)
 
     def _jobs_are_duplicate(self, job_a, job_b):
@@ -3527,13 +3569,16 @@ class VideoAnnotationTool(QMainWindow):
         stats = getattr(self, '_queue_run_stats', {'boxes': 0, 'blurs': 0})
         benchmark = (f"Tracked {total} prompt(s): created {stats['boxes']} bounding box(es) "
                      f"and {stats['blurs']} blur region(s).")
-        self.statusBar.showMessage('Track queue finished.', 5000)
+        summary = f"{done} completed, {failed} failed, {lost} lost object, {stopped} stopped."
+        self.statusBar.showMessage(f'Track queue finished: {summary}', 8000)
         if hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.append_log(None, benchmark)
-        QMessageBox.information(self, 'Batch Queue Finished',
-            f"{done} completed, {failed} failed, {lost} lost object, {stopped} stopped.\n\n"
-            f"{benchmark}\n\n"
-            "See the Batch Log in the Track Queue panel for per-job details.")
+            self.track_queue_dock.append_log(None, f"Batch queue finished: {summary}")
+        # Deliberately not a QMessageBox: a blocking modal here forces VIAT to
+        # the foreground even when it was running in the background, which is
+        # disruptive if the user stepped away to work in another app while a
+        # long queue ran. The summary is available in the status bar and the
+        # Batch Log in the Track Queue panel instead.
 
     def _reload_deleted_frames_from_txt(self, batch_job=None):
         """Look for a Raya-with-classes TXT next to the current video and
@@ -3811,17 +3856,17 @@ class VideoAnnotationTool(QMainWindow):
         return path
 
     def export_current_video_results(self, batch_job=None):
-        """Export the current video's annotations to exactly two files: a
-        Raya-with-classes TXT (boxes + classes + deleted-frame markers) and
-        the full VIAT project JSON (same, plus blur regions, so blur work is
-        shareable with whoever rechecks the labels on another PC). This is
-        the export half of 'Fast Export Video & Next' (Ctrl+Shift+E),
-        factored out so the Track Queue can run it automatically between
-        videos. Returns True on success, False on failure (errors are logged
-        instead of shown as a popup when batch_job is provided, so an
-        overnight run doesn't stall). Exporting the blurred video itself or
-        the clip cuts is a separate, explicit action (File menu) -- it is
-        not bundled into this automatic export."""
+        """Export the current video's annotations to a Raya-with-classes TXT
+        (boxes + classes + deleted-frame markers) and the full VIAT project
+        JSON (same, plus blur regions, so blur work is shareable with
+        whoever rechecks the labels on another PC). This is the export half
+        of 'Fast Export Video & Next' (Ctrl+Shift+E), factored out so the
+        Track Queue can run it automatically between videos. Returns True on
+        success, False on failure (errors are logged instead of shown as a
+        popup when batch_job is provided, so an overnight run doesn't
+        stall). If the video has blur regions, this also bakes them into a
+        '<video>_blurred.<ext>' video plus a matching
+        '<video>_blurred.txt' annotation file alongside it."""
         if not hasattr(self, 'video_filename') or not self.video_filename:
             return False
 
@@ -3868,6 +3913,28 @@ class VideoAnnotationTool(QMainWindow):
         if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
             self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
                 f"Saved project JSON: {os.path.basename(target_json)}")
+
+        # If there are blur regions, also bake them into a companion
+        # "<video>_blurred.<ext>" video and export its matching
+        # "<video>_blurred.txt" annotations, so the blurred deliverable and
+        # its labels travel together without a separate manual step.
+        if hasattr(self, 'blur_manager') and getattr(self.blur_manager, 'blur_regions', None):
+            try:
+                base, ext = os.path.splitext(self.video_filename)
+                blurred_video_path = self._queue_safe_export_path(f"{base}_blurred{ext}")
+                self.export_blurred_video(interactive=False, output_path=blurred_video_path)
+
+                blurred_txt_path = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '_blurred.txt'))
+                export_raya_with_classes_annotations(blurred_txt_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
+
+                self.statusBar.showMessage(f'Exported blurred video and {os.path.basename(blurred_txt_path)}')
+                if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                        f"Exported blurred video: {os.path.basename(blurred_video_path)} and {os.path.basename(blurred_txt_path)}")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._warn_or_log(batch_job, 'Error', f'Failed to export blurred video: {str(e)}')
 
         return True
 
