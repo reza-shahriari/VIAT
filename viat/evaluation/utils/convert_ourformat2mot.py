@@ -65,49 +65,70 @@ except ImportError:
 
 def strip_header_lines(lines):
     """
-    Strips Raya header blocks (###), comments (#), and YOLO format headers (names: / nc:).
+    Strips Raya header blocks (### or ####), comments (#), and YOLO format headers (names: / nc:).
     Returns (cleaned_lines, class_names).
     """
     data_lines = []
     class_names = []
-    in_raya_header = False
+    in_hash_header = False
     in_names_block = False
     header_end_idx = 0
-    has_yolo_header = False
+    has_header = False
 
     for i, raw in enumerate(lines):
         sline = raw.strip()
-        if not in_names_block:
-            if sline.lower().startswith("names:"):
-                in_names_block = True
-                has_yolo_header = True
-            elif sline == "###":
-                in_raya_header = not in_raya_header
-            elif in_raya_header or sline.startswith("#"):
-                pass
-        else:
-            if re.match(r"^-?\s*nc\s*:\s*\d+", sline, re.IGNORECASE):
+        if re.match(r"^#{3,}", sline):
+            in_hash_header = not in_hash_header
+            has_header = True
+            if not in_hash_header:
                 header_end_idx = i + 1
                 break
-            name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
-            if name:
-                class_names.append(name)
+            continue
 
-    if has_yolo_header:
+        if in_hash_header:
+            if sline.lower().startswith(("names:", "clasess:", "classes:")):
+                in_names_block = True
+                continue
+            if re.match(r"^-?\s*nc\s*(:\s*\d*)?$", sline, re.IGNORECASE):
+                continue
+            if in_names_block and (sline.startswith("-") or sline.startswith("*") or sline.startswith("•")):
+                name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
+                if name and not re.match(r"^#{3,}", name) and not re.match(r"^-?\s*nc\s*(:\s*\d*)?$", name, re.IGNORECASE):
+                    class_names.append(name)
+            continue
+
+        if not in_names_block:
+            if sline.lower().startswith(("names:", "clasess:", "classes:")):
+                in_names_block = True
+                has_header = True
+            continue
+        if re.match(r"^-?\s*nc\s*(:\s*\d*)?$", sline, re.IGNORECASE) or re.match(r"^#{3,}", sline):
+            header_end_idx = i + 1
+            break
+        if sline == "":
+            continue
+        name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
+        if name and not re.match(r"^#{3,}", name) and not re.match(r"^-?\s*nc\s*(:\s*\d*)?$", name, re.IGNORECASE):
+            class_names.append(name)
+
+    if has_header:
         while header_end_idx < len(lines):
             candidate = lines[header_end_idx].strip()
-            if candidate == "" or candidate.upper() == "DELETED;" or "[" in candidate:
+            if (
+                candidate == ""
+                or candidate.upper() in ("DELETED;", "DELETE;", "DELETED", "DELETE")
+                or "[" in candidate
+                or candidate == "[]"
+            ):
                 break
             header_end_idx += 1
         data_lines = lines[header_end_idx:]
     else:
-        in_header = False
         for line in lines:
             sline = line.strip()
-            if sline == "###":
-                in_header = not in_header
+            if re.match(r"^#{3,}", sline):
                 continue
-            if in_header or sline.startswith("#"):
+            if sline.startswith("#"):
                 continue
             data_lines.append(line)
 

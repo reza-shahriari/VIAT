@@ -616,6 +616,183 @@ class AdvancedDiagnosticsEngine:
         plt.close(fig)
         return True
 
+    # ── Per-Class Breakdown Plots ─────────────────────────────────────────────
+
+    @staticmethod
+    def generate_error_breakdown_per_class_plot(per_class_error_breakdown, save_path,
+                                                theme='Dark', palette='Vibrant', dpi=150):
+        """12. Per-Class Error Taxonomy Grouped Bar Chart.
+
+        per_class_error_breakdown: {
+            'ClassA': {'classification': n, 'localization': n, 'background_fp': n, 'missed_fn': n},
+            ...
+        }
+        """
+        if not HAS_MATPLOTLIB or plt is None or not per_class_error_breakdown:
+            return False
+
+        classes  = list(per_class_error_breakdown.keys())
+        err_keys = ['classification', 'localization', 'background_fp', 'missed_fn']
+        err_lbls = ['Classification Err', 'Localization Err', 'Background FP', 'Missed FN']
+
+        colors     = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
+        theme_cfg  = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
+
+        n_cls  = len(classes)
+        n_err  = len(err_keys)
+        x      = np.arange(n_cls)
+        width  = 0.18
+        offsets = np.linspace(-(n_err - 1) / 2, (n_err - 1) / 2, n_err) * width
+
+        fig_w = max(9, n_cls * 2.0)
+        fig, ax = plt.subplots(figsize=(fig_w, 5.5), dpi=dpi)
+
+        for ei, (key, lbl, offset) in enumerate(zip(err_keys, err_lbls, offsets)):
+            vals = [per_class_error_breakdown[c].get(key, 0) for c in classes]
+            bars = ax.bar(x + offset, vals, width, label=lbl,
+                          color=colors[ei % len(colors)], alpha=0.85, edgecolor='black', linewidth=0.5)
+            for bar in bars:
+                h = bar.get_height()
+                if h > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2.0, h + 0.3,
+                            str(int(h)), ha='center', va='bottom',
+                            fontsize=8, fontweight='bold', color=theme_cfg['text'])
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(classes, fontsize=11, fontweight='bold', rotation=20, ha='right')
+        ax.set_ylabel('Error Count', fontsize=11, fontweight='bold')
+        ax.set_title('Error Taxonomy Breakdown per Class', fontsize=13, fontweight='bold', pad=12)
+
+        leg = ax.legend(loc='upper right', frameon=True, fontsize=10)
+        leg.get_frame().set_facecolor(theme_cfg['legend_bg'])
+        leg.get_frame().set_edgecolor(theme_cfg['legend_edge'])
+        for text in leg.get_texts():
+            text.set_color(theme_cfg['text'])
+
+        AestheticConfig.apply(fig, ax, theme, show_grid=True)
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, facecolor=fig.get_facecolor(), edgecolor='none')
+        plt.close(fig)
+        return True
+
+    @staticmethod
+    def generate_aspect_ratio_per_class_plot(per_class_aspect_ratio, save_path,
+                                             theme='Dark', palette='Vibrant', dpi=150,
+                                             line_width=2.2, show_grid=True):
+        """13. Per-Class Aspect Ratio Bias Overlay Line Plot.
+
+        per_class_aspect_ratio: {
+            'ClassA': {'ratios': [...], 'error_rates': [...]},
+            ...
+        }
+        """
+        if not HAS_MATPLOTLIB or plt is None or not per_class_aspect_ratio:
+            return False
+
+        colors    = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
+        theme_cfg = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
+
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=dpi)
+
+        for idx, (cls_name, ar_data) in enumerate(per_class_aspect_ratio.items()):
+            ratios      = ar_data.get('ratios', [])
+            error_rates = ar_data.get('error_rates', [])
+            if not ratios:
+                continue
+            color = colors[idx % len(colors)]
+            ax.plot(ratios, error_rates, 'o-', color=color, linewidth=line_width,
+                    markersize=5, label=cls_name, alpha=0.9)
+
+            # fit a trend line if enough points
+            if len(ratios) >= 4:
+                z = np.polyfit(ratios, error_rates, deg=2)
+                p = np.poly1d(z)
+                x_fine = np.linspace(min(ratios), max(ratios), 80)
+                ax.plot(x_fine, p(x_fine), '--', color=color, linewidth=1.2, alpha=0.5)
+
+        ax.axvline(1.0, color='#7f8c8d', linestyle='--', alpha=0.7, linewidth=1.5,
+                   label='Square Box (1:1)')
+        ax.set_xlabel('Bounding Box Aspect Ratio (W / H)', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Error Rate (%)', fontsize=11, fontweight='bold')
+        ax.set_title('Aspect Ratio Geometry Bias per Class', fontsize=13, fontweight='bold', pad=12)
+
+        leg = ax.legend(loc='upper right', frameon=True, fontsize=10)
+        leg.get_frame().set_facecolor(theme_cfg['legend_bg'])
+        leg.get_frame().set_edgecolor(theme_cfg['legend_edge'])
+        for text in leg.get_texts():
+            text.set_color(theme_cfg['text'])
+
+        AestheticConfig.apply(fig, ax, theme, show_grid)
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, facecolor=fig.get_facecolor(), edgecolor='none')
+        plt.close(fig)
+        return True
+
+    @staticmethod
+    def generate_size_breakdown_per_class_plot(per_class_size_metrics, save_path,
+                                               theme='Dark', palette='Vibrant', dpi=150):
+        """14. Per-Class Size Breakdown Grouped Bar Chart (Small / Medium / Large AP50).
+
+        per_class_size_metrics: {
+            'ClassA': {'Small (<32²)': 0.42, 'Medium (32²-96²)': 0.71, 'Large (>96²)': 0.88},
+            ...
+        }
+        """
+        if not HAS_MATPLOTLIB or plt is None or not per_class_size_metrics:
+            return False
+
+        size_labels = ['Small (<32²)', 'Medium (32²-96²)', 'Large (>96²)']
+        classes     = list(per_class_size_metrics.keys())
+        colors      = AestheticConfig.PALETTES.get(palette, AestheticConfig.PALETTES['Vibrant'])
+        theme_cfg   = AestheticConfig.THEMES.get(theme, AestheticConfig.THEMES['Dark'])
+
+        n_cls   = len(classes)
+        n_sizes = len(size_labels)
+        x       = np.arange(n_cls)
+        width   = 0.25
+        offsets = np.linspace(-(n_sizes - 1) / 2, (n_sizes - 1) / 2, n_sizes) * width
+
+        fig_w = max(9, n_cls * 2.0)
+        fig, ax = plt.subplots(figsize=(fig_w, 5.5), dpi=dpi)
+
+        for si, (s_label, offset) in enumerate(zip(size_labels, offsets)):
+            vals = []
+            for c in classes:
+                raw = per_class_size_metrics[c].get(s_label)
+                v   = float(raw) if raw is not None else 0.0
+                vals.append(v * 100 if v <= 1.0 else v)
+            bars = ax.bar(x + offset, vals, width, label=s_label,
+                          color=colors[si % len(colors)], alpha=0.85,
+                          edgecolor='black', linewidth=0.5)
+            for bar in bars:
+                h = bar.get_height()
+                if h > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2.0, h + 0.5,
+                            f'{h:.1f}%', ha='center', va='bottom',
+                            fontsize=8, fontweight='bold', color=theme_cfg['text'])
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(classes, fontsize=11, fontweight='bold', rotation=20, ha='right')
+        ax.set_ylim(0, 108)
+        ax.set_ylabel('AP50 (%)', fontsize=11, fontweight='bold')
+        ax.set_title('Size Breakdown (Small / Medium / Large AP50) per Class',
+                     fontsize=13, fontweight='bold', pad=12)
+
+        leg = ax.legend(loc='upper right', frameon=True, fontsize=10)
+        leg.get_frame().set_facecolor(theme_cfg['legend_bg'])
+        leg.get_frame().set_edgecolor(theme_cfg['legend_edge'])
+        for text in leg.get_texts():
+            text.set_color(theme_cfg['text'])
+
+        AestheticConfig.apply(fig, ax, theme, show_grid=True)
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, facecolor=fig.get_facecolor(), edgecolor='none')
+        plt.close(fig)
+        return True
+
     @staticmethod
     def generate_tracking_error_plot(tracking_counts, save_path, theme='Dark', palette='Vibrant', dpi=150):
         """11. MOT Tracking Failure Taxonomy Breakdown (Strictly Real Counts)."""

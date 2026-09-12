@@ -8719,6 +8719,7 @@ Do you want to scan the entire video now for duplicate frames?
         if classes_added:
             self.class_attributes = self.canvas.class_attributes
             self.refresh_class_ui()
+        active_sam_manager = None
         if seg_model:
             if 'sam3' in seg_model.lower():
                 self.statusBar.showMessage(
@@ -8754,6 +8755,11 @@ Do you want to scan the entire video now for duplicate frames?
                     config['seg_model'] = None
                 else:
                     active_sam_manager = self.sam_manager
+            if active_sam_manager is None:
+                self.statusBar.showMessage('Segmentation model failed to load. Aborting.', 4000)
+                if hasattr(self, 'auto_label_widget'):
+                    self.statusBar.removeWidget(self.auto_label_widget)
+                return
         else:
             active_sam_manager = self.sam_manager
             

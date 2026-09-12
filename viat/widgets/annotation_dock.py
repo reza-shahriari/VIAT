@@ -1615,7 +1615,7 @@ class AnnotationDock(QDockWidget):
         action_combo = QComboBox()
         action_combo.addItems(["Delete", "Blur", "Shift Position", "Sync Attributes & Class"])
         form.addRow("Action:", action_combo)
-        
+
         shift_layout = QHBoxLayout()
         shift_layout.setContentsMargins(0, 0, 0, 0)
         dx_spin = QSpinBox()
@@ -1628,15 +1628,72 @@ class AnnotationDock(QDockWidget):
         shift_layout.addWidget(dx_spin)
         shift_layout.addWidget(QLabel("Y:"))
         shift_layout.addWidget(dy_spin)
-        
+
         shift_widget = QWidget()
         shift_widget.setLayout(shift_layout)
         shift_widget.setVisible(False)
         form.addRow("Shift (Pixels):", shift_widget)
-        
+
+        # -- Sync Attributes & Class fields --------------------------------
+        # "Match class" is what the object is CURRENTLY (mis)labeled as across
+        # the range -- used only to find the right box, since it's still
+        # consistent on every not-yet-fixed frame. "New class" is what to
+        # change it to. Keeping these separate means you don't have to
+        # pre-edit the reference frame's class before running this (which
+        # would break matching on every other frame still holding the old
+        # class).
+        all_classes = list(self.main_window.canvas.class_colors.keys())
+
+        match_class_combo = QComboBox()
+        match_class_combo.addItems(all_classes)
+        if class_name in all_classes:
+            match_class_combo.setCurrentText(class_name)
+        match_class_widget_row = ("Currently labeled as:", match_class_combo)
+
+        new_class_combo = QComboBox()
+        new_class_combo.addItems(all_classes)
+        if class_name in all_classes:
+            new_class_combo.setCurrentText(class_name)
+        new_class_widget_row = ("Change to class:", new_class_combo)
+
+        attrs_container = QWidget()
+        attrs_form = QFormLayout(attrs_container)
+        attrs_form.setContentsMargins(0, 0, 0, 0)
+        attr_inputs = {}
+
+        def rebuild_attr_form():
+            while attrs_form.rowCount():
+                attrs_form.removeRow(0)
+            attr_inputs.clear()
+            target_class = new_class_combo.currentText()
+            existing_attrs = dict(reference_annotation.attributes) if getattr(
+                reference_annotation, "attributes", None) else {}
+            widgets = self._build_attribute_inputs(target_class, existing_attrs)
+            for attr_name, (label_text, widget, getter) in widgets.items():
+                attrs_form.addRow(label_text, widget)
+                attr_inputs[attr_name] = getter
+
+        new_class_combo.currentTextChanged.connect(lambda _: rebuild_attr_form())
+        rebuild_attr_form()
+
+        sync_rows = [match_class_widget_row, new_class_widget_row]
+        for label_text, widget in sync_rows:
+            form.addRow(label_text, widget)
+        form.addRow("New Attributes:", attrs_container)
+
+        def set_sync_rows_visible(visible):
+            for label_text, widget in sync_rows:
+                form.labelForField(widget).setVisible(visible)
+                widget.setVisible(visible)
+            form.labelForField(attrs_container).setVisible(visible)
+            attrs_container.setVisible(visible)
+
+        set_sync_rows_visible(False)
+
         def on_action_changed(text):
             shift_widget.setVisible(text == "Shift Position")
-            
+            set_sync_rows_visible(text == "Sync Attributes & Class")
+
         action_combo.currentTextChanged.connect(on_action_changed)
 
         layout.addLayout(form)
@@ -1652,13 +1709,72 @@ class AnnotationDock(QDockWidget):
             low_f = min(start_frame, end_frame)
             high_f = max(start_frame, end_frame)
             action = action_combo.currentText()
-            
+
             action_params = {}
             if action == "Shift Position":
                 action_params = {"dx": dx_spin.value(), "dy": dy_spin.value()}
-                
+            elif action == "Sync Attributes & Class":
+                action_params = {
+                    "match_class": match_class_combo.currentText(),
+                    "new_class": new_class_combo.currentText(),
+                    "new_attributes": {name: getter() for name, getter in attr_inputs.items()},
+                }
+
             self.main_window.save_undo_state(range(low_f, high_f + 1))
             self.apply_batch_edit_object(start_frame, end_frame, reference_annotation, action, action_params)
+
+    def _build_attribute_inputs(self, class_name, existing_values):
+        """Build input widgets for a class's attribute schema, pre-filled from
+        existing_values where names match (falling back to the class's
+        defined default). Returns {attr_name: (label_text, widget, getter_fn)}."""
+        result = {}
+        class_attributes = {}
+        if hasattr(self.main_window.canvas, "class_attributes"):
+            class_attributes = self.main_window.canvas.class_attributes.get(class_name, {})
+
+        all_attr_names = set(class_attributes.keys()) | set(existing_values.keys())
+        for attr_name in sorted(all_attr_names):
+            attr_config = class_attributes.get(attr_name, {})
+            attr_type = attr_config.get("type")
+            default_value = attr_config.get("default")
+            current_value = existing_values.get(attr_name, default_value)
+            if attr_type is None:
+                if isinstance(current_value, bool):
+                    attr_type = "boolean"
+                elif isinstance(current_value, int):
+                    attr_type = "int"
+                elif isinstance(current_value, float):
+                    attr_type = "float"
+                else:
+                    attr_type = "string"
+
+            if attr_type == "boolean":
+                widget = QComboBox()
+                widget.addItems(["False", "True"])
+                widget.setCurrentText(str(bool(current_value)))
+                getter = (lambda w=widget: w.currentText() == "True")
+            elif attr_type in ("int", "float"):
+                widget = SelectAllLineEdit()
+                widget.setText(str(current_value) if current_value is not None else "0")
+                attr_min, attr_max = attr_config.get("min"), attr_config.get("max")
+                if attr_type == "int":
+                    if attr_min is not None and attr_max is not None:
+                        try:
+                            widget.setValidator(QIntValidator(int(attr_min), int(attr_max)))
+                        except (ValueError, TypeError):
+                            pass
+                    getter = (lambda w=widget: int(w.text()) if w.text() else 0)
+                else:
+                    if attr_min is not None and attr_max is not None:
+                        widget.setValidator(QDoubleValidator(attr_min, attr_max, 2))
+                    getter = (lambda w=widget: float(w.text()) if w.text() else 0.0)
+            else:
+                widget = SelectAllLineEdit()
+                widget.setText(str(current_value) if current_value is not None else "")
+                getter = (lambda w=widget: w.text())
+
+            result[attr_name] = (f"{attr_name}:", widget, getter)
+        return result
 
     def apply_batch_edit_object(self, start_frame, end_frame, reference_annotation, action, action_params):
         """
@@ -1667,7 +1783,12 @@ class AnnotationDock(QDockWidget):
         if start_frame > end_frame:
             start_frame, end_frame = end_frame, start_frame
 
-        class_name = reference_annotation.class_name
+        # For "Sync Attributes & Class", match using the OLD/current class
+        # (still consistent across not-yet-fixed frames) rather than the
+        # reference annotation's class, which may equal the NEW class already
+        # if the user edited the reference frame first.
+        class_name = action_params.get("match_class", reference_annotation.class_name) \
+            if action == "Sync Attributes & Class" else reference_annotation.class_name
         ref_track_id = None
         if hasattr(reference_annotation, "attributes") and reference_annotation.attributes:
             ref_track_id = reference_annotation.attributes.get("track_id")
@@ -1727,6 +1848,13 @@ class AnnotationDock(QDockWidget):
                     if success:
                         predicted_rect = QRect(int(box[0]), int(box[1]), int(box[2]), int(box[3]))
 
+            # For track_id-based matching, the track_id alone reliably
+            # identifies the object regardless of its (possibly wrong) class
+            # label, so no class filter is needed there. For the no-track_id
+            # visual-tracker fallback, filtering by class_name (which for
+            # "Sync Attributes & Class" is the OLD/currently-labeled class
+            # picked in the dialog, not the new one) keeps matching precise
+            # without requiring the reference frame to be pre-edited.
             if ref_track_id is not None:
                 for ann in anns:
                     tid = (
@@ -1734,7 +1862,7 @@ class AnnotationDock(QDockWidget):
                         if hasattr(ann, "attributes") and ann.attributes
                         else None
                     )
-                    if ann.class_name == class_name and tid == ref_track_id:
+                    if tid == ref_track_id:
                         to_edit.append(ann)
             else:
                 best_ann = None
@@ -1758,15 +1886,23 @@ class AnnotationDock(QDockWidget):
                     if action == "Blur":
                         blur_mgr = getattr(self.main_window, 'blur_manager', None)
                         if blur_mgr is not None:
-                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151), origin="converted_from_box")
+                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
                     elif action == "Shift Position":
                         ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
                     elif action == "Sync Attributes & Class":
-                        ann.class_name = reference_annotation.class_name
-                        ann.color = reference_annotation.color
-                        if not hasattr(ann, "attributes"):
+                        new_class = action_params.get("new_class", reference_annotation.class_name)
+                        ann.class_name = new_class
+                        ann.color = self.main_window.canvas.class_colors.get(
+                            new_class, reference_annotation.color)
+                        if not hasattr(ann, "attributes") or ann.attributes is None:
                             ann.attributes = {}
-                        if hasattr(reference_annotation, "attributes"):
+                        new_attributes = action_params.get("new_attributes")
+                        if new_attributes is not None:
+                            for k, v in new_attributes.items():
+                                ann.attributes[k] = v
+                        elif hasattr(reference_annotation, "attributes"):
+                            # Fallback for any programmatic caller that doesn't
+                            # supply new_attributes (keeps old behavior).
                             for k, v in reference_annotation.attributes.items():
                                 ann.attributes[k] = v
                                 

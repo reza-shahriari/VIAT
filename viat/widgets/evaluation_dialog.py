@@ -1444,8 +1444,28 @@ class EvaluationDialog(QDialog):
 
         layout.addWidget(group_diag)
 
+        # 3. Per-Class Breakdown Plots (Error, Aspect Ratio, Size)
+        group_per_class = QGroupBox("3. Per-Class Breakdown: Error Taxonomy | Aspect Ratio Bias | Size (Small/Med/Large)")
+        group_per_class.setStyleSheet("QGroupBox { font-weight: bold; }")
+        per_class_grid = QGridLayout(group_per_class)
+        per_class_grid.setSpacing(12)
+
+        self.lbl_diag_class_err = QLabel("Error Breakdown per Class")
+        self.lbl_diag_class_err.setAlignment(Qt.AlignCenter)
+        per_class_grid.addWidget(self.lbl_diag_class_err, 0, 0)
+
+        self.lbl_diag_class_ar = QLabel("Aspect Ratio Bias per Class")
+        self.lbl_diag_class_ar.setAlignment(Qt.AlignCenter)
+        per_class_grid.addWidget(self.lbl_diag_class_ar, 0, 1)
+
+        self.lbl_diag_class_size = QLabel("Size Breakdown per Class (AP50)")
+        self.lbl_diag_class_size.setAlignment(Qt.AlignCenter)
+        per_class_grid.addWidget(self.lbl_diag_class_size, 0, 2)
+
+        layout.addWidget(group_per_class)
+
         # 4. Detailed Stats Table
-        layout.addWidget(QLabel("<b>3. Detailed Per-Class Performance Summary Table:</b>"))
+        layout.addWidget(QLabel("<b>4. Detailed Per-Class Performance Summary Table:</b>"))
         self.table_stats = QTableWidget(0, 6)
         self.table_stats.setHorizontalHeaderLabels(["Class Name", "AP50", "AP", "TP", "FP", "FN"])
         self.table_stats.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -1453,7 +1473,7 @@ class EvaluationDialog(QDialog):
         layout.addWidget(self.table_stats)
 
         # 5. Per-Video Table
-        layout.addWidget(QLabel("<b>4. Per-Video Detection Metrics:</b>"))
+        layout.addWidget(QLabel("<b>5. Per-Video Detection Metrics:</b>"))
         self.table_video_stats = QTableWidget(0, 6)
         self.table_video_stats.setHorizontalHeaderLabels(["Video", "Precision", "Recall", "F1", "AP", "AP50"])
         self.table_video_stats.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -2087,6 +2107,10 @@ class EvaluationDialog(QDialog):
             ('spatial_path', self.lbl_diag_spatial, 550, 320),
             ('per_video_path', self.lbl_diag_per_video, 520, 320),
             ('track_path', self.lbl_diag_track, 480, 320),
+            # Per-class breakdown charts
+            ('class_err_path',  self.lbl_diag_class_err,  530, 340),
+            ('class_ar_path',   self.lbl_diag_class_ar,   530, 340),
+            ('class_size_path', self.lbl_diag_class_size, 530, 340),
         ]
         for key, label_widget, w, h in diag_mappings:
             path = results.get(key)
@@ -2265,6 +2289,31 @@ class EvaluationDialog(QDialog):
                     v_metrics, per_video_path, theme, palette, dpi
                 )
                 results['per_video_path'] = per_video_path
+
+            # Per-class breakdown plots (error taxonomy, aspect ratio, size)
+            pc_err = active_diag.get('per_class_error_breakdown')
+            if pc_err:
+                pc_err_path = os.path.join(results_dir, f"diag_class_err_breakdown_{scope_tag}.png")
+                AdvancedDiagnosticsEngine.generate_error_breakdown_per_class_plot(
+                    pc_err, pc_err_path, theme, palette, dpi
+                )
+                results['class_err_path'] = pc_err_path
+
+            pc_ar = active_diag.get('per_class_aspect_ratio')
+            if pc_ar:
+                pc_ar_path = os.path.join(results_dir, f"diag_class_aspect_ratio_{scope_tag}.png")
+                AdvancedDiagnosticsEngine.generate_aspect_ratio_per_class_plot(
+                    pc_ar, pc_ar_path, theme, palette, dpi, show_grid=show_grid
+                )
+                results['class_ar_path'] = pc_ar_path
+
+            pc_size = active_diag.get('per_class_size_metrics')
+            if pc_size:
+                pc_size_path = os.path.join(results_dir, f"diag_class_size_{scope_tag}.png")
+                AdvancedDiagnosticsEngine.generate_size_breakdown_per_class_plot(
+                    pc_size, pc_size_path, theme, palette, dpi
+                )
+                results['class_size_path'] = pc_size_path
 
         # 5. Refresh UI displays & Tables
         self.refresh_plot_displays(results)

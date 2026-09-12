@@ -37,9 +37,82 @@ def parse_yolo_yaml(yaml_path):
     return names_dict
 
 
+NC_LINE_RE = re.compile(r"^-?\s*nc\s*(:\s*\d*)?$", re.IGNORECASE)
+BULLET_RE = re.compile(r"^[\-\*\u2022]\s*")
+BOX_GROUP_RE = re.compile(r"\[([^\[\]]*)\]")
+HASH_HEADER_RE = re.compile(r"^#{3,}")
+
+
+def parse_annotation_file(path):
+    """
+    Parse a Raya format per-frame annotation file.
+    Returns (local_class_names: list[str], frame_lines: list[str]).
+    """
+    from pathlib import Path
+    if isinstance(path, (str, bytes)):
+        path = Path(path)
+    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    names = []
+    header_end = None
+    in_names_block = False
+    in_hash_header = False
+
+    for i, raw in enumerate(raw_lines):
+        line = raw.strip()
+        if HASH_HEADER_RE.match(line):
+            in_hash_header = not in_hash_header
+            if not in_hash_header:
+                header_end = i + 1
+                break
+            continue
+
+        if in_hash_header:
+            if line.lower().startswith(("names:", "clasess:", "classes:")):
+                in_names_block = True
+                continue
+            if NC_LINE_RE.match(line):
+                continue
+            if in_names_block and (line.startswith("-") or line.startswith("*") or line.startswith("•")):
+                name = BULLET_RE.sub("", line).strip()
+                if name and not HASH_HEADER_RE.match(name) and not NC_LINE_RE.match(name):
+                    names.append(name)
+            continue
+
+        if not in_names_block:
+            if line.lower().startswith(("names:", "clasess:", "classes:")):
+                in_names_block = True
+            continue
+        if NC_LINE_RE.match(line) or HASH_HEADER_RE.match(line):
+            header_end = i + 1
+            break
+        if line == "":
+            continue
+        name = BULLET_RE.sub("", line).strip()
+        if name and not HASH_HEADER_RE.match(name) and not NC_LINE_RE.match(name):
+            names.append(name)
+
+    if header_end is None:
+        header_end = 0
+
+    while header_end < len(raw_lines):
+        candidate = raw_lines[header_end].strip()
+        if (
+            candidate == ""
+            or candidate.upper() in ("DELETED;", "DELETE;", "DELETED", "DELETE")
+            or BOX_GROUP_RE.search(candidate)
+            or candidate == "[]"
+        ):
+            break
+        header_end += 1
+
+    frame_lines = raw_lines[header_end:]
+    return names, frame_lines
+
+
 def scan_dataset_classes(gt_path):
     """
-    Scan a directory for annotated class IDs or names.
+    Scan a directory or file for annotated class IDs or names.
     Supports YOLO txt, Raya txt, COCO json, and Pascal VOC XML.
     """
     if not gt_path or not os.path.exists(gt_path):
@@ -47,86 +120,98 @@ def scan_dataset_classes(gt_path):
 
     classes_found = []
 
-    # 1. Check txt files
+    # 1. Check txt files (support both file and directory paths)
     txt_files = []
     json_files = []
-    for root, _, files in os.walk(gt_path):
-        for f in files:
-            if f.endswith('.txt'):
-                txt_files.append(os.path.join(root, f))
-            elif f.endswith('.json'):
-                json_files.append(os.path.join(root, f))
+    if os.path.isfile(gt_path):
+        if gt_path.endswith('.txt'):
+            txt_files.append(gt_path)
+        elif gt_path.endswith('.json'):
+            json_files.append(gt_path)
+    else:
+        for root, _, files in os.walk(gt_path):
+            for f in files:
+                if f.endswith('.txt'):
+                    txt_files.append(os.path.join(root, f))
+                elif f.endswith('.json'):
+                    json_files.append(os.path.join(root, f))
 
+    # 2. Check for classes defined in annotation headers or classes.txt
+    header_classes = []
     for file_p in txt_files:
+        base_name = os.path.splitext(os.path.basename(file_p))[0].lower()
+        if base_name in {'per_class_metrics', 'diagnostics', 'combined', 'notes', 'readme'}:
+            continue
+        if base_name == 'classes':
+            try:
+                with open(file_p, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not HASH_HEADER_RE.match(line) and not NC_LINE_RE.match(line):
+                            if line not in header_classes:
+                                header_classes.append(line)
+            except Exception:
+                pass
+            continue
+
         try:
-            with open(file_p, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-                
-                # First check for inline header block like video_to_yolo.py uses
-                in_names_block = False
-                header_names = []
-                has_header = False
-                for line in lines:
-                    sline = line.strip()
-                    if not sline: continue
-                    if not in_names_block:
-                        if sline.lower().startswith("names:"):
-                            in_names_block = True
-                            has_header = True
-                        continue
-                    if re.match(r"^-?\s*nc\s*:\s*\d+", sline, re.IGNORECASE):
-                        break
-                    # Parse bullet points
-                    name = re.sub(r"^[\-\*\u2022]\s*", "", sline).strip()
-                    if name:
-                        header_names.append(name)
-                        
-                if has_header and header_names:
-                    for name in header_names:
-                        if name not in classes_found:
-                            classes_found.append(name)
-                    continue
-                    
-                # Fallback to scanning bounding boxes
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith('['):
-                        # Raya format: iterate through all boxes in the line separated by ';'
-                        for raw in line.split(';'):
-                            raw = raw.strip()
-                            if not raw.startswith('['):
-                                continue
-                            try:
-                                sline = eval(raw)
-                                if isinstance(sline, list) and len(sline) > 0 and isinstance(sline[0], list):
-                                    sline = sline[0]
-                                if isinstance(sline, list) and len(sline) > 0:
-                                    val = sline[0]
-                                    if isinstance(val, float) and val.is_integer():
+            local_names, _ = parse_annotation_file(file_p)
+            for name in local_names:
+                if name not in header_classes:
+                    header_classes.append(name)
+        except Exception:
+            pass
+
+    # 3. If header-defined class names exist, use them exclusively.
+    # Otherwise fallback to scanning bounding boxes for numeric class IDs.
+    if not header_classes:
+        for file_p in txt_files:
+            base_name = os.path.splitext(os.path.basename(file_p))[0].lower()
+            if base_name in {'data', 'dataset', 'labels', 'per_class_metrics', 'diagnostics', 'combined', 'notes', 'readme'}:
+                continue
+            try:
+                with open(file_p, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or HASH_HEADER_RE.match(line) or NC_LINE_RE.match(line):
+                            continue
+                        if line.lower().startswith(('names:', 'clasess:', 'classes:', 'deleted;')):
+                            continue
+                        if line.startswith('['):
+                            # Raya format: iterate through all boxes in the line separated by ';'
+                            for raw in line.split(';'):
+                                raw = raw.strip()
+                                if not raw.startswith('['):
+                                    continue
+                                try:
+                                    sline = eval(raw)
+                                    if isinstance(sline, list) and len(sline) > 0 and isinstance(sline[0], list):
+                                        sline = sline[0]
+                                    if isinstance(sline, list) and len(sline) > 0:
+                                        val = sline[0]
+                                        if isinstance(val, float) and val.is_integer():
+                                            val = int(val)
+                                        str_val = str(val)
+                                        if str_val not in classes_found:
+                                            classes_found.append(str_val)
+                                except Exception:
+                                    pass
+                        else:
+                            parts = line.split()
+                            if len(parts) >= 5:
+                                try:
+                                    val = float(parts[0])
+                                    if val.is_integer():
                                         val = int(val)
                                     str_val = str(val)
                                     if str_val not in classes_found:
                                         classes_found.append(str_val)
-                            except Exception:
-                                pass
-                    else:
-                        parts = line.split()
-                        if parts:
-                            try:
-                                val = float(parts[0])
-                                if val.is_integer():
-                                    val = int(val)
-                                str_val = str(val)
-                                if str_val not in classes_found:
-                                    classes_found.append(str_val)
-                            except ValueError:
-                                str_val = parts[0]
-                                if str_val not in classes_found:
-                                    classes_found.append(str_val)
-        except Exception:
-            pass
+                                except ValueError:
+                                    pass
+            except Exception:
+                pass
+    else:
+        classes_found = list(header_classes)
 
     # 2. Check JSON files (COCO categories or Raya json)
     for j_file in json_files:

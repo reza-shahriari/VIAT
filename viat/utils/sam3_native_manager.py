@@ -151,6 +151,8 @@ class Sam3NativeManager:
                 "points": torch.tensor(rel_points, dtype=torch.float32),
                 "point_labels": torch.tensor(labels, dtype=torch.int32),
             }
+            print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
+            print(f"[SAM3 Debug] Points prompt count: {len(rel_points)}")
         elif has_box:
             # Convert absolute xyxy → normalized xywh
             x1n = max(0.0, min(1.0, box[0] / IMG_WIDTH))
@@ -162,31 +164,29 @@ class Sam3NativeManager:
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "bounding_boxes": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                "bounding_box_labels": torch.tensor([1], dtype=torch.int32),
+                "boxes_xywh": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
+                "boxes_labels": torch.tensor([1], dtype=torch.int32),
                 "output_prob_thresh": 0.1,
             }
             if text_prompt:
-                prompt_req["text"] = text_prompt
+                prompt_req["text_str"] = text_prompt
+            print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
+            print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
+            if text_prompt:
+                print(f"[SAM3 Debug] Text prompt: {text_prompt}")
         elif has_text:
             prompt_req = {
                 "type": "add_prompt",
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "text": text_prompt,
+                "text_str": text_prompt,
                 "output_prob_thresh": 0.1,
             }
+            print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
+            print(f"[SAM3 Debug] Text prompt: {text_prompt}")
         else:
             return None
-            
-        print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
-        if has_text:
-            print(f"[SAM3 Debug] Text prompt: {text_prompt}")
-        if has_box:
-            print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
-        if has_points:
-            print(f"[SAM3 Debug] Points prompt count: {len(rel_points)}")
 
         polygon_pts = None
         try:
@@ -371,19 +371,19 @@ class Sam3NativeManager:
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    bounding_boxes=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                    bounding_box_labels=torch.tensor([1], dtype=torch.int32),
+                    boxes_xywh=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
+                    boxes_labels=torch.tensor([1], dtype=torch.int32),
                     output_prob_thresh=0.1,
                 )
                 if text_prompt:
-                    prompt_req["text"] = text_prompt
+                    prompt_req["text_str"] = text_prompt
             elif text_prompt:
                 prompt_req = dict(
                     type="add_prompt",
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    text=text_prompt,
+                    text_str=text_prompt,
                     output_prob_thresh=0.1,
                 )
             else:
@@ -396,63 +396,65 @@ class Sam3NativeManager:
             prop_dir = "backward" if is_backward else "forward"
             num_frames_to_track = abs(end_f - start_f) + 1
 
-            for response in self.video_predictor.handle_stream_request(
-                request=dict(
-                    type="propagate_in_video",
-                    session_id=session_id,
-                    start_frame_index=start_f,
-                    max_frame_num_to_track=num_frames_to_track,
-                    propagation_direction=prop_dir,
-                )
-            ):
-                out = response["outputs"]
+            try:
+                for response in self.video_predictor.handle_stream_request(
+                    request=dict(
+                        type="propagate_in_video",
+                        session_id=session_id,
+                        start_frame_index=start_f,
+                        max_frame_num_to_track=num_frames_to_track,
+                        propagation_direction=prop_dir,
+                    )
+                ):
+                    out = response["outputs"]
 
-                frame_polygons = []
-                frame_boxes = []
-                H_video, W_video = None, None
+                    frame_polygons = []
+                    frame_boxes = []
+                    H_video, W_video = None, None
 
-                # SAM3 returns: {"out_obj_ids", "out_binary_masks" [N,H,W], "out_boxes_xywh" [N,4] normalized}
-                out_binary_masks = out.get("out_binary_masks", None)
-                out_boxes_xywh = out.get("out_boxes_xywh", None)
+                    # SAM3 returns: {"out_obj_ids", "out_binary_masks" [N,H,W], "out_boxes_xywh" [N,4] normalized}
+                    out_binary_masks = out.get("out_binary_masks", None)
+                    out_boxes_xywh = out.get("out_boxes_xywh", None)
 
-                if out_binary_masks is not None and len(out_binary_masks) > 0:
-                    if isinstance(out_binary_masks, torch.Tensor):
-                        out_binary_masks = out_binary_masks.detach().cpu().numpy()
+                    if out_binary_masks is not None and len(out_binary_masks) > 0:
+                        if isinstance(out_binary_masks, torch.Tensor):
+                            out_binary_masks = out_binary_masks.detach().cpu().numpy()
 
-                    H_video, W_video = out_binary_masks[0].shape[:2]
+                        H_video, W_video = out_binary_masks[0].shape[:2]
 
-                    for mask in out_binary_masks:
-                        if isinstance(mask, torch.Tensor):
-                            mask = mask.detach().cpu().numpy()
-                        mask_bool = np.asarray(mask, dtype=bool)
-                        mask_uint8 = (mask_bool.astype(np.uint8)) * 255
-                        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if contours:
-                            largest_contour = max(contours, key=cv2.contourArea)
-                            polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
-                            frame_polygons.append(polygon)
-                        else:
-                            frame_polygons.append(None)
+                        for mask in out_binary_masks:
+                            if isinstance(mask, torch.Tensor):
+                                mask = mask.detach().cpu().numpy()
+                            mask_bool = np.asarray(mask, dtype=bool)
+                            mask_uint8 = (mask_bool.astype(np.uint8)) * 255
+                            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if contours:
+                                largest_contour = max(contours, key=cv2.contourArea)
+                                polygon = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
+                                frame_polygons.append(polygon)
+                            else:
+                                frame_polygons.append(None)
 
-                if out_boxes_xywh is not None and len(out_boxes_xywh) > 0 and H_video and W_video:
-                    if isinstance(out_boxes_xywh, torch.Tensor):
-                        out_boxes_xywh = out_boxes_xywh.detach().cpu().numpy()
-                    for b in out_boxes_xywh:
-                        # b is [x, y, w, h] normalized; convert to absolute [x1, y1, x2, y2]
-                        x1 = int(b[0] * W_video)
-                        y1 = int(b[1] * H_video)
-                        x2 = int((b[0] + b[2]) * W_video)
-                        y2 = int((b[1] + b[3]) * H_video)
-                        frame_boxes.append([x1, y1, x2, y2])
+                    if out_boxes_xywh is not None and len(out_boxes_xywh) > 0 and H_video and W_video:
+                        if isinstance(out_boxes_xywh, torch.Tensor):
+                            out_boxes_xywh = out_boxes_xywh.detach().cpu().numpy()
+                        for b in out_boxes_xywh:
+                            # b is [x, y, w, h] normalized; convert to absolute [x1, y1, x2, y2]
+                            x1 = int(b[0] * W_video)
+                            y1 = int(b[1] * H_video)
+                            x2 = int((b[0] + b[2]) * W_video)
+                            y2 = int((b[1] + b[3]) * H_video)
+                            frame_boxes.append([x1, y1, x2, y2])
 
-                yield True, {"polygons": frame_polygons, "boxes": frame_boxes}
-                
-            self.video_predictor.handle_request(
-                request=dict(
-                    type="close_session",
-                    session_id=session_id,
-                )
-            )
+                    yield True, {"polygons": frame_polygons, "boxes": frame_boxes}
+            finally:
+                # Always close the session to free VRAM, even if propagation throws
+                try:
+                    self.video_predictor.handle_request(
+                        request=dict(type="close_session", session_id=session_id)
+                    )
+                except Exception as close_e:
+                    print(f"[SAM3 Native] Failed to close tracking session: {close_e}")
 
         except Exception as e:
             import traceback

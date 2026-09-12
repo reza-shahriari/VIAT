@@ -581,6 +581,84 @@ class Evaluate():
                         ar_ratios.append(ratio_mids[bi])
                         ar_errors.append(float((is_tp[in_bin] == 0).mean() * 100))
 
+            # ── Per-class error breakdown, aspect-ratio bias, and size breakdown ──
+            SMALL_AREA  = 32 ** 2    # ≤ 1024 px²
+            MEDIUM_AREA = 96 ** 2    # ≤ 9216 px²
+            SIZE_LABELS = ['Small (<32²)', 'Medium (32²-96²)', 'Large (>96²)']
+
+            per_class_error_breakdown = {}
+            per_class_aspect_ratio    = {}
+            per_class_size_metrics    = {}
+
+            for c in cls_set:
+                # records that belong to this class (detection side)
+                c_matches  = [r for r in m_records if r['det'] == c]   # TP for det class c
+                c_m_wrong  = [r for r in c_matches if r['gt'] != c]    # classified as c but wrong gt
+                c_fp       = [r for r in f_records if r['det'] == c]   # FP with det class c
+                c_fn       = [r for r in n_records if r['gt'] == c]    # FN for gt class c
+
+                # Per-class error breakdown
+                per_class_error_breakdown[c] = {
+                    'classification': len(c_m_wrong),
+                    'localization':   len([r for r in c_fp if r.get('max_iou', 0) >= 0.1]),
+                    'background_fp':  len([r for r in c_fp if r.get('max_iou', 0) <  0.1]),
+                    'missed_fn':      len(c_fn),
+                }
+
+                # Per-class aspect-ratio bias
+                c_all_dets = c_matches + c_fp
+                if c_all_dets:
+                    c_tp_flags = np.array([True] * len(c_matches) + [False] * len(c_fp))
+                    c_ratios   = np.array([r['w'] / r['h'] if r.get('h') else 0.0
+                                           for r in c_all_dets])
+                    c_ar_ratios, c_ar_errors = [], []
+                    for bi in range(len(ratio_edges) - 1):
+                        in_bin = (c_ratios >= ratio_edges[bi]) & (c_ratios < ratio_edges[bi + 1])
+                        if in_bin.any():
+                            c_ar_ratios.append(ratio_mids[bi])
+                            c_ar_errors.append(float((c_tp_flags[in_bin] == 0).mean() * 100))
+                    if c_ar_ratios:
+                        per_class_aspect_ratio[c] = {'ratios': c_ar_ratios, 'error_rates': c_ar_errors}
+
+                # Per-class size breakdown (AP50 approximation per size bin)
+                c_fn_gt_area = np.array([r['w'] * r['h'] for r in c_fn]) if c_fn else np.array([])
+                c_det_area   = np.array([r['w'] * r['h'] for r in c_all_dets]) if c_all_dets else np.array([])
+                c_tp_flags2  = np.array([True] * len(c_matches) + [False] * len(c_fp)) if c_all_dets else np.array([], dtype=bool)
+
+                size_ap = {}
+                for s_label, lo_area, hi_area in [
+                    (SIZE_LABELS[0], 0,           SMALL_AREA),
+                    (SIZE_LABELS[1], SMALL_AREA,  MEDIUM_AREA),
+                    (SIZE_LABELS[2], MEDIUM_AREA, np.inf),
+                ]:
+                    # GT objects in this size bin (matched + FN for this class in this size)
+                    s_gt_match = [r for r in c_matches if lo_area <= r['w'] * r['h'] < hi_area]
+                    s_gt_fn    = [r for r in c_fn      if lo_area <= r['w'] * r['h'] < hi_area]
+                    s_total_gt = len(s_gt_match) + len(s_gt_fn)
+                    if s_total_gt == 0:
+                        size_ap[s_label] = None
+                        continue
+                    # Detections in this size bin
+                    s_dets    = [r for r in c_all_dets if lo_area <= r['w'] * r['h'] < hi_area]
+                    s_tp_flag = np.array([True] * len(s_gt_match) +
+                                         [False] * max(0, len(s_dets) - len(s_gt_match)))
+                    s_confs   = np.array([r['score'] for r in s_dets[:len(s_tp_flag)]])
+                    s_precs, s_recs = [], []
+                    for t in thresholds:
+                        sel = s_confs >= t
+                        tp_s = int(s_tp_flag[sel].sum())
+                        n_s  = int(sel.sum())
+                        s_precs.append(tp_s / n_s if n_s else 0.0)
+                        s_recs.append(tp_s / s_total_gt)
+                    s_idx  = np.argsort(s_recs)
+                    s_r    = np.array(s_recs)[s_idx]
+                    s_p    = np.array(s_precs)[s_idx]
+                    ap_val = float(np.trapz(s_p, s_r)) if len(s_r) > 1 else 0.0
+                    size_ap[s_label] = max(0.0, min(1.0, ap_val))
+
+                if any(v is not None for v in size_ap.values()):
+                    per_class_size_metrics[c] = size_ap
+
             return {
                 'classes': cls_set,
                 'confusion': cm.tolist(),
@@ -597,6 +675,9 @@ class Evaluate():
                 'per_class_curves': per_class_crvs,
                 'error_breakdown': err_breakdown,
                 'aspect_ratio': {'ratios': ar_ratios, 'error_rates': ar_errors},
+                'per_class_error_breakdown': per_class_error_breakdown,
+                'per_class_aspect_ratio':    per_class_aspect_ratio,
+                'per_class_size_metrics':    per_class_size_metrics,
                 'fp_coords': [[r['cx'], r['cy']] for r in f_records],
                 'fn_coords': [[r['cx'], r['cy']] for r in n_records],
                 'canvas_size': [cvs[0] or 1920, cvs[1] or 1080],
