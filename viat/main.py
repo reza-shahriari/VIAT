@@ -2234,20 +2234,32 @@ class VideoAnnotationTool(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _any_sam_backend_available(self):
+        """True if at least one SAM backend package is installed (ultralytics
+        for sam_manager/sam3_native_manager, or the TensorRT C++ backend) --
+        independent of whether a checkpoint has actually been downloaded yet."""
+        return (
+            getattr(self, 'sam_manager', None) and self.sam_manager.is_available()
+        ) or (
+            getattr(self, 'sam3_native_manager', None) and self.sam3_native_manager.is_available()
+        ) or (
+            getattr(self, 'sam2_trt_manager', None) and self.sam2_trt_manager.is_available()
+        )
+
     def toggle_sam_interactive_mode(self, checked):
         if not hasattr(self, 'sam_interactive_dock'):
             return
-            
+
         if hasattr(self, 'action_sam_interactive') and self.action_sam_interactive.isChecked() != checked:
             self.action_sam_interactive.blockSignals(True)
             self.action_sam_interactive.setChecked(checked)
             self.action_sam_interactive.blockSignals(False)
-            
+
         if hasattr(self, 'btn_sam_track') and self.btn_sam_track.isChecked() != checked:
             self.btn_sam_track.blockSignals(True)
             self.btn_sam_track.setChecked(checked)
             self.btn_sam_track.blockSignals(False)
-            
+
         self.canvas.sam_interactive_mode = checked
         if checked:
             if hasattr(self, 'annotation_dock') and hasattr(self, 'tabifyDockWidget'):
@@ -2255,30 +2267,49 @@ class VideoAnnotationTool(QMainWindow):
             self.sam_interactive_dock.show()
             self.sam_interactive_dock.raise_()
             model_type = self.sam_interactive_dock.get_model_type()
-            
-            self.statusBar.showMessage(f'Loading {model_type}...')
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            QApplication.processEvents()
-            
-            try:
-                if 'sam3' in model_type.lower():
-                    success, msg = self.sam3_native_manager.load_model(model_type)
-                    if not success:
-                        from PyQt5.QtWidgets import QMessageBox
-                        QMessageBox.warning(self, 'SAM3 Load Error', msg)
-                elif 'trt' in model_type.lower():
-                    success, msg = self.sam2_trt_manager.load_model(model_type)
-                    if not success:
-                        from PyQt5.QtWidgets import QMessageBox
-                        QMessageBox.warning(self, 'SAM2 TRT Load Error', msg)
-                else:
-                    success, msg = self.sam_manager.load_model(model_type)
-                    if not success:
-                        from PyQt5.QtWidgets import QMessageBox
-                        QMessageBox.warning(self, 'SAM2 Load Error', msg)
-            finally:
-                QApplication.restoreOverrideCursor()
-                
+
+            if not self._any_sam_backend_available():
+                # No SAM package on this machine at all (e.g. a low-power PC
+                # used just to place prompts) -- don't bother attempting
+                # load_model (it can only fail) or nagging with a load-error
+                # popup every time the dock is toggled. Explain the
+                # prompt-only workflow exactly once per session instead, then
+                # let the user carry on: drawing prompts and "+ Add to Track
+                # Queue" both work fine without any model -- only Preview and
+                # Execute Tracking (which need a real model) won't.
+                if not getattr(self, '_sam_prompt_only_notice_shown', False):
+                    self._sam_prompt_only_notice_shown = True
+                    QMessageBox.information(self, 'No SAM Model On This Computer',
+                        "This computer doesn't have a SAM backend installed (e.g. `pip install ultralytics`), "
+                        "so no mask preview or real tracking can run here.\n\n"
+                        "You can still draw prompts (points/box) and use '+ Add to Track Queue' normally -- "
+                        "the queue is saved and fully shareable even without a model on this machine. "
+                        "The thumbnail/preview will just show your box/points instead of a real mask.\n\n"
+                        "Run the queue later on a computer that has SAM installed to actually track it.")
+            else:
+                self.statusBar.showMessage(f'Loading {model_type}...')
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+
+                try:
+                    if 'sam3' in model_type.lower():
+                        success, msg = self.sam3_native_manager.load_model(model_type)
+                        if not success:
+                            from PyQt5.QtWidgets import QMessageBox
+                            QMessageBox.warning(self, 'SAM3 Load Error', msg)
+                    elif 'trt' in model_type.lower():
+                        success, msg = self.sam2_trt_manager.load_model(model_type)
+                        if not success:
+                            from PyQt5.QtWidgets import QMessageBox
+                            QMessageBox.warning(self, 'SAM2 TRT Load Error', msg)
+                    else:
+                        success, msg = self.sam_manager.load_model(model_type)
+                        if not success:
+                            from PyQt5.QtWidgets import QMessageBox
+                            QMessageBox.warning(self, 'SAM2 Load Error', msg)
+                finally:
+                    QApplication.restoreOverrideCursor()
+
             self.canvas.sam_prompt_points = []
             self.canvas.sam_prompt_labels = []
             self.canvas.sam_prompt_box = None
@@ -2382,7 +2413,11 @@ class VideoAnnotationTool(QMainWindow):
             self.canvas.sam_preview_rect = None
             self.canvas.sam_preview_class = None
             self.canvas.update()
-            self.statusBar.showMessage('No mask generated.', 3000)
+            if not self._any_sam_backend_available():
+                self.statusBar.showMessage(
+                    'No SAM model on this computer -- prompt still works and can be added to the queue, just without a live preview.', 5000)
+            else:
+                self.statusBar.showMessage('No mask generated.', 3000)
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
 
@@ -3009,12 +3044,67 @@ class VideoAnnotationTool(QMainWindow):
         self.auto_import_video_annotations(video_path)
         return bool(getattr(self, 'video_filename', None)) and os.path.abspath(self.video_filename) == os.path.abspath(video_path)
 
-    def _capture_job_thumbnail(self, points, labels, box):
-        """Render a small snapshot of the current frame showing exactly what
-        was prompted -- the same mask preview drawn by 'Preview Mask [Z]' if
-        one was generated, plus the box/points -- so the Track Queue can show
-        each job as a picture instead of a wall of text."""
-        frame = getattr(self.canvas, 'current_frame_array', None)
+    def _read_frame_array(self, frame_idx):
+        """Read a specific frame's pixel data (RGB) directly from the video
+        file or image dataset, independent of whatever frame is currently
+        displayed on screen. Used so a queued prompt's preview is always
+        generated against the frame it actually applies to (e.g. the Custom
+        Range start frame), not wherever the user happened to scroll to."""
+        try:
+            if getattr(self, 'is_image_dataset', False):
+                if 0 <= frame_idx < len(self.image_files):
+                    frame_bgr = cv2.imread(self.image_files[frame_idx])
+                    if frame_bgr is not None:
+                        return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                return None
+            if not getattr(self, 'video_filename', None):
+                return None
+            cap = cv2.VideoCapture(self.video_filename)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame_bgr = cap.read()
+            cap.release()
+            if ret:
+                return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            logger.error(f"Could not read frame {frame_idx}: {e}")
+        return None
+
+    def _pick_sam_manager_for_model(self, model_type):
+        if 'sam3' in model_type.lower():
+            return self.sam3_native_manager
+        if 'trt' in model_type.lower():
+            return self.sam2_trt_manager
+        return self.sam_manager
+
+    def _generate_prompt_preview_for_frame(self, frame_idx, points, labels, box, text_prompt, model_type):
+        """Run SAM on the given frame's own pixel data (see
+        _read_frame_array) with the given prompt. Returns (frame_img,
+        polygon) -- polygon is None if the frame couldn't be read or no mask
+        was produced."""
+        frame_img = self._read_frame_array(frame_idx)
+        if frame_img is None:
+            return None, None
+        manager = self._pick_sam_manager_for_model(model_type)
+        if manager is None:
+            return frame_img, None
+        box_xyxy = [box[0], box[1], box[0] + box[2], box[1] + box[3]] if box else None
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            polygon = manager.predict_mask_from_prompt(
+                frame_img, points=points or None, labels=labels or None,
+                box=box_xyxy, text_prompt=text_prompt or None)
+        except Exception as e:
+            logger.error(f"Could not generate prompt preview for frame {frame_idx}: {e}")
+            polygon = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        return frame_img, polygon
+
+    def _capture_job_thumbnail(self, frame, polygon, points, labels, box):
+        """Render a small snapshot of *frame* showing exactly what was
+        prompted -- the mask preview (if one was generated), plus the
+        box/points -- so the Track Queue can show each job as a picture
+        instead of a wall of text."""
         if frame is None:
             return None
         try:
@@ -3022,7 +3112,6 @@ class VideoAnnotationTool(QMainWindow):
             import numpy as np
             import base64
             img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).copy()
-            polygon = getattr(self.canvas, 'sam_preview_polygon', None)
             if polygon:
                 pts = np.array(polygon, dtype=np.int32).reshape(-1, 1, 2)
                 overlay = img.copy()
@@ -3088,13 +3177,23 @@ class VideoAnnotationTool(QMainWindow):
             return
 
         # Always (re)generate the SAM mask preview for the prompt exactly as
-        # it stands right now, on this frame -- don't rely on the user having
-        # pressed "Preview Mask [Z]" themselves. Without this, sam_preview_
-        # polygon/rect can still be holding a stale mask from an earlier
-        # object/frame that WAS previewed, which is what made both the queue
-        # thumbnail and the on-canvas preview look wrong for any prompt that
-        # wasn't manually previewed itself.
-        self.on_sam_preview_requested()
+        # it stands right now -- and, critically, on the frame the prompt
+        # actually STARTS on (start_f), not whatever frame happens to be on
+        # screen. Custom Range lets you scrub around to set the End frame
+        # while Start stays fixed earlier (e.g. frame 1), so "currently
+        # displayed frame" and "the prompt's frame" are not the same thing.
+        # Using the wrong one is what made the preview/thumbnail show the
+        # wrong picture whenever you'd scrolled away from the prompt frame.
+        model_type = self.sam_interactive_dock.get_model_type()
+        preview_frame_img, preview_polygon = self._generate_prompt_preview_for_frame(
+            start_f, points, labels, box, text_prompt, model_type)
+        preview_rect = None
+        if preview_polygon:
+            xs = [p[0] for p in preview_polygon]
+            ys = [p[1] for p in preview_polygon]
+            preview_rect = QRect(int(min(xs)), int(min(ys)), int(max(xs) - min(xs)), int(max(ys) - min(ys)))
+        elif box:
+            preview_rect = QRect(box[0], box[1], box[2], box[3])
 
         video_switch_mode, video_identifier, video_display = self._current_video_identifier()
         if video_identifier:
@@ -3114,7 +3213,7 @@ class VideoAnnotationTool(QMainWindow):
             'box': box,
             'text_prompt': text_prompt,
             'target_class': target_class,
-            'model_type': self.sam_interactive_dock.get_model_type(),
+            'model_type': model_type,
             'tracker_engine': getattr(self.sam_interactive_dock, 'get_tracker_engine', lambda: 'sam')(),
             'det_model_type': self.sam_interactive_dock.get_det_model_type(),
             'should_blur': self.sam_interactive_dock.get_blur_tracked_objects(),
@@ -3124,7 +3223,7 @@ class VideoAnnotationTool(QMainWindow):
             'video_switch_mode': video_switch_mode,
             'video_identifier': video_identifier,
             'video_display': video_display,
-            'thumbnail': self._capture_job_thumbnail(points, labels, box),
+            'thumbnail': self._capture_job_thumbnail(preview_frame_img, preview_polygon, points, labels, box),
         }
         job['display'] = self._job_display_text(job)
 
@@ -3137,17 +3236,16 @@ class VideoAnnotationTool(QMainWindow):
         self.track_queue.append(job)
         self._refresh_track_queue_dock()
 
-        # Keep this prompt's mask/box drawn on the frame after it's cleared
-        # for the next object -- with several objects queued on the same
-        # frame, this is what stops the user from losing track of which
+        # Keep this prompt's mask/box drawn on start_f (the prompt's actual
+        # frame, not necessarily whatever's on screen right now) after it's
+        # cleared for the next object -- with several objects queued on the
+        # same frame, this is what stops the user from losing track of which
         # ones are already queued.
         if not hasattr(self.canvas, 'queued_job_previews'):
             self.canvas.queued_job_previews = {}
-        preview_rect = self.canvas.sam_prompt_box or getattr(self.canvas, 'sam_preview_rect', None)
-        preview_polygon = list(self.canvas.sam_preview_polygon) if getattr(self.canvas, 'sam_preview_polygon', None) else None
-        self.canvas.queued_job_previews.setdefault(self.current_frame, []).append({
+        self.canvas.queued_job_previews.setdefault(start_f, []).append({
             'job_id': job_id,
-            'polygon': preview_polygon,
+            'polygon': list(preview_polygon) if preview_polygon else None,
             'rect': preview_rect,
             'class': target_class,
             'should_blur': job.get('should_blur', False),
@@ -10012,18 +10110,38 @@ Others are moved to removed/duplicates/."""
 
     @log_exceptions
     def viat_split_video_scenes(self):
-        """Detect scene cuts in the currently open video and split it into separate clips."""
+        """Detect scene cuts in the currently open video and split it into separate clips.
+
+        Runs entirely in a background QThread and reports progress through a
+        status-bar widget (see `_start_scene_split_ui`) instead of a modal
+        progress dialog, so the UI stays usable while it works. Clips are
+        written under their final name as soon as each one is cut, and once at
+        least two exist the status bar offers an "Open Clips" button so the
+        user can start annotating them without waiting for the whole video to
+        finish splitting.
+        """
         if not self.video_filename or self.is_image_dataset:
             QMessageBox.warning(self, "Split Video", "Please open a video file first.")
             return
 
+        if getattr(self, '_scene_split_worker', None) is not None:
+            QMessageBox.warning(self, "Split Video", "A video split is already in progress.")
+            return
+
         from PyQt5.QtWidgets import QInputDialog, QFileDialog
-        
-        # Get threshold from user
+
         threshold, ok = QInputDialog.getDouble(
             self, 'Split Video by Scene Cuts',
             'Enter the cut detection threshold (Adaptive default = 3.0, lower = more cuts):',
             3.0, 1.0, 100.0, 1
+        )
+        if not ok:
+            return
+
+        min_scene_len, ok = QInputDialog.getInt(
+            self, 'Split Video by Scene Cuts',
+            'Minimum scene length in frames (prevents flicker/fades from creating tiny clips):',
+            15, 1, 1000, 1
         )
         if not ok:
             return
@@ -10041,11 +10159,11 @@ Others are moved to removed/duplicates/."""
 
         # Prepare to close current video to avoid file lock issues when removing
         video_path_to_split = self.video_filename
-        
+
         # We need to make sure we don't have pending unsaved changes before closing
         if not self.check_unsaved_changes():
             return
-            
+
         # Close the video
         if hasattr(self, 'video_manager'):
             self.video_manager.close_video()
@@ -10054,34 +10172,133 @@ Others are moved to removed/duplicates/."""
                 self.cap.release()
                 self.cap = None
 
-        def split_generator():
-            yield 0, "Detecting scenes and splitting (this may take a while)..."
-            from viat.utils.scene_splitter import split_video_by_scenes
-            # This handles the detection, ffmpeg splitting, and original deletion
-            res_dir, num = split_video_by_scenes(video_path_to_split, session_dir, threshold)
-            yield res_dir, num
+        from viat.utils.scene_splitter import SceneSplitWorker
+        if SceneSplitWorker is None:
+            QMessageBox.critical(self, "Split Video", "PyQt5 is unavailable; cannot run the split worker.")
+            return
 
-        from viat.utils.task_runner import run_task_with_progress
-        
-        try:
-            result = run_task_with_progress(
-                self, "Splitting Video", "Detecting scenes...", 
-                split_generator, maximum=0
-            )
-            
-            if result:
-                res_dir, num = result
-                msg = f"Successfully split video into {num} clips.\nOutput directory: {res_dir}\nOriginal video was removed."
-                QMessageBox.information(self, "Split Video Complete", msg)
-                
-                # Optional: prompt user to open the new clips directory as image dataset or let them do it manually
-                reply = QMessageBox.question(self, "Open Clips", "Would you like to open the output directory as a sequence?",
-                                           QMessageBox.Yes | QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    self.open_image_dataset(res_dir)
-                    
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to split video:\n{str(e)}")
+        self._scene_split_session_dir = session_dir
+        self._scene_split_clips_seen = 0
+        self._scene_split_offered_open = False
+
+        worker = SceneSplitWorker(video_path_to_split, session_dir, threshold=threshold, min_scene_len=min_scene_len, parent=self)
+        worker.detect_progress.connect(self._on_scene_split_detect_progress)
+        worker.split_progress.connect(self._on_scene_split_progress)
+        worker.clip_ready.connect(self._on_scene_split_clip_ready)
+        worker.finished_all.connect(self._on_scene_split_finished)
+        worker.error.connect(self._on_scene_split_error)
+        self._scene_split_worker = worker
+
+        self._start_scene_split_ui(session_dir)
+        worker.start()
+
+    def _start_scene_split_ui(self, session_dir):
+        """Build the non-modal, bottom-left status-bar progress widget for a
+        running scene split (mirrors the pattern used for the background AI
+        auto-annotator's `auto_label_widget`) so the split never blocks the UI."""
+        from PyQt5.QtWidgets import QWidget, QHBoxLayout, QPushButton, QProgressBar, QLabel
+        self.scene_split_widget = QWidget()
+        layout = QHBoxLayout(self.scene_split_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.scene_split_label = QLabel("Detecting scenes...")
+        layout.addWidget(self.scene_split_label)
+        self.scene_split_progress = QProgressBar(self)
+        self.scene_split_progress.setRange(0, 100)
+        self.scene_split_progress.setValue(0)
+        layout.addWidget(self.scene_split_progress)
+        self.scene_split_open_btn = QPushButton("Open Clips")
+        self.scene_split_open_btn.setEnabled(False)
+        self.scene_split_open_btn.setToolTip("Available once at least 2 clips have been saved")
+        self.scene_split_open_btn.clicked.connect(lambda: self._open_or_refresh_video_dataset(session_dir))
+        layout.addWidget(self.scene_split_open_btn)
+        self.scene_split_cancel_btn = QPushButton("Cancel")
+        self.scene_split_cancel_btn.clicked.connect(self._cancel_scene_split)
+        layout.addWidget(self.scene_split_cancel_btn)
+        self.statusBar.addPermanentWidget(self.scene_split_widget)
+        self.statusBar.showMessage(f'Splitting video into scenes -> {session_dir}')
+
+    def _cancel_scene_split(self):
+        if getattr(self, '_scene_split_worker', None) is not None:
+            self._scene_split_worker.cancel()
+            self.scene_split_label.setText("Cancelling...")
+            self.scene_split_cancel_btn.setEnabled(False)
+
+    def _on_scene_split_detect_progress(self, current, total):
+        percent = int((current / total) * 100) if total else 0
+        self.scene_split_progress.setValue(percent)
+        self.scene_split_label.setText(f"Detecting scenes... {percent}%")
+
+    def _on_scene_split_progress(self, clips_done, total_clips):
+        percent = int((clips_done / total_clips) * 100) if total_clips else 0
+        self.scene_split_progress.setValue(percent)
+        self.scene_split_label.setText(f"Splitting clip {clips_done}/{total_clips} ({percent}%)")
+
+    def _on_scene_split_clip_ready(self, clip_path, index):
+        """Fires as soon as one clip has been written under its final name.
+
+        Once two clips exist, lets the user jump into the (still-growing)
+        output folder as a video dataset instead of waiting for the whole
+        video to finish splitting; if they already have it open, keeps the
+        video manager dock's list in sync with each new clip as it lands."""
+        self._scene_split_clips_seen = index + 1
+        if self._scene_split_clips_seen >= 2:
+            self.scene_split_open_btn.setEnabled(True)
+        session_dir = getattr(self, '_scene_split_session_dir', None)
+        if session_dir and getattr(self, 'is_video_dataset', False) and getattr(self, 'video_dataset_info', None) \
+                and os.path.abspath(self.video_dataset_info.root) == os.path.abspath(session_dir):
+            self._refresh_video_dataset_listing(session_dir)
+
+    def _open_or_refresh_video_dataset(self, session_dir):
+        """Open `session_dir` as a video dataset, or just refresh the video
+        manager dock's list if it is already the active dataset."""
+        if getattr(self, 'is_video_dataset', False) and getattr(self, 'video_dataset_info', None) \
+                and os.path.abspath(self.video_dataset_info.root) == os.path.abspath(session_dir):
+            self._refresh_video_dataset_listing(session_dir)
+            return
+        if not self.check_unsaved_changes():
+            return
+        self.load_video_dataset_path(session_dir)
+
+    def _refresh_video_dataset_listing(self, session_dir):
+        from viat.utils.video_dataset_manager import scan_video_dataset
+        info = scan_video_dataset(session_dir)
+        self.video_dataset_info = info
+        if hasattr(self, 'video_manager_dock'):
+            self.video_manager_dock.set_video_dataset(info)
+
+    def _teardown_scene_split_ui(self):
+        if hasattr(self, 'scene_split_widget'):
+            self.statusBar.removeWidget(self.scene_split_widget)
+            del self.scene_split_widget
+        self._scene_split_worker = None
+
+    def _on_scene_split_finished(self, res_dir, num):
+        was_cancelled = getattr(getattr(self, '_scene_split_worker', None), '_cancelled', False)
+        self._teardown_scene_split_ui()
+        session_dir = getattr(self, '_scene_split_session_dir', None)
+        if session_dir and getattr(self, 'is_video_dataset', False) and getattr(self, 'video_dataset_info', None) \
+                and os.path.abspath(self.video_dataset_info.root) == os.path.abspath(session_dir):
+            self._refresh_video_dataset_listing(session_dir)
+
+        if was_cancelled:
+            self.statusBar.showMessage(
+                f"Split cancelled: {num} clip(s) already written to {res_dir}; original video left untouched.", 8000)
+            return
+
+        self.statusBar.showMessage(f"Split complete: {num} clips in {res_dir}", 8000)
+        if not getattr(self, 'is_video_dataset', False) or getattr(self, 'video_dataset_info', None) is None \
+                or os.path.abspath(getattr(self.video_dataset_info, 'root', '')) != os.path.abspath(res_dir):
+            reply = QMessageBox.question(
+                self, "Open Clips",
+                f"Successfully split video into {num} clips.\nOutput directory: {res_dir}\n"
+                "Original video was removed.\n\nOpen the output directory as a video dataset now?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self._open_or_refresh_video_dataset(res_dir)
+
+    def _on_scene_split_error(self, message):
+        self._teardown_scene_split_ui()
+        QMessageBox.critical(self, "Error", f"Failed to split video:\n{message}")
 
     @log_exceptions
     def viat_import_video_json(self):
