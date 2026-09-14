@@ -1132,12 +1132,19 @@ class VideoCanvas(QWidget):
             # Skip selection if Shift is pressed or if Auto BBox / SAM mode is active
             skip_selection = False
             is_auto_bbox = getattr(self.main_window, "auto_bbox_mode", False)
-            if event.modifiers() & Qt.ShiftModifier:
+            shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            if is_sam_mode:
+                # In SAM Interactive mode, Shift is the dedicated "edit the
+                # annotation underneath instead" modifier. Without Shift,
+                # every click must always be treated as a SAM prompt
+                # (point/box) -- even when it lands inside another existing
+                # annotation's box -- otherwise a negative-point click there
+                # gets hijacked into selecting/resizing that annotation.
+                skip_selection = not shift_held
+            elif shift_held:
                 if not is_auto_bbox:
                     skip_selection = True
             elif self.is_auto_bbox_active():
-                skip_selection = True
-            elif is_sam_mode:
                 skip_selection = True
             elif getattr(self, "is_cropping_mode", False):
                 skip_selection = True
@@ -1245,6 +1252,11 @@ class VideoCanvas(QWidget):
                 return
 
             if is_sam_mode:
+                if shift_held:
+                    # Shift was held but there was no annotation under the
+                    # cursor to edit (handled above) -- never fall through
+                    # to SAM prompting in that case.
+                    return
                 self.setFocus()
                 self.is_drawing = True
                 self.start_point = img_pos
@@ -2065,6 +2077,18 @@ class VideoCanvas(QWidget):
     def show_context_menu(self, position):
         """Show context menu for right-click actions"""
         if not self.pixmap:
+            return
+
+        # In SAM Interactive mode, right-click is repurposed as a
+        # negative-point/box prompt (see mousePressEvent/mouseReleaseEvent)
+        # and must not pop up the Edit/Delete/Blur menu for whatever
+        # annotation happens to sit underneath the click -- that made
+        # negative-point prompting look like it was "modifying the bounding
+        # box" instead of prompting. Only Shift+right-click (the same
+        # modifier used to opt into editing there) falls through here.
+        if getattr(self, "sam_interactive_mode", False) and not (
+            QApplication.keyboardModifiers() & Qt.ShiftModifier
+        ):
             return
 
         # Find annotation at the clicked position

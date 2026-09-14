@@ -1185,6 +1185,8 @@ class VideoAnnotationTool(QMainWindow):
                 on_sam_model_changed)
             self.sam_interactive_dock.add_to_queue_requested.connect(self.
                 on_add_current_prompt_to_queue)
+            self.sam_interactive_dock.next_cut_requested.connect(self.
+                on_sam_next_cut_requested)
             view_menu = self.menuBar().addMenu('&SAM Tracking')
             self.action_sam_interactive = view_menu.addAction(
                 'Toggle SAM Interactive Mode')
@@ -2420,6 +2422,23 @@ class VideoAnnotationTool(QMainWindow):
                 self.statusBar.showMessage('No mask generated.', 3000)
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
+
+    def on_sam_next_cut_requested(self, which):
+        """Snap the SAM Interactive dock's Custom Range Start/End field
+        forward to the next detected scene cut, reusing the same scan
+        already used by 'Edit Object Across Frames' in the annotation dock."""
+        if not hasattr(self, 'annotation_dock') or not hasattr(self, 'sam_interactive_dock'):
+            return
+        dock = self.sam_interactive_dock
+        spin = dock.spin_start if which == 'start' else dock.spin_end
+        scan_from = spin.value() - 1  # 0-indexed
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            cut_frame = self.annotation_dock.detect_next_cut(scan_from)
+        finally:
+            QApplication.restoreOverrideCursor()
+        dock.set_range_value(which, cut_frame)
+        self.statusBar.showMessage(f'Cut detected at frame {cut_frame + 1}', 3000)
 
     def _warn_or_log(self, batch_job, title, message):
         """Show a blocking QMessageBox in interactive mode, or append to the

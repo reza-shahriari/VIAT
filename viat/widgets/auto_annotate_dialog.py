@@ -178,6 +178,25 @@ class AutoAnnotateDialog(QDialog):
         scope_row.addStretch()
         quick_layout.addLayout(scope_row)
 
+        # Refine-existing-labels shortcut — the common "pass current labels
+        # as SAM prompts" workflow used to require: open Advanced, add a row
+        # per class, and flip each row's Action to Helper by hand. This does
+        # all of that in one click.
+        refine_row = QHBoxLayout()
+        self.chk_refine_existing = QCheckBox(
+            'Refine existing labels with SAM (use current boxes as prompts)')
+        self.chk_refine_existing.setToolTip(
+            "Sends every existing class's boxes to a SAM segmentation model as\n"
+            "box prompts instead of re-detecting from scratch. Sets every\n"
+            "class in the Advanced table below to 'Use as Helper (SAM3 Refine)'\n"
+            "and picks a SAM model if none is set — review/adjust per-class\n"
+            "options in Advanced Options afterward if needed."
+        )
+        self.chk_refine_existing.toggled.connect(self._on_refine_existing_toggled)
+        refine_row.addWidget(self.chk_refine_existing)
+        refine_row.addStretch()
+        quick_layout.addLayout(refine_row)
+
         root.addWidget(quick_box)
 
         # ── Advanced ────────────────────────────────────────────────────────
@@ -198,6 +217,23 @@ class AutoAnnotateDialog(QDialog):
         self.classes_table.setMinimumHeight(150)
         self.classes_table.setMaximumHeight(400)
         self._adv_section.add_widget(self.classes_table)
+
+        # Bulk action row — set every row's Action in one click instead of
+        # clicking each row's dropdown individually.
+        bulk_row = QHBoxLayout()
+        bulk_row.addWidget(QLabel('Set all rows to:'))
+        btn_bulk_helper = QPushButton('Use as Helper (SAM3 Refine)')
+        btn_bulk_helper.setToolTip('Send every class\'s existing boxes to SAM as prompts.')
+        btn_bulk_helper.clicked.connect(lambda: self._bulk_set_action('Use as Helper (SAM3 Refine)'))
+        btn_bulk_detect = QPushButton('Detect (Zero-Shot)')
+        btn_bulk_detect.clicked.connect(lambda: self._bulk_set_action('Detect (Zero-Shot)'))
+        btn_bulk_ignore = QPushButton('Ignore')
+        btn_bulk_ignore.clicked.connect(lambda: self._bulk_set_action('Ignore'))
+        bulk_row.addWidget(btn_bulk_helper)
+        bulk_row.addWidget(btn_bulk_detect)
+        bulk_row.addWidget(btn_bulk_ignore)
+        bulk_row.addStretch()
+        self._adv_section.add_layout(bulk_row)
 
         add_row_btn = QPushButton('+ Add Class Row')
         add_row_btn.setFixedWidth(140)
@@ -390,6 +426,28 @@ class AutoAnnotateDialog(QDialog):
             'min_score':         threshold / 100.0,
             'dedup_iou':         self.dedup_spin.value(),
         }
+
+    def _bulk_set_action(self, action_text):
+        """Set every row in the per-class table to the given Action in one click."""
+        for row in range(self.classes_table.rowCount()):
+            action_combo = self.classes_table.cellWidget(row, 1)
+            if action_combo:
+                action_combo.setCurrentText(action_text)
+
+    def _on_refine_existing_toggled(self, checked):
+        """Quick Setup shortcut: pass every existing class's current boxes to
+        SAM as prompts, without needing to open Advanced and configure each
+        class row by hand."""
+        if not checked:
+            return
+        self._bulk_set_action('Use as Helper (SAM3 Refine)')
+        # Pick a SAM model for refinement if the user hasn't already.
+        if self.seg_model_combo.currentIndex() == 0:  # 'None'
+            self._set_combo_by_key(self.seg_model_combo, SEG_REFINER_MODELS, 'sam3_l.pt')
+        # Expand Advanced so the user can see/tweak what was just applied.
+        if self._adv_section._is_collapsed:
+            self._adv_section._toggle_btn.setChecked(True)
+            self._adv_section._on_toggle(True)
 
     # ──────────────────────────── Slots ─────────────────────────────────────
     def _on_test(self):

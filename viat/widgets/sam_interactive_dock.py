@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QComboBox, QSpinBox, QGroupBox, QMessageBox, QCheckBox
+    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QComboBox, QSpinBox, QGroupBox, QMessageBox, QCheckBox,
+    QToolButton
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -13,6 +14,7 @@ class SAMInteractiveDock(QDockWidget):
     undo_requested = pyqtSignal()
     model_changed = pyqtSignal(str)
     add_to_queue_requested = pyqtSignal()
+    next_cut_requested = pyqtSignal(str) # 'start' or 'end' -- which range field to snap to the next scene cut
     
     def __init__(self, parent=None):
         super().__init__("Interactive Tracking Menu", parent)
@@ -168,16 +170,45 @@ class SAMInteractiveDock(QDockWidget):
 
         # Custom Range
         self.range_widget = QWidget()
-        range_layout = QHBoxLayout(self.range_widget)
+        range_layout = QVBoxLayout(self.range_widget)
         range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(4)
+
+        def _make_helper_btn(text, tooltip):
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setToolTip(tooltip)
+            btn.setFixedWidth(36)
+            return btn
+
+        start_row = QHBoxLayout()
+        start_row.addWidget(QLabel("Start:"))
         self.spin_start = QSpinBox()
         self.spin_start.setMinimum(1)
+        start_row.addWidget(self.spin_start)
+        self.btn_start_now = _make_helper_btn("Now", "Set Start to the current frame")
+        self.btn_start_now.clicked.connect(lambda: self.spin_start.setValue(self.current_frame + 1))
+        start_row.addWidget(self.btn_start_now)
+        self.btn_start_cut = _make_helper_btn("Cut", "Scan forward from Start for the next scene cut")
+        self.btn_start_cut.clicked.connect(lambda: self.next_cut_requested.emit("start"))
+        start_row.addWidget(self.btn_start_cut)
+        start_row.addStretch()
+        range_layout.addLayout(start_row)
+
+        end_row = QHBoxLayout()
+        end_row.addWidget(QLabel("End:"))
         self.spin_end = QSpinBox()
         self.spin_end.setMinimum(1)
-        range_layout.addWidget(QLabel("Start:"))
-        range_layout.addWidget(self.spin_start)
-        range_layout.addWidget(QLabel("End:"))
-        range_layout.addWidget(self.spin_end)
+        end_row.addWidget(self.spin_end)
+        self.btn_end_now = _make_helper_btn("Now", "Set End to the current frame")
+        self.btn_end_now.clicked.connect(lambda: self.spin_end.setValue(self.current_frame + 1))
+        end_row.addWidget(self.btn_end_now)
+        self.btn_end_cut = _make_helper_btn("Cut", "Scan forward from End for the next scene cut")
+        self.btn_end_cut.clicked.connect(lambda: self.next_cut_requested.emit("end"))
+        end_row.addWidget(self.btn_end_cut)
+        end_row.addStretch()
+        range_layout.addLayout(end_row)
+
         self.range_widget.setVisible(False)
         self.layout.addWidget(self.range_widget)
 
@@ -257,6 +288,12 @@ class SAMInteractiveDock(QDockWidget):
     def on_model_changed(self, index):
         self.model_changed.emit(self.get_model_type())
 
+    def set_range_value(self, which, frame_0idx):
+        """Push a computed frame (e.g. from next-cut detection) into the
+        Start or End custom-range spin box. `frame_0idx` is 0-indexed."""
+        spin = self.spin_start if which == "start" else self.spin_end
+        spin.setValue(max(spin.minimum(), min(spin.maximum(), frame_0idx + 1)))
+
     def update_status(self, num_pos, num_neg, has_box):
         self.lbl_points.setText(f"Points: {num_pos} Positive, {num_neg} Negative")
         self.lbl_box.setText("Bounding Box: Set" if has_box else "Bounding Box: Not Set")
@@ -314,25 +351,25 @@ class SAMInteractiveDock(QDockWidget):
             strategy = "detect" if use_frame_by_frame else "range"
             s_val = self.spin_start.value() - 1
             e_val = self.spin_end.value() - 1
-            if direction == "backward":
-                # Start Frame is where tracking begins (higher frame number),
-                # End Frame is where it stops (lower frame number).
-                if s_val < e_val:
-                    QMessageBox.warning(self, "Invalid Range",
-                        "For backward tracking, Start frame must be >= End frame.")
-                    return None
-            else:
-                if s_val > e_val:
-                    QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
-                    return None
-                
-            if s_val != self.current_frame:
+            # Start/End fields always mean the chronological bounds of the
+            # range (Start <= End), regardless of direction. For backward
+            # tracking, playback begins at End and moves toward Start.
+            if s_val > e_val:
+                QMessageBox.warning(self, "Invalid Range", "Start frame must be <= End frame")
+                return None
+
+            # The frame where tracking actually begins depends on direction:
+            # forward/bidirectional begin at Start, backward begins at End.
+            track_start_val = e_val if direction == "backward" else s_val
+
+            if track_start_val != self.current_frame:
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle("Start Frame Mismatch")
                 msg_box.setIcon(QMessageBox.Question)
+                range_field = "End" if direction == "backward" else "Start"
                 msg_box.setText(
                     f"Prompts were placed on current frame {self.current_frame + 1}, "
-                    f"but Custom Range start frame is set to {s_val + 1}."
+                    f"but Custom Range {range_field.lower()} frame is set to {track_start_val + 1}."
                 )
                 msg_box.setInformativeText(
                     "Would you like to change the starting point to the current frame?"
@@ -342,22 +379,24 @@ class SAMInteractiveDock(QDockWidget):
                 btn_cancel = msg_box.addButton(QMessageBox.Cancel)
                 msg_box.setDefaultButton(btn_change)
                 msg_box.exec_()
-                
+
                 clicked_button = msg_box.clickedButton()
                 if clicked_button == btn_cancel:
                     return None
                 elif clicked_button == btn_change:
-                    self.spin_start.setValue(self.current_frame + 1)
-                    s_val = self.current_frame
                     if direction == "backward":
-                        if s_val < e_val:
-                            self.spin_end.setValue(1)
-                            e_val = 0
+                        self.spin_end.setValue(self.current_frame + 1)
+                        e_val = self.current_frame
+                        if e_val < s_val:
+                            self.spin_start.setValue(1)
+                            s_val = 0
                     else:
+                        self.spin_start.setValue(self.current_frame + 1)
+                        s_val = self.current_frame
                         if s_val > e_val:
                             self.spin_end.setValue(max(self.current_frame + 1, self.total_frames))
                             e_val = self.spin_end.value() - 1
-                
+
             if direction == "backward":
                 start_f = e_val
                 end_f = s_val

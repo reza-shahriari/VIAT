@@ -164,12 +164,12 @@ class Sam3NativeManager:
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "boxes_xywh": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                "boxes_labels": torch.tensor([1], dtype=torch.int32),
+                "bounding_boxes": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
+                "bounding_box_labels": torch.tensor([1], dtype=torch.int32),
                 "output_prob_thresh": 0.1,
             }
             if text_prompt:
-                prompt_req["text_str"] = text_prompt
+                prompt_req["text"] = text_prompt
             print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
             print(f"[SAM3 Debug] Box prompt (xywh): {x1n:.3f}, {y1n:.3f}, {wn:.3f}, {hn:.3f}")
             if text_prompt:
@@ -180,7 +180,7 @@ class Sam3NativeManager:
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "text_str": text_prompt,
+                "text": text_prompt,
                 "output_prob_thresh": 0.1,
             }
             print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
@@ -371,19 +371,19 @@ class Sam3NativeManager:
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    boxes_xywh=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                    boxes_labels=torch.tensor([1], dtype=torch.int32),
+                    bounding_boxes=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
+                    bounding_box_labels=torch.tensor([1], dtype=torch.int32),
                     output_prob_thresh=0.1,
                 )
                 if text_prompt:
-                    prompt_req["text_str"] = text_prompt
+                    prompt_req["text"] = text_prompt
             elif text_prompt:
                 prompt_req = dict(
                     type="add_prompt",
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    text_str=text_prompt,
+                    text=text_prompt,
                     output_prob_thresh=0.1,
                 )
             else:
