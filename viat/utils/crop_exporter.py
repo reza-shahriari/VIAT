@@ -5,6 +5,7 @@ import numpy as np
 from PyQt5.QtCore import QRect, QPoint
 from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import Qt
+from .video_io import open_video_writer
 
 class CropExporter:
     """Engine for exporting cropped datasets (images or video) and transforming annotations."""
@@ -52,8 +53,7 @@ class CropExporter:
         
         if format_type == "mp4":
             mp4_path = os.path.join(output_dir, f"{video_basename}_cropped.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
-            writer = cv2.VideoWriter(mp4_path, fourcc, fps, (crop_w, crop_h))
+            writer = open_video_writer(mp4_path, fps, (crop_w, crop_h))
         else:
             images_dir = os.path.join(output_dir, f"{video_basename}_cropped_images")
             os.makedirs(images_dir, exist_ok=True)

@@ -48,6 +48,7 @@ from viat.utils.video_border import detect_and_adjust_borders as _viat_detect_ad
 from viat.utils.video_border import detect_video_borders as _viat_detect_borders
 from viat.utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibilityManager
 from viat.utils.performance import PerformanceManager as _ViatPerformanceManager, VideoSeekDispatcher as _ViatVideoSeekDispatcher, VideoSeekWorker as _ViatVideoSeekWorker
+from viat.utils.video_io import open_video_writer as _viat_open_video_writer
 from viat.utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
 from viat.utils.dataset_merger import merge_dataset_into_target as _viat_merge_dataset, find_unmatched_classes as _viat_find_unmatched_classes
 from viat.utils.icon_provider import IconProvider
@@ -6877,8 +6878,7 @@ First error: {errors[0]}"""
                 out_ann_path = os.path.join(export_dir, f"{base_filename}_{cut_name}.txt")
                 
                 # Setup VideoWriter
-                fourcc = cv2.VideoWriter_fourcc(*'avc1')
-                out_writer = cv2.VideoWriter(out_vid_path, fourcc, fps, (width, height))
+                out_writer = _viat_open_video_writer(out_vid_path, fps, (width, height))
                 
                 # Temporarily open a new cap to avoid messing up main player state
                 cap = cv2.VideoCapture(self.video_filename)
@@ -7153,9 +7153,11 @@ First error: {errors[0]}"""
         fps = orig_cap.get(cv2.CAP_PROP_FPS)
         width = int(orig_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(orig_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*'avc1') if ext.lower() == '.mp4' else int(orig_cap.get(cv2.CAP_PROP_FOURCC))
-        
-        writer = cv2.VideoWriter(output_filename, fourcc, fps, (width, height))
+        if ext.lower() == '.mp4':
+            writer = _viat_open_video_writer(output_filename, fps, (width, height))
+        else:
+            fourcc = int(orig_cap.get(cv2.CAP_PROP_FOURCC))
+            writer = cv2.VideoWriter(output_filename, fourcc, fps, (width, height))
         
         for i in range(self.total_frames):
             if progress.wasCanceled():

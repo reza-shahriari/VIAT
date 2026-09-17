@@ -96,8 +96,12 @@ def process(video_path, txt_path, out_dir, batch_frames, scale=1.0):
             print(f"Writing batch {batch_idx} to {current_batch_dir}...")
             
             video_path = os.path.join(current_batch_dir, "dataset_video.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
-            out_video = cv2.VideoWriter(video_path, fourcc, fps, (new_w, new_h))
+            out_video = None
+            for fourcc_name in ('avc1', 'mp4v'):
+                out_video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*fourcc_name), fps, (new_w, new_h))
+                if out_video.isOpened():
+                    break
+                out_video.release()
             
         if scale != 1.0:
             frame = cv2.resize(frame, (new_w, new_h))

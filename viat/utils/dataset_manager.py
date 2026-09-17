@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 from .label_formats import PRIORITY, get_format, all_formats, LabelParseError
+from .video_io import open_video_writer
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -1321,8 +1322,7 @@ def export_raya_video_dataset(config, image_files, frame_annotations, class_colo
         return "Error: Could not determine video resolution."
 
     # 2. Setup video writer
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
-    out_video = cv2.VideoWriter(video_path, fourcc, 30.0, (video_width, video_height))
+    out_video = open_video_writer(video_path, 30.0, (video_width, video_height))
     
     original_sizes = {}
     total = len(image_files)

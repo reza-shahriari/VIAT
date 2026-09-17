@@ -11,6 +11,7 @@ import re
 import copy
 from collections import defaultdict
 import cv2
+from ..utils.video_io import open_video_writer
 import numpy as np
 
 try:
@@ -155,10 +156,9 @@ class Evaluate():
                                 if os.path.exists(os.path.join(txt_path,name+ext.strip('*'))):
                                     video = cv2.VideoCapture(os.path.join(txt_path,name+ext.strip('*')))
                                     fps:int = int(video.get(5))
-                                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
                                     factor:int = 1
-                                    out_FP = cv2.VideoWriter(os.path.join(dets_txt_path,'visualize',name+'_FP.mp4'), fourcc, fps, (int(video.get(3)),int(video.get(4))))
-                                    out_FN = cv2.VideoWriter(os.path.join(dets_txt_path,'visualize',name+'_FN.mp4'), fourcc, fps, (int(video.get(3)),int(video.get(4))))
+                                    out_FP = open_video_writer(os.path.join(dets_txt_path,'visualize',name+'_FP.mp4'), fps, (int(video.get(3)),int(video.get(4))))
+                                    out_FN = open_video_writer(os.path.join(dets_txt_path,'visualize',name+'_FN.mp4'), fps, (int(video.get(3)),int(video.get(4))))
                                     img_list_fp = []
                                     img_list_fn = []
                                     for i, gt_line in enumerate(gt_lines):

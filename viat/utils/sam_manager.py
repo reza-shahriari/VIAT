@@ -2,6 +2,8 @@ import os
 import cv2
 import numpy as np
 
+from .video_io import open_video_writer as _open_video_writer
+
 _ULTRALYTICS_AVAILABLE = None
 
 def check_ultralytics():
@@ -303,7 +305,7 @@ class SamManager:
                         if isinstance(frame, np.ndarray):
                             if out is None:
                                 h, w = frame.shape[:2]
-                                out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'avc1'), 30, (w, h))
+                                out = _open_video_writer(temp_video_path, 30, (w, h))
                             out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                     if out is not None:
                         out.release()
@@ -445,7 +447,7 @@ class SamManager:
                         if isinstance(frame, np.ndarray):
                             if out is None:
                                 h, w = frame.shape[:2]
-                                out = cv2.VideoWriter(temp_video_path, cv2.VideoWriter_fourcc(*'avc1'), 30, (w, h))
+                                out = _open_video_writer(temp_video_path, 30, (w, h))
                             out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
                     if out is not None:
                         out.release()
