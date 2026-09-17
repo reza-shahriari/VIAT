@@ -289,25 +289,6 @@ class Sam3NativeManager:
             # Return largest contour
             largest_contour = max(contours, key=cv2.contourArea)
             polygon_pts = [(float(pt[0][0]), float(pt[0][1])) for pt in largest_contour]
-            
-            # --- DEBUG IMAGE SAVING ---
-            try:
-                import time
-                debug_img = cv2.cvtColor(image_array.copy(), cv2.COLOR_RGB2BGR)
-                if has_box:
-                    cv2.rectangle(debug_img, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 0, 255), 2)
-                    cv2.putText(debug_img, "Prompt Box", (int(box[0]), int(box[1]-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
-                if has_text:
-                    cv2.putText(debug_img, f"Text: {text_prompt}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                    
-                pts = np.array(polygon_pts, np.int32).reshape((-1, 1, 2))
-                cv2.polylines(debug_img, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-                
-                dbg_path = os.path.join(tempfile.gettempdir(), f"sam3_debug_{int(time.time()*1000)}.jpg")
-                cv2.imwrite(dbg_path, debug_img)
-                print(f"[SAM3 Debug] Saved debug image to {dbg_path}")
-            except Exception as e:
-                print(f"[SAM3 Debug] Failed to save debug image: {e}")
         finally:
             # Clean up session immediately so no state or prompt history lingers for future queries
             if self.current_session_id is not None:

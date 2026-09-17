@@ -647,6 +647,22 @@ class UICreator:
         self.main_window.toolbar.addAction(self.blur_pen_action)
         self.main_window.blur_pen_action = self.blur_pen_action
 
+        # Blur pen size control
+        pen_size_label = QLabel("Pen Size:")
+        self.main_window.toolbar.addWidget(pen_size_label)
+
+        self.blur_pen_size_spinbox = QSpinBox()
+        self.blur_pen_size_spinbox.setRange(1, 300)
+        self.blur_pen_size_spinbox.setValue(getattr(self.main_window.canvas, 'blur_pen_size', 30))
+        self.blur_pen_size_spinbox.setSuffix(" px")
+        self.blur_pen_size_spinbox.setToolTip("Radius of the Blur Pen brush, in image pixels")
+        def set_blur_pen_size(value):
+            self.main_window.canvas.blur_pen_size = value
+            self.main_window.canvas.update()
+        self.blur_pen_size_spinbox.valueChanged.connect(set_blur_pen_size)
+        self.main_window.toolbar.addWidget(self.blur_pen_size_spinbox)
+        self.main_window.blur_pen_size_spinbox = self.blur_pen_size_spinbox
+
         # Add auto blur toggle action
         self.auto_blur_action = QAction("Auto Blur", self.main_window)
         self.auto_blur_action.setIcon(self.main_window.icon_provider.get_icon("auto-blur"))
