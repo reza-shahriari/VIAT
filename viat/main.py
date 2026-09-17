@@ -13,9 +13,10 @@ import os
 import shutil
 import random
 import math
+import threading
 import cv2
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QLabel, QAction, QFileDialog, QStatusBar, QComboBox, QMessageBox, QListWidget, QListWidgetItem, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QLineEdit, QColorDialog, QActionGroup, QGroupBox, QDoubleSpinBox, QApplication, QProgressBar, QCheckBox, QTextEdit, QProgressDialog, QPlainTextEdit
-from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QDateTime, QEvent, QThread, pyqtSignal,QRectF
+from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QDateTime, QEvent, QThread, pyqtSignal,QRectF, QEventLoop
 from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +35,7 @@ from .utils.ui_creator import UICreator
 from .utils.sam_manager import SamManager
 from .utils.sam3_native_manager import Sam3NativeManager
 from .utils.sam2_trt_manager import Sam2TrtManager
+from .utils import gpu_utils
 import numpy as np
 import json
 from viat.utils import save_project, load_project, export_annotations, get_config_directory, get_recent_projects, get_last_project, save_last_state, load_last_state, export_image_dataset_pascal_voc, export_image_dataset_yolo, export_image_dataset_coco, export_standard_annotations, mse_similarity, calculate_frame_hash, create_thumbnail, import_annotations, UICreator, export_dataset_dialog, export_dataset, import_dataset_dialog, load_dataset, PerfomanceManger, load_project_with_backup, backup_before_save
@@ -45,7 +47,7 @@ from viat.utils.dataset_manager import load_viat_json_for_video as _viat_load_js
 from viat.utils.video_border import detect_and_adjust_borders as _viat_detect_adjust_borders
 from viat.utils.video_border import detect_video_borders as _viat_detect_borders
 from viat.utils.object_visibility import ObjectVisibilityManager as _ViatObjectVisibilityManager
-from viat.utils.performance import PerformanceManager as _ViatPerformanceManager
+from viat.utils.performance import PerformanceManager as _ViatPerformanceManager, VideoSeekDispatcher as _ViatVideoSeekDispatcher, VideoSeekWorker as _ViatVideoSeekWorker
 from viat.utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
 from viat.utils.dataset_merger import merge_dataset_into_target as _viat_merge_dataset, find_unmatched_classes as _viat_find_unmatched_classes
 from viat.utils.icon_provider import IconProvider
@@ -480,6 +482,19 @@ class VideoAnnotationTool(QMainWindow):
         self.dark_mode_enabled = False
         QTimer.singleShot(100, self.load_last_project)
 
+    def change_gpu_device(self, index):
+        """Persist the chosen GPU. CUDA only honors this on the next app launch,
+        since it must be applied before PyTorch/Ultralytics first initialize."""
+        gpu_utils.save_gpu_index(index)
+        gpu_name = next((g['name'] for g in gpu_utils.list_gpus() if g['index'] == index), None)
+        QMessageBox.information(
+            self,
+            "GPU Selection Saved",
+            f"VIAT will use {gpu_name or index} the next time it starts.\n\n"
+            f"This can't be switched while the app is running, so please save your "
+            f"work and restart VIAT to apply it.",
+        )
+
     def toggle_dark_mode(self, enabled: bool):
         self.dark_mode_enabled = enabled
         if enabled:
@@ -500,6 +515,7 @@ class VideoAnnotationTool(QMainWindow):
         self.class_manager = ClassManager(self)
         self.interpolation_manager = InterpolationManager(self)
         self.performance_manager = PerfomanceManger(self, cache_capacity=200)
+        self._init_video_seek_worker()
         from viat.utils.blur_manager import BlurManager
         self.blur_manager = BlurManager()
         self.viat_perf = self.performance_manager
@@ -509,6 +525,31 @@ class VideoAnnotationTool(QMainWindow):
         self.sam2_trt_manager = Sam2TrtManager()
         from viat.utils.fast_tracker_manager import FastTrackerManager
         self.fast_tracker_manager = FastTrackerManager()
+
+    def _init_video_seek_worker(self):
+        """Set up the background worker that runs slow video seeks off the
+        UI thread (see viat/utils/performance.py). `_cap_lock` is the single
+        lock every direct `self.cap` consumer in the app must acquire before
+        touching the capture, since cv2.VideoCapture isn't safe for
+        concurrent access from multiple threads."""
+        self._cap_lock = threading.Lock()
+        self._seek_in_progress = False
+        self._seek_request_id = 0
+        # Long-running whole-video loops (duplicate-frame scan, tracking,
+        # thumbnail generation, ...) hold _cap_lock for their entire
+        # duration but pump QApplication.processEvents() internally (a
+        # pre-existing pattern). If an interactive seek were allowed to
+        # start during that pump, it would block on _cap_lock inside a
+        # QEventLoop that the paused outer loop can't get back to unwind --
+        # a deadlock. This flag makes seek_to_frame bail out immediately
+        # (no lock attempt at all) while a batch op owns the video.
+        self._video_batch_busy = False
+        self._seek_dispatcher = _ViatVideoSeekDispatcher()
+        self._seek_worker = _ViatVideoSeekWorker(self, self._cap_lock)
+        self._seek_thread = QThread(self)
+        self._seek_worker.moveToThread(self._seek_thread)
+        self._seek_dispatcher.seekRequested.connect(self._seek_worker.do_seek)
+        self._seek_thread.start()
 
     @log_exceptions
     def load_last_project(self):
@@ -774,6 +815,10 @@ class VideoAnnotationTool(QMainWindow):
             viat_launch_batch_prediction_queue())
         act = img_menu.addAction('Remove Background Images (Percentage)...')
         act.triggered.connect(lambda : self.viat_remove_background_images())
+        act = img_menu.addAction('Balance Classes (Evenly-Spaced)...')
+        act.setToolTip('Thin over-represented classes in a YOLO image dataset toward a target count, '
+            'without touching the source folder')
+        act.triggered.connect(lambda : self.open_image_balance_dialog())
         act = img_menu.addAction('Dataset Cleaner (Remove Nested Labels)...')
         act.triggered.connect(lambda : self.open_dataset_cleaner_dialog())
         act = img_menu.addAction('Dataset Integration Wizard (Roadmap)...')
@@ -857,8 +902,9 @@ class VideoAnnotationTool(QMainWindow):
             
         # Ensure current video cap is released if it is inside the folder to avoid locking issues (mostly Windows, but safe everywhere)
         if getattr(self, 'cap', None) and getattr(self, 'video_filename', None) and self.video_filename.startswith(folder_path):
-            self.cap.release()
-            self.cap = None
+            with self._cap_lock:
+                self.cap.release()
+                self.cap = None
 
         try:
             root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -3413,35 +3459,66 @@ class VideoAnnotationTool(QMainWindow):
     def on_load_track_queue(self):
         if getattr(self, '_queue_running', False):
             return
-        path, _ = QFileDialog.getOpenFileName(self, 'Load Track Queue', '', 'JSON Files (*.json)')
-        if not path:
+        paths, _ = QFileDialog.getOpenFileNames(self, 'Load Track Queue (select one or more)', '', 'JSON Files (*.json)')
+        if not paths:
             return
-        try:
-            with open(path, 'r') as f:
-                loaded = json.load(f)
-            # Backward-compatible with older queue files, which were just a
-            # bare list of jobs with no deleted-frame info attached.
-            if isinstance(loaded, dict):
-                jobs = loaded.get('jobs', [])
-                for video_id, frames in (loaded.get('deleted_frames_by_video') or {}).items():
-                    existing = set(self.track_queue_deleted_frames_by_video.get(video_id, []))
-                    self.track_queue_deleted_frames_by_video[video_id] = sorted(existing | set(frames))
-            else:
-                jobs = loaded
-            import uuid
-            for job in jobs:
-                job['status'] = 'pending'
-                job.setdefault('job_id', uuid.uuid4().hex)
-                job['display'] = self._job_display_text(job)
-            self.track_queue.extend(jobs)
-            self._refresh_track_queue_dock()
-            self.statusBar.showMessage(f'Loaded {len(jobs)} job(s) from {path}', 4000)
-            # This queue was very likely authored on a different computer (that's
-            # the whole point of sharing it) -- its video paths won't resolve here.
-            self._resolve_missing_job_videos(jobs)
-            self._refresh_track_queue_dock()
-        except Exception as e:
-            QMessageBox.warning(self, 'Load Failed', str(e))
+
+        if self.track_queue:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle('Load Track Queue')
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setText(f"The queue already has {len(self.track_queue)} job(s).")
+            msg_box.setInformativeText(
+                f"Add the {len(paths)} newly selected file(s) to the existing queue, "
+                "or replace the queue with just these file(s)?")
+            btn_add = msg_box.addButton("Add to Existing Queue", QMessageBox.AcceptRole)
+            btn_overwrite = msg_box.addButton("Overwrite Queue", QMessageBox.DestructiveRole)
+            btn_cancel = msg_box.addButton(QMessageBox.Cancel)
+            msg_box.setDefaultButton(btn_add)
+            msg_box.exec_()
+            clicked = msg_box.clickedButton()
+            if clicked == btn_cancel:
+                return
+            if clicked == btn_overwrite:
+                self.track_queue = []
+                if hasattr(self.canvas, 'queued_job_previews'):
+                    self.canvas.queued_job_previews = {}
+                    self.canvas.update()
+
+        import uuid
+        total_loaded, failed = 0, []
+        for path in paths:
+            try:
+                with open(path, 'r') as f:
+                    loaded = json.load(f)
+                # Backward-compatible with older queue files, which were just a
+                # bare list of jobs with no deleted-frame info attached.
+                if isinstance(loaded, dict):
+                    jobs = loaded.get('jobs', [])
+                    for video_id, frames in (loaded.get('deleted_frames_by_video') or {}).items():
+                        existing = set(self.track_queue_deleted_frames_by_video.get(video_id, []))
+                        self.track_queue_deleted_frames_by_video[video_id] = sorted(existing | set(frames))
+                else:
+                    jobs = loaded
+                for job in jobs:
+                    job['status'] = 'pending'
+                    job.setdefault('job_id', uuid.uuid4().hex)
+                    job['display'] = self._job_display_text(job)
+                self.track_queue.extend(jobs)
+                total_loaded += len(jobs)
+                # Resolved per-file (not against the whole batch at once): each
+                # loaded queue file gets matched against its own video(s), so a
+                # same-named-but-different video from another loaded file can't
+                # get confused with it (see _pick_best_video_candidate).
+                self._resolve_missing_job_videos(jobs, source_label=os.path.basename(path))
+            except Exception as e:
+                failed.append((path, str(e)))
+
+        self._refresh_track_queue_dock()
+        self.statusBar.showMessage(f'Loaded {total_loaded} job(s) from {len(paths) - len(failed)} file(s)', 4000)
+        if failed:
+            details = "\n".join(f"{os.path.basename(p)}: {err}" for p, err in failed)
+            QMessageBox.warning(self, 'Some Files Failed to Load', details)
 
     def on_set_track_queue_video_folders(self):
         """Manually (re)point the Track Queue at folder(s) holding its videos
@@ -3450,7 +3527,68 @@ class VideoAnnotationTool(QMainWindow):
         self._resolve_missing_job_videos(self.track_queue, force_prompt=True)
         self._refresh_track_queue_dock()
 
-    def _resolve_missing_job_videos(self, jobs, force_prompt=False):
+    def _pick_best_video_candidate(self, original_path, candidates):
+        """Multiple videos can share a filename (e.g. 'video_1.mp4' shows up
+        in almost every project folder) -- picking the first one found would
+        silently point a job at the WRONG video. Instead, prefer whichever
+        candidate's folder structure most resembles the job's original path
+        (a shared project/session folder name is a real signal); if nothing
+        stands out clearly, refuse to guess and leave it for the user rather
+        than risk mismatching. Returns the chosen path, or None if ambiguous."""
+        if len(candidates) == 1:
+            return candidates[0]
+        import difflib
+        orig_parts = os.path.normpath(original_path).split(os.sep)[:-1]
+        scored = sorted(
+            ((difflib.SequenceMatcher(None, orig_parts, os.path.normpath(c).split(os.sep)[:-1]).ratio(), c)
+             for c in candidates),
+            key=lambda x: x[0], reverse=True)
+        best_score, best_cand = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else -1.0
+        if best_score >= 0.34 and best_score - second_score >= 0.15:
+            return best_cand
+        return None
+
+    def _build_video_name_index(self, search_dirs):
+        video_exts = ('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.m4v')
+        name_index = {}
+        for d in search_dirs:
+            for root, _, files in os.walk(d):
+                for fname in files:
+                    if fname.lower().endswith(video_exts):
+                        name_index.setdefault(fname, []).append(os.path.join(root, fname))
+        return name_index
+
+    def _try_resolve_from_index(self, missing, name_index):
+        """Attempt to resolve each job in *missing* against name_index.
+        Returns (still_missing, resolved_count, ambiguous) -- ambiguous is a
+        list of (basename, candidate_paths) for jobs with more than one
+        same-named match that couldn't be told apart."""
+        still_missing, ambiguous = [], []
+        resolved = 0
+        for j in missing:
+            old_id = j['video_identifier']
+            bname = os.path.basename(old_id)
+            candidates = name_index.get(bname)
+            if not candidates:
+                still_missing.append(j)
+                continue
+            found = self._pick_best_video_candidate(old_id, candidates)
+            if not found:
+                ambiguous.append((bname, candidates))
+                still_missing.append(j)
+                continue
+            j['video_identifier'] = found
+            j['video_display'] = bname
+            j['display'] = self._job_display_text(j)
+            resolved += 1
+            if old_id in self.track_queue_deleted_frames_by_video:
+                old_frames = set(self.track_queue_deleted_frames_by_video.pop(old_id))
+                new_frames = set(self.track_queue_deleted_frames_by_video.get(found, []))
+                self.track_queue_deleted_frames_by_video[found] = sorted(old_frames | new_frames)
+        return still_missing, resolved, ambiguous
+
+    def _resolve_missing_job_videos(self, jobs, force_prompt=False, source_label=None):
         """Videos referenced by 'plain' (File > Open Video) jobs are stored as
         an absolute path from the authoring machine, which won't exist once the
         queue is shared to another PC. Since the videos are the same *filename*
@@ -3466,65 +3604,66 @@ class VideoAnnotationTool(QMainWindow):
                 'Every job in the queue already resolves to a video on this computer.')
             return
 
-        missing_names = sorted({os.path.basename(j['video_identifier']) for j in missing})
-        reply = QMessageBox.question(self, 'Videos Not Found',
-            f"{len(missing_names)} referenced video(s) were not found at their original "
-            "location (this queue was likely authored on another computer).\n\n"
-            "Select the folder(s) where these videos live on this computer? "
-            "They'll be matched by filename, so they don't need to match the "
-            "original folder layout, and can be split across several folders.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if reply != QMessageBox.Yes:
-            return
+        label = f" for {source_label}" if source_label else ""
+        total_resolved = 0
+        all_ambiguous = []
 
-        search_dirs = []
-        while True:
-            folder = QFileDialog.getExistingDirectory(
-                self, f'Select Folder Containing Videos ({len(search_dirs)} added so far)')
-            if not folder:
-                break
-            search_dirs.append(folder)
-            more = QMessageBox.question(self, 'Add Another Folder?',
-                "Videos can be split across multiple folders.\nAdd another folder to search?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if more != QMessageBox.Yes:
-                break
-        if not search_dirs:
-            return
+        # Try what's already known first -- e.g. reloading a project you've
+        # already pointed at earlier this session shouldn't re-prompt at all.
+        known_dirs = getattr(self, 'track_queue_video_search_dirs', [])
+        if known_dirs:
+            name_index = self._build_video_name_index(known_dirs)
+            missing, resolved, ambiguous = self._try_resolve_from_index(missing, name_index)
+            total_resolved += resolved
+            all_ambiguous.extend(ambiguous)
 
-        self.track_queue_video_search_dirs = list(dict.fromkeys(
-            getattr(self, 'track_queue_video_search_dirs', []) + search_dirs))
+        if missing:
+            missing_names = sorted({os.path.basename(j['video_identifier']) for j in missing})
+            reply = QMessageBox.question(self, 'Videos Not Found',
+                f"{len(missing_names)} referenced video(s){label} were not found at their original "
+                "location (this queue was likely authored on another computer).\n\n"
+                "Select the folder(s) where these videos live on this computer? "
+                "They'll be matched by filename, so they don't need to match the "
+                "original folder layout, and can be split across several folders.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                search_dirs = []
+                while True:
+                    folder = QFileDialog.getExistingDirectory(
+                        self, f'Select Folder Containing Videos{label} ({len(search_dirs)} added so far)')
+                    if not folder:
+                        break
+                    search_dirs.append(folder)
+                    more = QMessageBox.question(self, 'Add Another Folder?',
+                        "Videos can be split across multiple folders.\nAdd another folder to search?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    if more != QMessageBox.Yes:
+                        break
 
-        video_exts = ('.mp4', '.avi', '.mkv', '.mov', '.wmv', '.m4v')
-        name_index = {}
-        for d in self.track_queue_video_search_dirs:
-            for root, _, files in os.walk(d):
-                for fname in files:
-                    if fname.lower().endswith(video_exts) and fname not in name_index:
-                        name_index[fname] = os.path.join(root, fname)
+                if search_dirs:
+                    self.track_queue_video_search_dirs = list(dict.fromkeys(known_dirs + search_dirs))
+                    name_index = self._build_video_name_index(self.track_queue_video_search_dirs)
+                    missing, resolved, ambiguous = self._try_resolve_from_index(missing, name_index)
+                    total_resolved += resolved
+                    all_ambiguous.extend(ambiguous)
 
-        resolved, unresolved = 0, []
-        for j in missing:
-            old_id = j['video_identifier']
-            bname = os.path.basename(old_id)
-            found = name_index.get(bname)
-            if found:
-                j['video_identifier'] = found
-                j['video_display'] = bname
-                j['display'] = self._job_display_text(j)
-                resolved += 1
-                if old_id in self.track_queue_deleted_frames_by_video:
-                    old_frames = set(self.track_queue_deleted_frames_by_video.pop(old_id))
-                    new_frames = set(self.track_queue_deleted_frames_by_video.get(found, []))
-                    self.track_queue_deleted_frames_by_video[found] = sorted(old_frames | new_frames)
-            else:
-                unresolved.append(bname)
+        if not (total_resolved or missing or all_ambiguous):
+            return  # everything already resolved from known folders, nothing to report
 
-        msg = f"Resolved {resolved}/{len(missing)} video path(s) from the selected folder(s)."
-        if unresolved:
-            msg += "\n\nStill not found (check spelling/extension or add another folder):\n" + "\n".join(unresolved[:20])
-            if len(unresolved) > 20:
-                msg += f"\n...and {len(unresolved) - 20} more."
+        attempted = total_resolved + len(missing)
+        msg = f"Resolved {total_resolved}/{attempted} video path(s){label} from known folders."
+        if all_ambiguous:
+            msg += (f"\n\n{len(all_ambiguous)} filename(s) matched MORE THAN ONE video in the search "
+                    "folders and couldn't be told apart safely (left unresolved rather than risk pointing "
+                    "a job at the wrong video):")
+            for bname, candidates in all_ambiguous[:10]:
+                msg += f"\n  {bname}:\n" + "\n".join(f"    {c}" for c in candidates)
+            if len(all_ambiguous) > 10:
+                msg += f"\n  ...and {len(all_ambiguous) - 10} more."
+        still_unresolved = [os.path.basename(j['video_identifier']) for j in missing
+                             if os.path.basename(j['video_identifier']) not in {b for b, _ in all_ambiguous}]
+        if still_unresolved:
+            msg += "\n\nStill not found anywhere (check spelling/extension or add another folder):\n" + "\n".join(sorted(set(still_unresolved))[:20])
         QMessageBox.information(self, 'Video Path Resolution', msg)
 
     def on_stop_track_queue(self):
@@ -4039,8 +4178,9 @@ class VideoAnnotationTool(QMainWindow):
 
         # Release the video capture object so the file is not locked
         if getattr(self, 'cap', None):
-            self.cap.release()
-            self.cap = None
+            with self._cap_lock:
+                self.cap.release()
+                self.cap = None
 
         # Move to removed/ directory or delete
         removed_dir = os.path.join(default_dir, "removed")
@@ -4119,8 +4259,9 @@ class VideoAnnotationTool(QMainWindow):
         if reply == QMessageBox.Yes:
             # Release current video capture to free resources
             if getattr(self, 'cap', None):
-                self.cap.release()
-                self.cap = None
+                with self._cap_lock:
+                    self.cap.release()
+                    self.cap = None
 
             try:
                 import sys
@@ -4194,12 +4335,18 @@ class VideoAnnotationTool(QMainWindow):
     @log_exceptions
     def load_video_file(self, filename, from_dataset=False):
         """Load a video file and display the first frame."""
-        if self.cap:
-            self.cap.release()
-            
+        import time
+        t_load_start = time.perf_counter()
+        with self._cap_lock:
+            if self.cap:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
+            cap_opened = self.cap.isOpened()
+        t_capture_opened = time.perf_counter()
+
         if hasattr(self, 'performance_manager') and self.performance_manager:
             self.performance_manager.clear_cache()
-            
+
         if not getattr(self, '_loading_from_project', False):
             if hasattr(self, 'blur_manager') and self.blur_manager is not None:
                 self.blur_manager.clear_all()
@@ -4210,10 +4357,10 @@ class VideoAnnotationTool(QMainWindow):
         if hasattr(self.canvas, 'queued_job_previews'):
             self.canvas.queued_job_previews = {}
 
-        self.cap = cv2.VideoCapture(filename, cv2.CAP_ANY)
-        if not self.cap.isOpened():
+        if not cap_opened:
             QMessageBox.critical(self, 'Error', f'Could not open video file:\n{filename}')
-            self.cap = None
+            with self._cap_lock:
+                self.cap = None
             return False
         self.video_filename = filename
         
@@ -4228,14 +4375,17 @@ class VideoAnnotationTool(QMainWindow):
             except Exception:
                 pass
 
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        with self._cap_lock:
+            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame = 0
         self.frame_slider.blockSignals(True)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
         self.frame_slider.setValue(0)
         self.frame_slider.blockSignals(False)
-        ret, frame = self.cap.read()
+        with self._cap_lock:
+            ret, frame = self.cap.read()
+        t_first_read = time.perf_counter()
         if ret:
             frame = self._process_frame_metadata(frame, 0)
             self.canvas.set_frame(frame)
@@ -4275,12 +4425,21 @@ class VideoAnnotationTool(QMainWindow):
                     ) or not self._loading_from_project:
                     if not getattr(self, '_queue_running', False):
                         self.check_for_annotation_files(filename)
-                    
+
+            total_elapsed = time.perf_counter() - t_load_start
+            if total_elapsed > 0.3:
+                logger.warning(
+                    f"load_video_file({os.path.basename(filename)}): slow open, "
+                    f"total {total_elapsed:.3f}s [VideoCapture open {t_capture_opened - t_load_start:.3f}s, "
+                    f"first frame read {t_first_read - t_capture_opened:.3f}s, "
+                    f"post-processing {total_elapsed - (t_first_read - t_load_start):.3f}s]"
+                )
             return True
         else:
             QMessageBox.critical(self, 'Error', 'Could not read video frame!')
-            self.cap.release()
-            self.cap = None
+            with self._cap_lock:
+                self.cap.release()
+                self.cap = None
             return False
 
     @log_exceptions
@@ -4550,6 +4709,13 @@ class VideoAnnotationTool(QMainWindow):
         dialog = VideoToYoloDialog(self, default_source_dir=default_dir)
         dialog.exec_()
 
+    @log_exceptions
+    def open_image_balance_dialog(self):
+        """Open dialog to class-balance an existing YOLO image dataset (images/ + labels/)."""
+        from viat.widgets.image_balance_dialog import ImageBalanceDialog
+        dialog = ImageBalanceDialog(self)
+        dialog.exec_()
+
     def _process_frame_metadata(self, frame, frame_num):
         """Process the frame according to loaded metadata (e.g., cropping padded regions)."""
         if hasattr(self, 'video_metadata') and self.video_metadata and self.video_metadata.get("resize_mode") == "pad":
@@ -4569,14 +4735,7 @@ class VideoAnnotationTool(QMainWindow):
         self.check_for_annotation_files = original_check_method
         if success:
             if current_frame > 0 and current_frame < self.total_frames:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-                ret, frame = self.cap.read()
-                if ret:
-                    frame = self._process_frame_metadata(frame, current_frame)
-                    self.current_frame = current_frame
-                    self.canvas.set_frame(frame)
-                    self.update_frame_info()
-                    self.load_current_frame_annotations()
+                self.seek_to_frame(current_frame)
         return success
 
     @log_exceptions
@@ -4816,6 +4975,14 @@ The file might be corrupted or have an unsupported format."""
         self.deleted_frames = set()
         self.deleted_annotations = {}
         self.current_frame = 0
+        self.project_file = None
+        self.autosave_file = None
+        # A cancelled/partial image-dataset load can leave tens of thousands
+        # of entries here; clear them so switching to a video doesn't carry
+        # that memory (and GC pressure) forward.
+        self.image_files = []
+        self._viat_frame_to_split = []
+        self.total_frames = 0
         self.video_path = None
         self.image_dataset_info = None
         self.is_image_dataset = False
@@ -4965,7 +5132,24 @@ Would you like to load it?"""
     def slider_changed(self, value):
         """Handle slider value changes (user drag only -- programmatic
         setValue blocks signals, so this only fires on genuine user
-        interaction)."""
+        interaction).
+
+        Debounced: seeking a video frame far from the current position can
+        require decoding forward from the last keyframe (measured up to
+        ~1.5s on some videos), so a fast drag would otherwise pay that cost
+        for every intermediate frame the slider handle passes over. Rapid
+        calls coalesce into a single seek to the frame where the drag
+        settles."""
+        self._pending_slider_value = value
+        if getattr(self, '_slider_debounce_timer', None) is None:
+            self._slider_debounce_timer = QTimer(self)
+            self._slider_debounce_timer.setSingleShot(True)
+            self._slider_debounce_timer.timeout.connect(self._apply_slider_change)
+        self._slider_debounce_timer.start(60)
+
+    @log_exceptions
+    def _apply_slider_change(self):
+        value = self._pending_slider_value
         if getattr(self, 'video_mode', False) and hasattr(self, 'video_groups') and hasattr(self, 'video_manager_dock'):
             current_item = self.video_manager_dock.list_widget.currentItem()
             if current_item:
@@ -5010,14 +5194,31 @@ Would you like to load it?"""
 
     @log_exceptions
     def seek_to_frame(self, frame_number):
-        """Seek the video to an exact frame and refresh the display."""
+        """Seek the video to an exact frame and refresh the display.
+
+        The actual cv2 decode runs on a background worker thread (see
+        VideoSeekWorker in viat/utils/performance.py); this method blocks
+        until the result is ready via a QEventLoop, which keeps pumping
+        Qt's event loop while it waits -- so a slow seek (some videos need
+        up to ~1.5s to decode forward from the last keyframe) no longer
+        freezes the UI, even though that one seek is still just as slow.
+        Every other caller of seek_to_frame keeps working unchanged: this
+        method still returns synchronously and self.current_frame is still
+        updated before it returns.
+
+        If a seek is already in flight, a new call returns False
+        immediately instead of queuing -- so mashing next/prev faster than
+        seeks complete just drops the extra clicks rather than stacking up
+        nested waits or ever applying a stale result after a newer one."""
         if not self.cap or not self.cap.isOpened():
+            return False
+        if getattr(self, '_seek_in_progress', False) or getattr(self, '_video_batch_busy', False):
             return False
         if frame_number < 0:
             frame_number = 0
         elif frame_number >= self.total_frames:
             frame_number = self.total_frames - 1
-            
+
         if not self._should_show_frame(frame_number):
             nxt = frame_number + 1
             while nxt < self.total_frames and not self._should_show_frame(nxt):
@@ -5030,18 +5231,42 @@ Would you like to load it?"""
                     prv -= 1
                 if prv >= 0:
                     frame_number = prv
-        if hasattr(self, 'performance_manager') and self.performance_manager:
-            frame = self.performance_manager.seek_frame(frame_number)
-            ret = frame is not None
-        elif frame_number == self.current_frame + 1:
-            ret, frame = self.cap.read()
-        else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-            ret, frame = self.cap.read()
-        if not ret:
+
+        import time
+        t_seek_start = time.perf_counter()
+
+        self._seek_in_progress = True
+        self._seek_request_id += 1
+        req_id = self._seek_request_id
+        result = {}
+        loop = QEventLoop()
+
+        def on_result(rid, ok, frame, actual):
+            if rid != req_id:
+                return  # stale result from a request we're no longer waiting on
+            result['ok'] = ok
+            result['frame'] = frame
+            result['actual'] = actual
+            loop.quit()
+
+        self._seek_worker.resultReady.connect(on_result)
+        try:
+            self._seek_dispatcher.seekRequested.emit(frame_number, self.current_frame, req_id)
+            loop.exec_()
+        finally:
+            self._seek_worker.resultReady.disconnect(on_result)
+            self._seek_in_progress = False
+
+        seek_elapsed = time.perf_counter() - t_seek_start
+        if seek_elapsed > 0.1:
+            logger.warning(
+                f"seek_to_frame({frame_number}): slow frame read/seek took {seek_elapsed:.3f}s "
+                f"(background worker, UI stayed responsive)"
+            )
+        if not result.get('ok'):
             return False
-        frame = self._process_frame_metadata(frame, frame_number)
-        self.current_frame = frame_number
+        frame = self._process_frame_metadata(result['frame'], result['actual'])
+        self.current_frame = result['actual']
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(self.current_frame)
         self.frame_slider.blockSignals(False)
@@ -5226,7 +5451,6 @@ Would you like to load it?"""
                     self.play_timer.stop()
                     self.is_playing = False
                     self.statusBar.showMessage('End of video')
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     first_valid = 0
                     while first_valid < self.total_frames and not self._should_show_frame(first_valid):
                         first_valid += 1
@@ -5271,7 +5495,8 @@ Would you like to load it?"""
                 'media-playback-start'))
             self.statusBar.showMessage('Paused')
         else:
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            with self._cap_lock:
+                fps = self.cap.get(cv2.CAP_PROP_FPS)
             if fps <= 0:
                 fps = 30
             interval = max(1, int(1000 / (fps * self.playback_speed)))
@@ -6516,8 +6741,9 @@ The application has been reset to its initial state."""
         self.project_file = None
         self.project_modified = False
         if self.cap:
-            self.cap.release()
-            self.cap = None
+            with self._cap_lock:
+                self.cap.release()
+                self.cap = None
         self.video_filename = ''
         self.current_frame = 0
         self.total_frames = 0
@@ -6631,10 +6857,11 @@ First error: {errors[0]}"""
         progress.show()
         
         try:
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            with self._cap_lock:
+                fps = self.cap.get(cv2.CAP_PROP_FPS)
+                width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             if fps <= 0: fps = 30
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
             for i, cut in enumerate(cuts):
                 if progress.wasCanceled():
@@ -6650,7 +6877,7 @@ First error: {errors[0]}"""
                 out_ann_path = os.path.join(export_dir, f"{base_filename}_{cut_name}.txt")
                 
                 # Setup VideoWriter
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
                 out_writer = cv2.VideoWriter(out_vid_path, fourcc, fps, (width, height))
                 
                 # Temporarily open a new cap to avoid messing up main player state
@@ -6926,7 +7153,7 @@ First error: {errors[0]}"""
         fps = orig_cap.get(cv2.CAP_PROP_FPS)
         width = int(orig_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(orig_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') if ext.lower() == '.mp4' else int(orig_cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc = cv2.VideoWriter_fourcc(*'avc1') if ext.lower() == '.mp4' else int(orig_cap.get(cv2.CAP_PROP_FOURCC))
         
         writer = cv2.VideoWriter(output_filename, fourcc, fps, (width, height))
         
@@ -7849,23 +8076,28 @@ Do you want to scan the entire video now for duplicate frames?
         current_pos = self.current_frame
         self.duplicate_frames_cache = {}
         self.frame_hashes = {}
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        for frame_num in range(self.total_frames):
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-            frame = self._process_frame_metadata(frame, frame_num)
-            progress_bar.setValue(frame_num)
-            if frame_num % 10 == 0:
-                QApplication.processEvents()
-            frame_hash = calculate_frame_hash(frame)
-            self.frame_hashes[frame_num] = frame_hash
-            if frame_hash in self.duplicate_frames_cache:
-                self.duplicate_frames_cache[frame_hash].append(frame_num)
-            else:
-                self.duplicate_frames_cache[frame_hash] = [frame_num]
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-        ret, frame = self.cap.read()
+        self._video_batch_busy = True
+        try:
+            with self._cap_lock:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                for frame_num in range(self.total_frames):
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        break
+                    frame = self._process_frame_metadata(frame, frame_num)
+                    progress_bar.setValue(frame_num)
+                    if frame_num % 10 == 0:
+                        QApplication.processEvents()
+                    frame_hash = calculate_frame_hash(frame)
+                    self.frame_hashes[frame_num] = frame_hash
+                    if frame_hash in self.duplicate_frames_cache:
+                        self.duplicate_frames_cache[frame_hash].append(frame_num)
+                    else:
+                        self.duplicate_frames_cache[frame_hash] = [frame_num]
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                ret, frame = self.cap.read()
+        finally:
+            self._video_batch_busy = False
         if ret:
             frame = self._process_frame_metadata(frame, current_pos)
             self.canvas.set_frame(frame)
@@ -8089,42 +8321,47 @@ Do you want to scan the entire video now for duplicate frames?
         if not self.cap or not self.cap.isOpened():
             return []
         current_pos = self.current_frame
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
-        ret, ref_frame = self.cap.read()
-        if not ret:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-            return []
-        ref_frame = self._process_frame_metadata(ref_frame, reference_frame)
-        progress = QDialog(self)
-        progress.setWindowTitle('Finding Similar Frames')
-        progress.setFixedSize(300, 100)
-        layout = QVBoxLayout(progress)
-        label = QLabel('Scanning for similar frames...')
-        layout.addWidget(label)
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, self.total_frames)
-        layout.addWidget(progress_bar)
-        progress.setModal(False)
-        progress.show()
-        QApplication.processEvents()
-        similar_frames = [reference_frame]
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        for frame_num in range(self.total_frames):
-            if frame_num == reference_frame:
-                continue
-            progress_bar.setValue(frame_num)
-            if frame_num % 10 == 0:
+        self._video_batch_busy = True
+        try:
+            with self._cap_lock:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, reference_frame)
+                ret, ref_frame = self.cap.read()
+                if not ret:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                    return []
+                ref_frame = self._process_frame_metadata(ref_frame, reference_frame)
+                progress = QDialog(self)
+                progress.setWindowTitle('Finding Similar Frames')
+                progress.setFixedSize(300, 100)
+                layout = QVBoxLayout(progress)
+                label = QLabel('Scanning for similar frames...')
+                layout.addWidget(label)
+                progress_bar = QProgressBar()
+                progress_bar.setRange(0, self.total_frames)
+                layout.addWidget(progress_bar)
+                progress.setModal(False)
+                progress.show()
                 QApplication.processEvents()
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-            frame = self._process_frame_metadata(frame, frame_num)
-            similarity = mse_similarity(ref_frame, frame)
-            if similarity >= similarity_threshold:
-                similar_frames.append(frame_num)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-        progress.close()
-        return similar_frames
+                similar_frames = [reference_frame]
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                for frame_num in range(self.total_frames):
+                    if frame_num == reference_frame:
+                        continue
+                    progress_bar.setValue(frame_num)
+                    if frame_num % 10 == 0:
+                        QApplication.processEvents()
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        break
+                    frame = self._process_frame_metadata(frame, frame_num)
+                    similarity = mse_similarity(ref_frame, frame)
+                    if similarity >= similarity_threshold:
+                        similar_frames.append(frame_num)
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                progress.close()
+                return similar_frames
+        finally:
+            self._video_batch_busy = False
 
     @log_exceptions
     def propagate_to_similar_frames(self):
@@ -8223,24 +8460,29 @@ Do you want to scan the entire video now for duplicate frames?
         frame_list.setSelectionMode(QListWidget.MultiSelection)
         layout.addWidget(frame_list)
         current_pos = self.current_frame
-        for frame_num in frame_numbers:
-            if frame_num == self.current_frame:
-                continue
-            item = QListWidgetItem(f'Frame {frame_num}')
-            item.setData(Qt.UserRole, frame_num)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = self.cap.read()
-            if ret:
-                frame = self._process_frame_metadata(frame, frame_num)
-                thumbnail = create_thumbnail(frame, (160, 90))
-                h, w, c = thumbnail.shape
-                qimg = QImage(thumbnail.data, w, h, w * c, QImage.Format_RGB888
-                    )
-                pixmap = QPixmap.fromImage(qimg)
-                item.setIcon(QIcon(pixmap))
-            frame_list.addItem(item)
-            item.setSelected(True)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+        self._video_batch_busy = True
+        try:
+            with self._cap_lock:
+                for frame_num in frame_numbers:
+                    if frame_num == self.current_frame:
+                        continue
+                    item = QListWidgetItem(f'Frame {frame_num}')
+                    item.setData(Qt.UserRole, frame_num)
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                    ret, frame = self.cap.read()
+                    if ret:
+                        frame = self._process_frame_metadata(frame, frame_num)
+                        thumbnail = create_thumbnail(frame, (160, 90))
+                        h, w, c = thumbnail.shape
+                        qimg = QImage(thumbnail.data, w, h, w * c, QImage.Format_RGB888
+                            )
+                        pixmap = QPixmap.fromImage(qimg)
+                        item.setIcon(QIcon(pixmap))
+                    frame_list.addItem(item)
+                    item.setSelected(True)
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+        finally:
+            self._video_batch_busy = False
         button_layout = QHBoxLayout()
         select_all_btn = QPushButton('Select All')
         select_all_btn.clicked.connect(lambda : [frame_list.item(i).
@@ -8684,6 +8926,11 @@ Do you want to scan the entire video now for duplicate frames?
     def perform_autosave(self):
         """Perform auto-save of the current project."""
         if not self.autosave_enabled:
+            return
+        dataset_loader = getattr(self, '_dataset_loader', None)
+        if dataset_loader is not None and dataset_loader.isRunning():
+            return
+        if getattr(self, '_loading_from_project', False):
             return
         if not hasattr(self, 'project_file') or not self.project_file:
             if not self.autosave_file:
@@ -9142,74 +9389,80 @@ Do you want to scan the entire video now for duplicate frames?
         except ValueError as e:
             QMessageBox.critical(self, 'Tracker Error', str(e))
             return
-        if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-            image_path = self.image_files[start_frame]
-            frame = cv2.imread(image_path)
-            ret = frame is not None
-        else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            ret, frame = self.cap.read()
-            if ret:
-                frame = self._process_frame_metadata(frame, start_frame)
-        if not ret:
-            QMessageBox.critical(self, 'Tracking Error',
-                f'Failed to read start frame {start_frame}')
-            return
-        bbox = target_ann.rect.x(), target_ann.rect.y(), target_ann.rect.width(
-            ), target_ann.rect.height()
-        if not tracker.init(frame, bbox):
-            QMessageBox.critical(self, 'Tracking Error',
-                'Failed to initialize tracker on the selected bounding box.')
-            return
-        from PyQt5.QtWidgets import QProgressDialog
-        progress = QProgressDialog('Tracking object...', 'Cancel', 
-            start_frame + 1, end_frame, self)
-        progress.setWindowModality(Qt.NonModal)
-        progress.show()
-        last_successful_frame = start_frame
-        f_idx = start_frame
-        success = True
-        for f_idx in range(start_frame + 1, end_frame + 1):
-            if progress.wasCanceled():
-                break
-            progress.setValue(f_idx)
-            QApplication.processEvents()
-            if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                image_path = self.image_files[f_idx]
-                frame = cv2.imread(image_path)
-                ret = frame is not None
-            else:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                ret, frame = self.cap.read()
-                if ret:
-                    frame = self._process_frame_metadata(frame, f_idx)
+        self._video_batch_busy = True
+        try:
+            with self._cap_lock:
+                if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                    image_path = self.image_files[start_frame]
+                    frame = cv2.imread(image_path)
+                    ret = frame is not None
+                else:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                    ret, frame = self.cap.read()
+                    if ret:
+                        frame = self._process_frame_metadata(frame, start_frame)
             if not ret:
-                break
-            success, new_bbox = tracker.update(frame)
-            if not success:
-                QMessageBox.information(self, 'Tracking Lost',
-                    f'Tracking lost at frame {f_idx}. Please adjust the bounding box and resume tracking.'
-                    )
-                break
-            x, y, w, h = map(int, new_bbox)
-            x = max(0, min(x, frame.shape[1] - 1))
-            y = max(0, min(y, frame.shape[0] - 1))
-            w = max(1, min(w, frame.shape[1] - x))
-            h = max(1, min(h, frame.shape[0] - y))
-            new_rect = QRect(x, y, w, h)
-            default_attributes = target_ann.attributes.copy(
-                ) if target_ann.attributes else {}
-            if not default_attributes and hasattr(self,
-                'get_default_attributes_for_class'):
-                default_attributes = self.get_default_attributes_for_class(
-                    target_ann.class_name)
-            new_ann = BoundingBox(rect=new_rect, class_name=target_ann.
-                class_name, attributes=default_attributes, color=target_ann
-                .color, source='tracked')
-            if f_idx not in self.frame_annotations:
-                self.frame_annotations[f_idx] = []
-            self.frame_annotations[f_idx].append(new_ann)
-            last_successful_frame = f_idx
+                QMessageBox.critical(self, 'Tracking Error',
+                    f'Failed to read start frame {start_frame}')
+                return
+            bbox = target_ann.rect.x(), target_ann.rect.y(), target_ann.rect.width(
+                ), target_ann.rect.height()
+            if not tracker.init(frame, bbox):
+                QMessageBox.critical(self, 'Tracking Error',
+                    'Failed to initialize tracker on the selected bounding box.')
+                return
+            from PyQt5.QtWidgets import QProgressDialog
+            progress = QProgressDialog('Tracking object...', 'Cancel',
+                start_frame + 1, end_frame, self)
+            progress.setWindowModality(Qt.NonModal)
+            progress.show()
+            last_successful_frame = start_frame
+            f_idx = start_frame
+            success = True
+            with self._cap_lock:
+                for f_idx in range(start_frame + 1, end_frame + 1):
+                    if progress.wasCanceled():
+                        break
+                    progress.setValue(f_idx)
+                    QApplication.processEvents()
+                    if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
+                        image_path = self.image_files[f_idx]
+                        frame = cv2.imread(image_path)
+                        ret = frame is not None
+                    else:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                        ret, frame = self.cap.read()
+                        if ret:
+                            frame = self._process_frame_metadata(frame, f_idx)
+                    if not ret:
+                        break
+                    success, new_bbox = tracker.update(frame)
+                    if not success:
+                        QMessageBox.information(self, 'Tracking Lost',
+                            f'Tracking lost at frame {f_idx}. Please adjust the bounding box and resume tracking.'
+                            )
+                        break
+                    x, y, w, h = map(int, new_bbox)
+                    x = max(0, min(x, frame.shape[1] - 1))
+                    y = max(0, min(y, frame.shape[0] - 1))
+                    w = max(1, min(w, frame.shape[1] - x))
+                    h = max(1, min(h, frame.shape[0] - y))
+                    new_rect = QRect(x, y, w, h)
+                    default_attributes = target_ann.attributes.copy(
+                        ) if target_ann.attributes else {}
+                    if not default_attributes and hasattr(self,
+                        'get_default_attributes_for_class'):
+                        default_attributes = self.get_default_attributes_for_class(
+                            target_ann.class_name)
+                    new_ann = BoundingBox(rect=new_rect, class_name=target_ann.
+                        class_name, attributes=default_attributes, color=target_ann
+                        .color, source='tracked')
+                    if f_idx not in self.frame_annotations:
+                        self.frame_annotations[f_idx] = []
+                    self.frame_annotations[f_idx].append(new_ann)
+                    last_successful_frame = f_idx
+        finally:
+            self._video_batch_busy = False
         progress.setValue(end_frame)
         target_nav_frame = f_idx if not success else last_successful_frame
         if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
@@ -9385,8 +9638,9 @@ Do you want to scan the entire video now for duplicate frames?
                 self.frame_slider.setValue(frame)
                 self.load_current_image()
             else:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
-                ret, frame_img = self.cap.read()
+                with self._cap_lock:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+                    ret, frame_img = self.cap.read()
                 if ret:
                     frame_img = self._process_frame_metadata(frame_img, frame)
                     self.current_frame = frame
@@ -9450,8 +9704,9 @@ Do you want to scan the entire video now for duplicate frames?
                 self.frame_slider.setValue(frame)
                 self.load_current_image()
             else:
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
-                ret, frame_img = self.cap.read()
+                with self._cap_lock:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+                    ret, frame_img = self.cap.read()
                 if ret:
                     frame_img = self._process_frame_metadata(frame_img, frame)
                     self.current_frame = frame
@@ -9653,6 +9908,9 @@ Do you want to scan the entire video now for duplicate frames?
                 self, 'video_filename') and self.video_filename:
                 self.perform_autosave()
             self.perform_autosave()
+        if getattr(self, '_seek_thread', None) is not None:
+            self._seek_thread.quit()
+            self._seek_thread.wait(2000)
 
     def _viat_ensure_dataset(self, show_warning=True):
         """Return the loaded DatasetInfo or show a warning."""
@@ -10255,8 +10513,9 @@ Others are moved to removed/duplicates/."""
             self.video_manager.close_video()
         else:
             if self.cap:
-                self.cap.release()
-                self.cap = None
+                with self._cap_lock:
+                    self.cap.release()
+                    self.cap = None
 
         from viat.utils.scene_splitter import SceneSplitWorker
         if SceneSplitWorker is None:
@@ -10707,8 +10966,9 @@ Annotations: {adj['removed']} removed (â‰¥80% in border), {adj['clipped']} c
         def on_color_picked(x, y):
             """Called when the user clicks on the canvas."""
             if self.cap and self.cap.isOpened():
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
-                ret, frame = self.cap.read()
+                with self._cap_lock:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
+                    ret, frame = self.cap.read()
                 if not ret or frame is None:
                     return
                 frame = self._process_frame_metadata(frame, self.current_frame)

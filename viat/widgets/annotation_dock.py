@@ -1530,39 +1530,44 @@ class AnnotationDock(QDockWidget):
         QApplication.processEvents()
         
         cap = self.main_window.cap
-        orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        ret, prev_frame = cap.read()
-        if not ret:
-            progress.close()
-            return start_frame
-            
-        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        cut_frame = self.main_window.total_frames - 1
-        
-        for f in range(start_frame + 1, self.main_window.total_frames):
-            ret, frame = cap.read()
-            if not ret:
-                cut_frame = f - 1
-                break
-            
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            diff = cv2.absdiff(gray, prev_gray)
-            mean_diff = diff.mean()
-            
-            if mean_diff > 30.0:  # Threshold for scene cut
-                cut_frame = f - 1
-                break
-                
-            prev_gray = gray
-            
-            if f % 10 == 0:
-                QApplication.processEvents()
-                
-        cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
-        progress.close()
-        return cut_frame
+        self.main_window._video_batch_busy = True
+        try:
+            with self.main_window._cap_lock:
+                orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                ret, prev_frame = cap.read()
+                if not ret:
+                    progress.close()
+                    return start_frame
+
+                prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+                cut_frame = self.main_window.total_frames - 1
+
+                for f in range(start_frame + 1, self.main_window.total_frames):
+                    ret, frame = cap.read()
+                    if not ret:
+                        cut_frame = f - 1
+                        break
+
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    diff = cv2.absdiff(gray, prev_gray)
+                    mean_diff = diff.mean()
+
+                    if mean_diff > 30.0:  # Threshold for scene cut
+                        cut_frame = f - 1
+                        break
+
+                    prev_gray = gray
+
+                    if f % 10 == 0:
+                        QApplication.processEvents()
+
+                cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
+                progress.close()
+                return cut_frame
+        finally:
+            self.main_window._video_batch_busy = False
 
     def edit_object_across_frames(self, reference_annotation):
         """Open dialog to edit a specific object across a frame range."""
@@ -1815,117 +1820,127 @@ class AnnotationDock(QDockWidget):
         tracker = None
         cap = getattr(self.main_window, 'cap', None)
         orig_pos = None
-        if ref_track_id is None and cap is not None:
-            try:
-                tracker = cv2.TrackerMIL_create()
-                orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-                ret, frame = cap.read()
-                if ret:
-                    rect = (last_matched_rect.x(), last_matched_rect.y(), last_matched_rect.width(), last_matched_rect.height())
-                    tracker.init(frame, rect)
-            except Exception:
-                tracker = None
+        cap_lock = getattr(self.main_window, '_cap_lock', None)
+        if cap is not None and cap_lock is not None:
+            self.main_window._video_batch_busy = True
+        try:
+            if ref_track_id is None and cap is not None:
+                try:
+                    with cap_lock:
+                        tracker = cv2.TrackerMIL_create()
+                        orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                        ret, frame = cap.read()
+                        if ret:
+                            rect = (last_matched_rect.x(), last_matched_rect.y(), last_matched_rect.width(), last_matched_rect.height())
+                            tracker.init(frame, rect)
+                except Exception:
+                    tracker = None
 
-        for frame_num in range(start_frame, end_frame + 1):
-            progress_bar.setValue(frame_num)
-            if frame_num % 5 == 0:
-                QApplication.processEvents()
+            for frame_num in range(start_frame, end_frame + 1):
+                progress_bar.setValue(frame_num)
+                if frame_num % 5 == 0:
+                    QApplication.processEvents()
 
-            if frame_num not in self.main_window.frame_annotations:
-                continue
+                if frame_num not in self.main_window.frame_annotations:
+                    continue
 
-            anns = self.main_window.frame_annotations[frame_num]
-            to_edit = []
-            
-            # Predict next rect using tracker
-            predicted_rect = last_matched_rect
-            if tracker is not None and frame_num > start_frame:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                ret, frame = cap.read()
-                if ret:
-                    success, box = tracker.update(frame)
-                    if success:
-                        predicted_rect = QRect(int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+                anns = self.main_window.frame_annotations[frame_num]
+                to_edit = []
 
-            # For track_id-based matching, the track_id alone reliably
-            # identifies the object regardless of its (possibly wrong) class
-            # label, so no class filter is needed there. For the no-track_id
-            # visual-tracker fallback, filtering by class_name (which for
-            # "Sync Attributes & Class" is the OLD/currently-labeled class
-            # picked in the dialog, not the new one) keeps matching precise
-            # without requiring the reference frame to be pre-edited.
-            if ref_track_id is not None:
-                for ann in anns:
-                    tid = (
-                        ann.attributes.get("track_id")
-                        if hasattr(ann, "attributes") and ann.attributes
-                        else None
+                # Predict next rect using tracker
+                predicted_rect = last_matched_rect
+                if tracker is not None and frame_num > start_frame:
+                    with cap_lock:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                        ret, frame = cap.read()
+                    if ret:
+                        success, box = tracker.update(frame)
+                        if success:
+                            predicted_rect = QRect(int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+
+                # For track_id-based matching, the track_id alone reliably
+                # identifies the object regardless of its (possibly wrong) class
+                # label, so no class filter is needed there. For the no-track_id
+                # visual-tracker fallback, filtering by class_name (which for
+                # "Sync Attributes & Class" is the OLD/currently-labeled class
+                # picked in the dialog, not the new one) keeps matching precise
+                # without requiring the reference frame to be pre-edited.
+                if ref_track_id is not None:
+                    for ann in anns:
+                        tid = (
+                            ann.attributes.get("track_id")
+                            if hasattr(ann, "attributes") and ann.attributes
+                            else None
+                        )
+                        if tid == ref_track_id:
+                            to_edit.append(ann)
+                else:
+                    best_ann = None
+                    best_iou = 0.0
+                    for ann in anns:
+                        if ann.class_name != class_name:
+                            continue
+                        iou = self.main_window.canvas.iou(predicted_rect, ann.rect)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_ann = ann
+                    if best_ann and best_iou >= iou_threshold:
+                        to_edit.append(best_ann)
+                        last_matched_rect = best_ann.rect
+
+                if to_edit:
+                    edit_count += len(to_edit)
+
+                    # Apply action
+                    for ann in to_edit:
+                        if action == "Blur":
+                            blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                            if blur_mgr is not None:
+                                blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
+                        elif action == "Shift Position":
+                            ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
+                        elif action == "Sync Attributes & Class":
+                            new_class = action_params.get("new_class", reference_annotation.class_name)
+                            ann.class_name = new_class
+                            ann.color = self.main_window.canvas.class_colors.get(
+                                new_class, reference_annotation.color)
+                            if not hasattr(ann, "attributes") or ann.attributes is None:
+                                ann.attributes = {}
+                            new_attributes = action_params.get("new_attributes")
+                            if new_attributes is not None:
+                                for k, v in new_attributes.items():
+                                    ann.attributes[k] = v
+                            elif hasattr(reference_annotation, "attributes"):
+                                # Fallback for any programmatic caller that doesn't
+                                # supply new_attributes (keeps old behavior).
+                                for k, v in reference_annotation.attributes.items():
+                                    ann.attributes[k] = v
+
+                    if action in ["Delete", "Blur"]:
+                        self.main_window.frame_annotations[frame_num] = [
+                            a for a in anns if a not in to_edit
+                        ]
+
+                if frame_num == self.main_window.current_frame:
+                    self.main_window.canvas.annotations = (
+                        self.main_window.frame_annotations[frame_num].copy()
                     )
-                    if tid == ref_track_id:
-                        to_edit.append(ann)
-            else:
-                best_ann = None
-                best_iou = 0.0
-                for ann in anns:
-                    if ann.class_name != class_name:
-                        continue
-                    iou = self.main_window.canvas.iou(predicted_rect, ann.rect)
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_ann = ann
-                if best_ann and best_iou >= iou_threshold:
-                    to_edit.append(best_ann)
-                    last_matched_rect = best_ann.rect
+                    if action in ["Delete", "Blur"] and self.main_window.canvas.selected_annotation in to_edit:
+                        self.main_window.canvas.selected_annotation = None
+                        if hasattr(self.main_window.canvas, "selected_annotations"):
+                            self.main_window.canvas.selected_annotations = []
+                    self.main_window.canvas.update()
+                    self.update_annotation_list()
+                    if action == "Blur" and hasattr(self.main_window, '_refresh_blur_display'):
+                        self.main_window._refresh_blur_display()
 
-            if to_edit:
-                edit_count += len(to_edit)
-                
-                # Apply action
-                for ann in to_edit:
-                    if action == "Blur":
-                        blur_mgr = getattr(self.main_window, 'blur_manager', None)
-                        if blur_mgr is not None:
-                            blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
-                    elif action == "Shift Position":
-                        ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
-                    elif action == "Sync Attributes & Class":
-                        new_class = action_params.get("new_class", reference_annotation.class_name)
-                        ann.class_name = new_class
-                        ann.color = self.main_window.canvas.class_colors.get(
-                            new_class, reference_annotation.color)
-                        if not hasattr(ann, "attributes") or ann.attributes is None:
-                            ann.attributes = {}
-                        new_attributes = action_params.get("new_attributes")
-                        if new_attributes is not None:
-                            for k, v in new_attributes.items():
-                                ann.attributes[k] = v
-                        elif hasattr(reference_annotation, "attributes"):
-                            # Fallback for any programmatic caller that doesn't
-                            # supply new_attributes (keeps old behavior).
-                            for k, v in reference_annotation.attributes.items():
-                                ann.attributes[k] = v
-                                
-                if action in ["Delete", "Blur"]:
-                    self.main_window.frame_annotations[frame_num] = [
-                        a for a in anns if a not in to_edit
-                    ]
-
-            if frame_num == self.main_window.current_frame:
-                self.main_window.canvas.annotations = (
-                    self.main_window.frame_annotations[frame_num].copy()
-                )
-                if action in ["Delete", "Blur"] and self.main_window.canvas.selected_annotation in to_edit:
-                    self.main_window.canvas.selected_annotation = None
-                    if hasattr(self.main_window.canvas, "selected_annotations"):
-                        self.main_window.canvas.selected_annotations = []
-                self.main_window.canvas.update()
-                self.update_annotation_list()
-                if action == "Blur" and hasattr(self.main_window, '_refresh_blur_display'):
-                    self.main_window._refresh_blur_display()
-
-        if tracker is not None and cap is not None and orig_pos is not None:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
+            if tracker is not None and cap is not None and orig_pos is not None:
+                with cap_lock:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
+        finally:
+            if cap is not None and cap_lock is not None:
+                self.main_window._video_batch_busy = False
 
         progress.close()
 

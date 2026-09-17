@@ -1,11 +1,5 @@
 #!/usr/bin/env python
 print("Starting Video Annotation Tool...")
-# Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
-try:
-    print("Initializing PyTorch environment (this may take a moment)...")
-    import torch
-except ImportError:
-    pass
 
 import sys
 import os
@@ -19,7 +13,19 @@ else:
     sys.path.insert(0, os.path.dirname(run_dir))
     sys.path.insert(0, run_dir)
 
-from viat.main import VideoAnnotationTool  
+# Must run before any `import torch` (below, or transitively via viat.main) --
+# CUDA only honors CUDA_VISIBLE_DEVICES set before the driver first initializes.
+from viat import gpu_env
+gpu_env.restrict_to_saved_gpu()
+
+# Import torch early to avoid DLL initialization conflicts (WinError 1114) with PyQt5 on Windows
+try:
+    print("Initializing PyTorch environment (this may take a moment)...")
+    import torch
+except ImportError:
+    pass
+
+from viat.main import VideoAnnotationTool
 import cv2
 import PyQt5
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(

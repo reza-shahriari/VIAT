@@ -382,14 +382,20 @@ def _iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, flo
     return inter / denom if denom > 0 else 0.0
 
 
-def generate_background_crops(frame: Any, crop_w: int, crop_h: int, max_crops: int, rng: random.Random) -> List[Tuple[Any, List[str]]]:
+def generate_background_crops(
+    frame: Any, crop_w: int, crop_h: int, max_crops: int, rng: random.Random, square_crops: bool = False
+) -> List[Tuple[Any, List[str]]]:
     """
     Tile an oversized background (no-box) frame into up to max_crops
     non-overlapping crop-sized windows, instead of saving the whole
     full-resolution frame untouched.
     """
     img_h, img_w = frame.shape[:2]
-    target_w, target_h = min(crop_w, img_w), min(crop_h, img_h)
+    if square_crops:
+        side = min(crop_w, crop_h, img_w, img_h)
+        target_w, target_h = side, side
+    else:
+        target_w, target_h = min(crop_w, img_w), min(crop_h, img_h)
     max_x, max_y = max(0, img_w - target_w), max(0, img_h - target_h)
 
     n = max(1, max_crops)
@@ -407,6 +413,209 @@ def generate_background_crops(frame: Any, crop_w: int, crop_h: int, max_crops: i
     return [(frame[y1:y2, x1:x2], []) for (x1, y1, x2, y2) in windows]
 
 
+def _composition_score(
+    window: Tuple[int, int, int, int],
+    other_boxes: List[Tuple[int, float, float, float, float]],
+    min_visibility: float,
+) -> float:
+    """
+    How "clean" a candidate crop window's composition is with respect to
+    boxes other than the one it's built around: +1 for each other box that
+    ends up either meaningfully included (>= min_visibility) or cleanly
+    excluded (~0 visible), 0 for one left dangling half-cut in between -
+    visible in the frame but too truncated to be kept as a label, which
+    just adds a confusing unlabeled distractor to the crop.
+    """
+    wx1, wy1, wx2, wy2 = window
+    score = 0.0
+    for (_g_idx, bx, by, bw, bh) in other_boxes:
+        area = bw * bh
+        if area <= 0:
+            continue
+        ix1, iy1 = max(wx1, bx), max(wy1, by)
+        ix2, iy2 = min(wx2, bx + bw), min(wy2, by + bh)
+        iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+        vis = (iw * ih) / area
+        if vis <= 0.02 or vis >= min_visibility:
+            score += 1.0
+    return score
+
+
+def _pick_crop_position(
+    cl_x1: float, cl_y1: float, cl_x2: float, cl_y2: float,
+    target_w: int, target_h: int, img_w: int, img_h: int,
+    other_boxes: List[Tuple[int, float, float, float, float]],
+    min_visibility: float,
+    wide_position: bool,
+    context_padding: float,
+    rng: random.Random,
+) -> Tuple[Optional[Tuple[int, int]], bool]:
+    """
+    Pick a crop's top-left corner. When `wide_position` is on, the object
+    is allowed to land anywhere in the crop - not just near-center - as
+    long as it stays fully inside the window; how far it can actually move
+    is naturally limited by how much smaller the cluster is than the crop
+    and by the frame's edges (the valid range shrinks to ~0 near an edge or
+    when the crop is barely bigger than the object). Several candidate
+    positions are sampled and scored on how *cleanly* nearby other objects
+    come out - each one either meaningfully included or fully excluded,
+    never dangling half-visible in between (a half-visible box compounds
+    badly with any occlusion already baked into its label - see the caller).
+
+    Returns (best_position, is_clean) - is_clean is True only if a position
+    was found where every other box is fully resolved (no dangling box at
+    all); the caller uses that to decide whether this crop is safe to keep.
+    """
+    if wide_position:
+        x_lo, x_hi = max(0, cl_x2 - target_w), min(img_w - target_w, cl_x1)
+        y_lo, y_hi = max(0, cl_y2 - target_h), min(img_h - target_h, cl_y1)
+        if x_hi < x_lo:
+            x_lo = x_hi = max(0, min(cl_x1, img_w - target_w))
+        if y_hi < y_lo:
+            y_lo = y_hi = max(0, min(cl_y1, img_h - target_h))
+        attempts = 8 if other_boxes else 1
+    else:
+        # Legacy behavior: only a small nudge around dead-center.
+        cl_cx, cl_cy = (cl_x1 + cl_x2) / 2.0, (cl_y1 + cl_y2) / 2.0
+        jitter_x = context_padding * target_w * 0.5
+        jitter_y = context_padding * target_h * 0.5
+        x_lo = max(0, min(cl_cx - target_w / 2.0 - jitter_x, img_w - target_w))
+        x_hi = max(0, min(cl_cx - target_w / 2.0 + jitter_x, img_w - target_w))
+        y_lo = max(0, min(cl_cy - target_h / 2.0 - jitter_y, img_h - target_h))
+        y_hi = max(0, min(cl_cy - target_h / 2.0 + jitter_y, img_h - target_h))
+        attempts = 4 if other_boxes else 1
+
+    best_pos, best_score, best_clean = None, -1.0, False
+    for _ in range(attempts):
+        x1 = x_lo if x_hi <= x_lo else rng.uniform(x_lo, x_hi)
+        y1 = y_lo if y_hi <= y_lo else rng.uniform(y_lo, y_hi)
+        x1, y1 = int(x1), int(y1)
+        if other_boxes:
+            score = _composition_score((x1, y1, x1 + target_w, y1 + target_h), other_boxes, min_visibility)
+            clean = score == len(other_boxes)
+        else:
+            score, clean = 0.0, True
+        if score > best_score:
+            best_score, best_pos, best_clean = score, (x1, y1), clean
+        if best_clean:
+            break  # found a fully clean composition - no need to keep rolling
+
+    return best_pos, best_clean
+
+
+def _build_cluster_crop(
+    frame: Any,
+    boxes: List[Tuple[int, float, float, float, float]],
+    cluster,
+    img_w: int,
+    img_h: int,
+    crop_w: int,
+    crop_h: int,
+    min_crop_w: int,
+    min_crop_h: int,
+    context_padding: float,
+    min_visibility: float,
+    min_box_size: float,
+    square_crops: bool,
+    use_default_size: bool,
+    wide_position: bool,
+    rng: random.Random,
+):
+    """
+    Build one candidate crop window (+ translated labels) around a cluster.
+    `use_default_size` takes the fixed crop_w x crop_h window instead of
+    sizing down to hug the cluster - mixing both gives the dataset both
+    tightly-zoomed and default-context views of the same object(s) instead
+    of always one fixed relationship between object size and crop size.
+
+    A box that's already partly occluded by something unlabeled only has
+    its *visible* fraction annotated - we have no way to know that from the
+    box alone. If a crop then *also* truncates that box down to just
+    min_visibility, the two effects compound (e.g. a box already only 30%
+    of the real object, cropped down to 40% of itself, leaves ~12% of the
+    real object standing in for the whole class - actively misleading).
+    Since we can't see the hidden occlusion, the safe move is to never let
+    *our own* cropping introduce a second truncation: this only returns a
+    crop where the cluster's own box(es) fit fully inside the window, and
+    where every *other* nearby box is either meaningfully included or
+    fully excluded - never left dangling half-visible. When no such clean
+    window exists (busy/overlapping scene), it fails (None) rather than
+    returning a truncated crop - the object stays labeled at full fidelity
+    in the whole-frame "_df" output instead of being force-cropped.
+
+    Returns (window, cropped_img, yolo_labels) or (None, None, None) if no
+    clean crop is achievable.
+    """
+    cl_x1, cl_y1, cl_x2, cl_y2 = _cluster_bbox(cluster)
+    cl_w, cl_h = cl_x2 - cl_x1, cl_y2 - cl_y1
+
+    if use_default_size:
+        target_w, target_h = crop_w, crop_h
+    else:
+        # Adaptive crop size: hug the cluster (+ padding) instead of always
+        # using the fixed max window, so a small/isolated object actually
+        # ends up occupying more of the crop rather than just being
+        # relocated onto a same-size canvas.
+        target_w = min(crop_w, max(min_crop_w, int(cl_w * (1 + context_padding * 2)) + 1))
+        target_h = min(crop_h, max(min_crop_h, int(cl_h * (1 + context_padding * 2)) + 1))
+
+    if square_crops:
+        side = max(target_w, target_h)
+        side = min(side, min(crop_w, crop_h))
+        side = max(side, min(min_crop_w, min_crop_h))
+        target_w = target_h = side
+
+    target_w = min(target_w, img_w)
+    target_h = min(target_h, img_h)
+    if target_w <= 0 or target_h <= 0:
+        return None, None, None
+    if cl_w > target_w or cl_h > target_h:
+        # The cluster itself doesn't fit in this window - any crop here
+        # would truncate the object we're building the crop around.
+        return None, None, None
+
+    other_boxes = [b for b in boxes if b not in cluster]
+    pos, is_clean = _pick_crop_position(
+        cl_x1, cl_y1, cl_x2, cl_y2, target_w, target_h, img_w, img_h,
+        other_boxes, min_visibility, wide_position, context_padding, rng,
+    )
+    if pos is None or not is_clean:
+        return None, None, None
+    crop_x1, crop_y1 = pos
+    crop_x2, crop_y2 = crop_x1 + target_w, crop_y1 + target_h
+    window = (crop_x1, crop_y1, crop_x2, crop_y2)
+
+    cropped_img = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+    actual_cw, actual_ch = cropped_img.shape[1], cropped_img.shape[0]
+    if actual_cw <= 0 or actual_ch <= 0:
+        return None, None, None
+
+    yolo_labels = []
+    for (g_idx, bx, by, bw, bh) in boxes:
+        orig_area = bw * bh
+        if orig_area <= 0:
+            continue
+        rx1, ry1 = max(0.0, bx - crop_x1), max(0.0, by - crop_y1)
+        rx2 = min(float(actual_cw), bx + bw - crop_x1)
+        ry2 = min(float(actual_ch), by + bh - crop_y1)
+        if rx2 <= rx1 or ry2 <= ry1:
+            continue
+
+        clipped_w, clipped_h = rx2 - rx1, ry2 - ry1
+        if clipped_w < min_box_size or clipped_h < min_box_size:
+            continue
+        if (clipped_w * clipped_h / orig_area) < min_visibility:
+            continue
+
+        cx = (rx1 + clipped_w / 2.0) / actual_cw
+        cy = (ry1 + clipped_h / 2.0) / actual_ch
+        yolo_labels.append(
+            f"{g_idx} {cx:.6f} {cy:.6f} {clipped_w / actual_cw:.6f} {clipped_h / actual_ch:.6f}"
+        )
+
+    return window, cropped_img, yolo_labels
+
+
 def generate_smart_crops(
     frame: Any,
     boxes: List[Tuple[int, float, float, float, float]],
@@ -415,12 +624,16 @@ def generate_smart_crops(
     crop_h: int = 640,
     min_crop_w: int = 320,
     min_crop_h: int = 320,
-    min_visibility: float = 0.4,
+    min_visibility: float = 0.7,
     context_padding: float = 0.2,
-    max_crops: int = 3,
+    max_crops_fg: int = 3,
+    max_crops_bg: int = 1,
     min_box_size: float = 2.0,
     overlap_iou_threshold: float = 0.5,
     class_priority: Optional[Dict[int, float]] = None,
+    square_crops: bool = False,
+    default_size_crop_chance: float = 0.3,
+    wide_position: bool = True,
     rng: Optional[random.Random] = None,
 ) -> List[Tuple[Any, List[str]]]:
     """
@@ -429,7 +642,20 @@ def generate_smart_crops(
     `boxes` are already resolved to global class indices: (g_idx, x, y, w, h).
     If the image already fits inside crop dimensions, returns it as-is.
     Background (no-box) frames get tiled via generate_background_crops
-    instead of being passed through full-resolution.
+    instead of being passed through full-resolution, capped at `max_crops_bg`
+    rather than `max_crops_fg` - an empty background tile carries no object
+    diversity to gain from taking as many of them as a busy foreground frame.
+
+    Crops are filled up to `max_crops_fg` by cycling through the (priority-
+    ordered) object clusters rather than taking exactly one crop per
+    cluster - so a frame with a single isolated object can still yield
+    several differently-jittered/sized crops of it instead of just one, and
+    a frame with fewer clusters than max_crops_fg doesn't leave budget unused.
+    Each attempt randomly takes either the adaptive cluster-hugging size or
+    the fixed crop_w x crop_h size (`default_size_crop_chance`), so the
+    dataset gets a mix of tightly-zoomed and default-context views.
+    `square_crops` forces every crop window to be square, for models/
+    pipelines that expect square input instead of an arbitrary rectangle.
     """
     if rng is None:
         rng = random.Random()
@@ -444,11 +670,11 @@ def generate_smart_crops(
         return [(frame, yolo_labels)]
 
     if is_background or not boxes:
-        return generate_background_crops(frame, crop_w, crop_h, max_crops, rng)
+        return generate_background_crops(frame, crop_w, crop_h, max_crops_bg, rng, square_crops)
 
     clusters = cluster_bounding_boxes(boxes, distance_threshold=max(crop_w, crop_h) * 0.4)
     if not clusters:
-        return generate_background_crops(frame, crop_w, crop_h, max_crops, rng)
+        return generate_background_crops(frame, crop_w, crop_h, max_crops_bg, rng, square_crops)
 
     # A cluster whose own extent exceeds the crop window would otherwise get
     # silently clipped at its edges - split it instead.
@@ -457,73 +683,44 @@ def generate_smart_crops(
         split_clusters.extend(_split_oversized_cluster(cl, crop_w, crop_h))
 
     # Prioritize small/distant objects and rare classes when we have more
-    # candidate clusters than max_crops allows, instead of picking randomly.
+    # candidate clusters than max_crops_fg allows, instead of picking randomly.
     scored = sorted(split_clusters, key=lambda cl: _score_cluster(cl, class_priority), reverse=True)
 
     accepted_windows: List[Tuple[float, float, float, float]] = []
     results: List[Tuple[Any, List[str]]] = []
 
-    for cluster in scored:
-        if len(results) >= max_crops:
-            break
+    # Finding a *clean* (non-truncating) window can take a few tries in a
+    # busy scene, so give this more headroom than a plain "one shot per
+    # cluster" budget would - a cluster that never finds a clean crop
+    # simply won't get one, and stays fully represented in the "_df" image.
+    max_attempts = max(max_crops_fg * 6, len(scored) * 6)
+    attempts = 0
+    ci = 0
+    while len(results) < max_crops_fg and attempts < max_attempts:
+        cluster = scored[ci % len(scored)]
+        ci += 1
+        attempts += 1
 
-        cl_x1, cl_y1, cl_x2, cl_y2 = _cluster_bbox(cluster)
-        cl_w, cl_h = cl_x2 - cl_x1, cl_y2 - cl_y1
-        cl_cx, cl_cy = (cl_x1 + cl_x2) / 2.0, (cl_y1 + cl_y2) / 2.0
-
-        # Adaptive crop size: hug the cluster (+ padding) instead of always
-        # using the fixed max window, so a small/isolated object actually
-        # ends up occupying more of the crop rather than just being
-        # relocated onto a same-size canvas.
-        target_w = min(crop_w, max(min_crop_w, int(cl_w * (1 + context_padding * 2)) + 1))
-        target_h = min(crop_h, max(min_crop_h, int(cl_h * (1 + context_padding * 2)) + 1))
-        target_w = min(target_w, img_w)
-        target_h = min(target_h, img_h)
-
-        jitter_x = (rng.random() * 2 - 1) * (context_padding * target_w * 0.5)
-        jitter_y = (rng.random() * 2 - 1) * (context_padding * target_h * 0.5)
-        crop_cx, crop_cy = cl_cx + jitter_x, cl_cy + jitter_y
-
-        crop_x1 = int(max(0, min(crop_cx - target_w / 2.0, img_w - target_w)))
-        crop_y1 = int(max(0, min(crop_cy - target_h / 2.0, img_h - target_h)))
-        crop_x2, crop_y2 = crop_x1 + target_w, crop_y1 + target_h
-
-        window = (crop_x1, crop_y1, crop_x2, crop_y2)
+        use_default_size = rng.random() < default_size_crop_chance
+        window, cropped_img, yolo_labels = _build_cluster_crop(
+            frame, boxes, cluster, img_w, img_h, crop_w, crop_h, min_crop_w, min_crop_h,
+            context_padding, min_visibility, min_box_size, square_crops, use_default_size, wide_position, rng,
+        )
+        if window is None:
+            continue
         if any(_iou(window, w) > overlap_iou_threshold for w in accepted_windows):
             continue  # near-duplicate of an already-chosen crop in this frame
-
-        cropped_img = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        actual_cw, actual_ch = cropped_img.shape[1], cropped_img.shape[0]
-
-        yolo_labels = []
-        for (g_idx, bx, by, bw, bh) in boxes:
-            orig_area = bw * bh
-            if orig_area <= 0:
-                continue
-            rx1, ry1 = max(0.0, bx - crop_x1), max(0.0, by - crop_y1)
-            rx2 = min(float(actual_cw), bx + bw - crop_x1)
-            ry2 = min(float(actual_ch), by + bh - crop_y1)
-            if rx2 <= rx1 or ry2 <= ry1:
-                continue
-
-            clipped_w, clipped_h = rx2 - rx1, ry2 - ry1
-            if clipped_w < min_box_size or clipped_h < min_box_size:
-                continue
-            if (clipped_w * clipped_h / orig_area) < min_visibility:
-                continue
-
-            cx = (rx1 + clipped_w / 2.0) / actual_cw
-            cy = (ry1 + clipped_h / 2.0) / actual_ch
-            yolo_labels.append(
-                f"{g_idx} {cx:.6f} {cy:.6f} {clipped_w / actual_cw:.6f} {clipped_h / actual_ch:.6f}"
-            )
 
         accepted_windows.append(window)
         results.append((cropped_img, yolo_labels))
 
-    if not results:
-        return generate_background_crops(frame, crop_w, crop_h, 1, rng)
-
+    # NOTE: no "fall back to a random background tile" here on purpose. Boxes
+    # exist in this frame (checked at the top of this function) - if none of
+    # them could get a clean crop, a random tile would have zero awareness of
+    # where those boxes actually are and could land right on top of one,
+    # silently saving it as an unlabeled "background" image. Better to return
+    # nothing here and let the whole-frame "_df" image (which always carries
+    # every box, uncropped) be that object's sole representation instead.
     return results
 
 
@@ -998,9 +1195,15 @@ def execute_plan(
     crop_size: Tuple[int, int] = (640, 640),
     min_crop_size: Tuple[int, int] = (320, 320),
     max_crops_per_frame: int = 3,
-    min_visibility: float = 0.4,
+    max_bg_crops_per_frame: int = 1,
+    min_visibility: float = 0.7,
     context_padding: float = 0.2,
     overlap_iou_threshold: float = 0.5,
+    square_crops: bool = False,
+    default_size_crop_chance: float = 0.3,
+    wide_position: bool = True,
+    include_default_frame: bool = True,
+    default_frame_chance: float = 1.0,
     min_box_size_px: float = 2.0,
     flip_augment_percent: float = 0.0,
     split_mode: str = "single",
@@ -1122,27 +1325,45 @@ def execute_plan(
 
             is_background = entry["is_background"]
 
+            def _full_frame_labels():
+                h_img, w_img = img.shape[0], img.shape[1]
+                lines = []
+                for (g_idx, bx, by, bw, bh) in adjusted_boxes:
+                    if bw >= min_box_size_px and bh >= min_box_size_px:
+                        cx = (bx + bw / 2.0) / w_img
+                        cy = (by + bh / 2.0) / h_img
+                        lines.append(f"{g_idx} {cx:.6f} {cy:.6f} {bw / w_img:.6f} {bh / h_img:.6f}")
+                return lines
+
+            # outputs: list of (image, yolo_labels, filename_suffix)
             if enable_smart_crop and (img.shape[1] > crop_size[0] or img.shape[0] > crop_size[1]):
                 crops_to_save = generate_smart_crops(
                     img, adjusted_boxes, is_background,
                     crop_w=crop_size[0], crop_h=crop_size[1],
                     min_crop_w=min_crop_size[0], min_crop_h=min_crop_size[1],
                     min_visibility=min_visibility, context_padding=context_padding,
-                    max_crops=max_crops_per_frame, min_box_size=min_box_size_px,
-                    overlap_iou_threshold=overlap_iou_threshold, class_priority=class_priority, rng=rng,
+                    max_crops_fg=max_crops_per_frame, max_crops_bg=max_bg_crops_per_frame,
+                    min_box_size=min_box_size_px,
+                    overlap_iou_threshold=overlap_iou_threshold, class_priority=class_priority,
+                    square_crops=square_crops, default_size_crop_chance=default_size_crop_chance,
+                    wide_position=wide_position, rng=rng,
                 )
+                outputs = [(c_img, c_labels, f"_c{i}") for i, (c_img, c_labels) in enumerate(crops_to_save)]
+                # Alongside the object-focused crop(s), (almost) always also keep the
+                # whole (post-padding-removal) frame with every one of its labels, so
+                # the model also sees full-scene context and not only zoomed sub-crops.
+                # If no crop at all could be produced (busy/occluded scene, no clean
+                # window found for anything), this becomes the ONLY representation of
+                # those objects - always include it in that case, regardless of the
+                # configured chance, so the frame isn't silently dropped altogether.
+                if include_default_frame and (not outputs or rng.random() < default_frame_chance):
+                    outputs.append((img, _full_frame_labels(), "_df"))
             else:
-                h_img, w_img = img.shape[0], img.shape[1]
-                label_lines = []
-                for (g_idx, bx, by, bw, bh) in adjusted_boxes:
-                    if bw >= min_box_size_px and bh >= min_box_size_px:
-                        cx = (bx + bw / 2.0) / w_img
-                        cy = (by + bh / 2.0) / h_img
-                        label_lines.append(f"{g_idx} {cx:.6f} {cy:.6f} {bw / w_img:.6f} {bh / h_img:.6f}")
-                crops_to_save = [(img, label_lines)]
+                # Frame already fits within the crop size - it IS the default view,
+                # nothing else to add.
+                outputs = [(img, _full_frame_labels(), "")]
 
-            for c_i, (crop_img, yolo_labels) in enumerate(crops_to_save):
-                suffix = f"_c{c_i}" if len(crops_to_save) > 1 else ""
+            for (crop_img, yolo_labels, suffix) in outputs:
                 base = f"{v_stem}_{frame_idx:06d}{suffix}"
                 cv2.imwrite(str(dest_img_dir / f"{base}{img_ext}"), crop_img)
                 (dest_lbl_dir / f"{base}.txt").write_text(
@@ -1216,9 +1437,15 @@ def convert_video_dataset_to_yolo(
     crop_size: Tuple[int, int] = (640, 640),
     min_crop_size: Tuple[int, int] = (320, 320),
     max_crops_per_frame: int = 3,
-    min_visibility: float = 0.4,
+    max_bg_crops_per_frame: int = 1,
+    min_visibility: float = 0.7,
     context_padding: float = 0.2,
     overlap_iou_threshold: float = 0.5,
+    square_crops: bool = False,
+    default_size_crop_chance: float = 0.3,
+    wide_position: bool = True,
+    include_default_frame: bool = True,
+    default_frame_chance: float = 1.0,
     max_instances_per_class: Optional[Dict[str, int]] = None,
     balance_mode: str = "manual",
     classes_in_balance: Optional[List[str]] = None,
@@ -1273,8 +1500,12 @@ def convert_video_dataset_to_yolo(
         enable_dedup=enable_dedup, dedup_hamming_threshold=dedup_hamming_threshold,
         dedup_window=dedup_window, enable_smart_crop=enable_smart_crop,
         crop_size=crop_size, min_crop_size=min_crop_size, max_crops_per_frame=max_crops_per_frame,
+        max_bg_crops_per_frame=max_bg_crops_per_frame,
         min_visibility=min_visibility, context_padding=context_padding,
-        overlap_iou_threshold=overlap_iou_threshold, min_box_size_px=min_box_size_px,
+        overlap_iou_threshold=overlap_iou_threshold, square_crops=square_crops,
+        default_size_crop_chance=default_size_crop_chance, wide_position=wide_position,
+        include_default_frame=include_default_frame,
+        default_frame_chance=default_frame_chance, min_box_size_px=min_box_size_px,
         flip_augment_percent=flip_augment_percent, split_mode=split_mode, split_ratios=split_ratios,
         random_seed=random_seed, progress_callback=progress_callback, cancel_callback=cancel_callback,
     ):

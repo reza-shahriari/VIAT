@@ -100,6 +100,17 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
     Returns:
         (frame, actual_frame) or (None, target_frame) on failure.
     """
+    import time
+    t_fs_start = time.perf_counter()
+
+    def _log_slow(strategy, extra=""):
+        elapsed = time.perf_counter() - t_fs_start
+        if elapsed > 0.1:
+            from ..logger import logger
+            logger.warning(
+                f"fast_seek({target_frame}): strategy={strategy} took {elapsed:.3f}s{extra}"
+            )
+
     if cap is None or not cap.isOpened():
         return None, target_frame
 
@@ -107,6 +118,7 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
     if cache:
         cached = cache.get(target_frame)
         if cached is not None:
+            _log_slow("cache_hit", f" (cache size={cache.size})")
             return cached, target_frame
 
     # The actual position of the cv2.VideoCapture object
@@ -118,7 +130,9 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
         if ret and frame is not None:
             if cache:
                 cache.put(target_frame, frame)
+            _log_slow("sequential_read", f" (cap_pos={cap_pos})")
             return frame, target_frame
+        _log_slow("sequential_read_failed", f" (cap_pos={cap_pos})")
         return None, target_frame
 
     # 3. Forward by a small amount: grab + read
@@ -132,6 +146,7 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
         if ret and frame is not None:
             if cache:
                 cache.put(target_frame, frame)
+            _log_slow("forward_grab", f" (delta={delta}, cap_pos={cap_pos})")
             return frame, target_frame
 
     # 4. Backward seek: pre-fetch range if target_frame < cap_pos
@@ -148,6 +163,7 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
             if f == target_frame:
                 target_img = frame
         if target_img is not None:
+            _log_slow("backward_prefetch", f" (start_frame={start_frame}, cap_pos={cap_pos})")
             return target_img, target_frame
 
     # 5. Fallback: set POS_FRAMES + read
@@ -156,9 +172,115 @@ def fast_seek(cap, target_frame: int, current_frame: int, cache: FrameCache = No
     if ret and frame is not None:
         if cache:
             cache.put(target_frame, frame)
+        _log_slow("fallback_set_read", f" (delta={target_frame - cap_pos}, cap_pos={cap_pos})")
         return frame, target_frame
 
+    _log_slow("fallback_failed", f" (cap_pos={cap_pos})")
     return None, target_frame
+
+
+# --------------------------------------------------------------------------- #
+# Background seek worker
+# --------------------------------------------------------------------------- #
+#
+# cv2.VideoCapture.set(POS_FRAMES) can require decoding forward from the
+# last keyframe, which measured up to ~1.5s on some videos. Doing that
+# directly on the UI thread freezes the whole app for that long (a native
+# blocking call can't interleave with Qt's event loop). VideoSeekWorker runs
+# the decode on a dedicated background thread instead; the caller
+# (VideoAnnotationTool.seek_to_frame) waits for the result via a QEventLoop,
+# which keeps pumping Qt's event loop while it waits, so the app stays
+# responsive (repaints, doesn't get flagged "Not Responding") even though
+# that one seek is still just as slow.
+#
+# cv2.VideoCapture is not safe for concurrent access from multiple threads,
+# so `cap_lock` must be the SAME lock every other direct app.cap consumer
+# in the codebase acquires before touching the capture (playback, undo/redo,
+# batch scans, etc.) -- otherwise this worker can race with them.
+
+from PyQt5.QtCore import QObject, pyqtSignal
+
+
+class VideoSeekDispatcher(QObject):
+    """Lives on the main thread; emitting seekRequested queues a job onto
+    VideoSeekWorker (which lives on a different thread), via Qt's automatic
+    cross-thread queued connection."""
+
+    seekRequested = pyqtSignal(int, int, int)  # target_frame, current_frame, request_id
+
+
+class VideoSeekWorker(QObject):
+    """Runs on a dedicated background QThread. Do not call methods on this
+    directly from the main thread -- trigger it via VideoSeekDispatcher's
+    signal so PyQt queues the call onto the worker thread."""
+
+    resultReady = pyqtSignal(int, bool, object, int)  # request_id, ok, frame, actual_frame
+
+    def __init__(self, app, cap_lock):
+        super().__init__()
+        self.app = app
+        self.cap_lock = cap_lock
+
+    def do_seek(self, target_frame, current_frame, request_id):
+        import time
+        ok, frame, actual = False, None, target_frame
+        t0 = time.perf_counter()
+        with self.cap_lock:
+            t_lock_acquired = time.perf_counter()
+            cap = getattr(self.app, "cap", None)
+            if cap is not None and cap.isOpened():
+                perf_mgr = getattr(self.app, "performance_manager", None)
+                if perf_mgr is not None:
+                    frame = perf_mgr.seek_frame(target_frame)
+                    ok = frame is not None
+                    actual = target_frame
+                elif target_frame == current_frame + 1:
+                    ok, frame = cap.read()
+                    actual = target_frame
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                    ok, frame = cap.read()
+                    actual = target_frame
+            t_decode_done = time.perf_counter()
+        lock_wait = t_lock_acquired - t0
+        decode_time = t_decode_done - t_lock_acquired
+        if lock_wait > 0.05 or decode_time > 0.1:
+            from ..logger import logger
+            sys_info = _sample_system_state()
+            logger.warning(
+                f"VideoSeekWorker.do_seek({target_frame}): lock_wait={lock_wait:.3f}s, "
+                f"decode/seek={decode_time:.3f}s -- {sys_info}"
+            )
+        self.resultReady.emit(request_id, ok, frame, actual)
+
+
+def _sample_system_state():
+    """Best-effort snapshot of what else the system/process was doing,
+    captured only on an already-slow path (so its own cost doesn't
+    contaminate the timing being reported). Never raises."""
+    parts = []
+    try:
+        import psutil
+        proc = psutil.Process()
+        parts.append(f"proc_cpu%={proc.cpu_percent(interval=0.05):.0f}")
+        parts.append(f"sys_cpu%={psutil.cpu_percent(interval=None):.0f}")
+        parts.append(f"threads={proc.num_threads()}")
+        mem = proc.memory_info()
+        parts.append(f"proc_rss_mb={mem.rss / (1024 * 1024):.0f}")
+    except Exception as e:
+        parts.append(f"psutil_error={e}")
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=1
+        )
+        if out.returncode == 0:
+            gpu_lines = "; ".join(l.strip() for l in out.stdout.strip().splitlines())
+            parts.append(f"gpu=[{gpu_lines}]")
+    except Exception:
+        pass
+    return ", ".join(parts)
 
 
 # --------------------------------------------------------------------------- #

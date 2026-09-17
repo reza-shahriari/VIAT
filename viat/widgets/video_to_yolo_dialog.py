@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 from viat.converters.video_to_yolo import (
-    convert_video_dataset_to_yolo, scan_dataset_statistics, build_plan,
+    convert_video_dataset_to_yolo, scan_dataset_statistics, build_plan, load_yaml_classes,
 )
 
 FATE_LABELS = [
@@ -104,9 +104,15 @@ class VideoToYoloWorker(QThread):
                 crop_size=self.params.get("crop_size", (640, 640)),
                 min_crop_size=self.params.get("min_crop_size", (320, 320)),
                 max_crops_per_frame=self.params.get("max_crops_per_frame", 3),
-                min_visibility=self.params.get("min_visibility", 0.4),
+                max_bg_crops_per_frame=self.params.get("max_bg_crops_per_frame", 1),
+                min_visibility=self.params.get("min_visibility", 0.7),
                 context_padding=self.params.get("context_padding", 0.2),
                 overlap_iou_threshold=self.params.get("overlap_iou_threshold", 0.5),
+                square_crops=self.params.get("square_crops", False),
+                default_size_crop_chance=self.params.get("default_size_crop_chance", 0.3),
+                wide_position=self.params.get("wide_position", True),
+                include_default_frame=self.params.get("include_default_frame", True),
+                default_frame_chance=self.params.get("default_frame_chance", 1.0),
                 max_instances_per_class=self.params.get("max_instances_per_class"),
                 balance_mode=self.params.get("balance_mode", "none"),
                 classes_in_balance=self.params.get("classes_in_balance"),
@@ -149,6 +155,7 @@ class VideoToYoloDialog(QDialog):
         self.scan_worker = None
         self.preview_worker = None
         self.last_scan = None  # cached scan_dataset_statistics() result
+        self.yaml_global_classes = []  # class names loaded from the existing data.yaml, if any
 
         self._init_ui(default_source_dir)
 
@@ -289,10 +296,22 @@ class VideoToYoloDialog(QDialog):
         self.table_classes.setHorizontalHeaderLabels(
             ["Class", "Instances", "Frames", "Fate", "Map to (rename)", "Balance", "Manual cap"]
         )
-        self.table_classes.horizontalHeader().setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
-        self.table_classes.horizontalHeader().setSectionResizeMode(self.COL_TARGET, QHeaderView.Stretch)
+        self.table_classes.verticalHeader().setVisible(False)
         self.table_classes.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_classes.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # Columns that hold free-form text (class/target names) grow with the
+        # dialog; columns that hold a fixed-size widget (combo/checkbox/spin
+        # box) size to that widget instead of being left at an arbitrary
+        # one-time width, so the table keeps scaling sensibly as the dialog
+        # is resized rather than clipping or leaving dead space.
+        header = self.table_classes.horizontalHeader()
+        header.setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.COL_INSTANCES, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_FRAMES, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_FATE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_TARGET, QHeaderView.Stretch)
+        header.setSectionResizeMode(self.COL_BALANCE, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(self.COL_CAP, QHeaderView.ResizeToContents)
         layout.addWidget(self.table_classes)
 
         legend = QLabel(
@@ -344,19 +363,31 @@ class VideoToYoloDialog(QDialog):
         self.spin_min_crop_h.setValue(320)
         crop_grid.addWidget(self.spin_min_crop_h, 2, 3)
 
-        crop_grid.addWidget(QLabel("Max Crops per Frame:"), 3, 0)
+        crop_grid.addWidget(QLabel("Max Object Crops per Frame:"), 3, 0)
         self.spin_max_crops = QSpinBox()
         self.spin_max_crops.setRange(1, 20)
         self.spin_max_crops.setValue(3)
-        self.spin_max_crops.setToolTip("When there are more object clusters than this, the smallest/rarest ones are kept first")
+        self.spin_max_crops.setToolTip(
+            "Crops taken from a frame that HAS object(s) in it. With few/small object clusters, budget left "
+            "over after one crop per cluster is used for extra varied crops of the same cluster(s) instead of "
+            "going unused - so even a single isolated object can yield several different crops of it. Set "
+            "separately from Max Background Crops below, since an empty tile has no object diversity to gain "
+            "from taking as many of them as a busy foreground frame."
+        )
         crop_grid.addWidget(self.spin_max_crops, 3, 1)
 
         crop_grid.addWidget(QLabel("Min Visibility Ratio:"), 3, 2)
         self.spin_min_vis = QDoubleSpinBox()
         self.spin_min_vis.setRange(0.05, 1.0)
         self.spin_min_vis.setSingleStep(0.05)
-        self.spin_min_vis.setValue(0.40)
-        self.spin_min_vis.setToolTip("Keep bounding boxes that have at least this fraction inside the crop")
+        self.spin_min_vis.setValue(0.70)
+        self.spin_min_vis.setToolTip(
+            "Keep a box only if at least this fraction of it survives the crop; also the bar used to "
+            "decide a crop is \"clean\" (see below). Set high - a box may already be a labeled sliver "
+            "of an object that's mostly hidden behind something unlabeled, and cropping it further "
+            "compounds that, e.g. an already-30%-visible object cropped down to 40% of its box leaves "
+            "only ~12% of the real object standing in for the whole class."
+        )
         crop_grid.addWidget(self.spin_min_vis, 3, 3)
 
         crop_grid.addWidget(QLabel("Context Padding:"), 4, 0)
@@ -373,6 +404,67 @@ class VideoToYoloDialog(QDialog):
         self.spin_overlap.setValue(0.50)
         self.spin_overlap.setToolTip("Crops that overlap an already-chosen crop by more than this are skipped as near-duplicates")
         crop_grid.addWidget(self.spin_overlap, 4, 3)
+
+        self.chk_square_crops = QCheckBox("Force Square Crops")
+        self.chk_square_crops.setToolTip(
+            "Crop windows are square (side = the larger of width/height, clamped to the min/max crop "
+            "size) instead of an arbitrary rectangle"
+        )
+        self.chk_square_crops.setChecked(False)
+        crop_grid.addWidget(self.chk_square_crops, 5, 0, 1, 2)
+
+        self.chk_wide_position = QCheckBox("Vary Object Position in Crop")
+        self.chk_wide_position.setToolTip(
+            "Let the object land anywhere in the crop (not just near-center) as long as it stays fully "
+            "visible - how far it can actually move is naturally limited by how much smaller the object "
+            "is than the crop and by the frame's edges. When another object is nearby, only a position "
+            "that leaves it either cleanly included or cleanly excluded is accepted - never half-cut; if "
+            "no such clean position exists, that crop is skipped rather than truncating anything (the "
+            "object stays fully labeled in the whole-frame \"_df\" image instead)."
+        )
+        self.chk_wide_position.setChecked(True)
+        crop_grid.addWidget(self.chk_wide_position, 6, 0, 1, 4)
+
+        crop_grid.addWidget(QLabel("Default-Size Crop Chance:"), 5, 2)
+        self.spin_default_size_chance = QDoubleSpinBox()
+        self.spin_default_size_chance.setRange(0.0, 1.0)
+        self.spin_default_size_chance.setSingleStep(0.05)
+        self.spin_default_size_chance.setValue(0.30)
+        self.spin_default_size_chance.setToolTip(
+            "Chance that a given object-focused crop uses the fixed max crop size instead of shrinking "
+            "to hug the object cluster, so the object crops themselves mix tightly-zoomed and "
+            "default-context sizes"
+        )
+        crop_grid.addWidget(self.spin_default_size_chance, 5, 3)
+
+        self.chk_default_frame = QCheckBox("Also Save Whole Frame (\"_df\")")
+        self.chk_default_frame.setToolTip(
+            "Alongside the object-focused crop(s) (\"_c0\", \"_c1\", ...), also save one extra image of "
+            "the whole frame with all its labels - suffixed \"_df\" - so the model also sees full-scene "
+            "context, not only zoomed-in sub-crops. Only applies when a frame is actually being smart-"
+            "cropped; a frame that already fits the crop size is the default view already."
+        )
+        self.chk_default_frame.setChecked(True)
+        crop_grid.addWidget(self.chk_default_frame, 7, 0, 1, 2)
+
+        crop_grid.addWidget(QLabel("Whole-Frame Chance %:"), 7, 2)
+        self.spin_default_frame_chance = QDoubleSpinBox()
+        self.spin_default_frame_chance.setRange(0, 100)
+        self.spin_default_frame_chance.setSingleStep(5)
+        self.spin_default_frame_chance.setValue(100)
+        self.spin_default_frame_chance.setToolTip("How often the extra whole-frame \"_df\" image is added (100% = almost always)")
+        crop_grid.addWidget(self.spin_default_frame_chance, 7, 3)
+
+        crop_grid.addWidget(QLabel("Max Background Crops per Frame:"), 8, 0)
+        self.spin_max_bg_crops = QSpinBox()
+        self.spin_max_bg_crops.setRange(1, 20)
+        self.spin_max_bg_crops.setValue(1)
+        self.spin_max_bg_crops.setToolTip(
+            "Crops taken from a frame that has NO objects in it (empty/background). Kept separate and "
+            "usually much lower than Max Object Crops above - an empty tile is just filler diversity, not "
+            "worth multiplying the way a busy object frame is."
+        )
+        crop_grid.addWidget(self.spin_max_bg_crops, 8, 1)
 
         crop_layout.addWidget(crop_group)
         crop_layout.addStretch()
@@ -523,7 +615,22 @@ class VideoToYoloDialog(QDialog):
         self.last_scan = stats
         n_videos = stats.get("total_videos", 0)
         n_classes = len(stats.get("classes", {}))
-        self.lbl_scan_status.setText(f"Found {n_classes} class(es) across {n_videos} video(s).")
+
+        # Load the *existing* yaml class list directly (not stats["global_names"],
+        # which already has classes auto-created from unmatched local names mixed
+        # in) so the "Map to" picker offers exactly what's already in the yaml.
+        yaml_path = self.edit_yaml.text().strip()
+        self.yaml_global_classes = []
+        if yaml_path and os.path.isfile(yaml_path):
+            try:
+                self.yaml_global_classes, _ = load_yaml_classes(Path(yaml_path))
+            except Exception:
+                self.yaml_global_classes = []
+
+        status = f"Found {n_classes} class(es) across {n_videos} video(s)."
+        if yaml_path:
+            status += f" {len(self.yaml_global_classes)} existing class(es) loaded from yaml."
+        self.lbl_scan_status.setText(status)
         self._populate_class_table(stats)
         self._populate_mismatches(stats)
 
@@ -544,15 +651,68 @@ class VideoToYoloDialog(QDialog):
             self.table_classes.setItem(row, self.COL_INSTANCES, QTableWidgetItem(str(info["instance_count"])))
             self.table_classes.setItem(row, self.COL_FRAMES, QTableWidgetItem(str(info["frame_count"])))
 
+            # A local class only defaults to "map" when it actually matches an
+            # existing yaml class by name. Anything else defaults to "skip"
+            # (ignored) instead of silently being queued up to create a new
+            # same-named class - creating a class is something the user has to
+            # opt into per row, not something that happens by default.
+            matched_yaml_name = next(
+                (n for n in self.yaml_global_classes if n.strip().lower() == cname.strip().lower()),
+                None,
+            )
+            # "Ignore by default when it's not in the yaml" only makes sense
+            # when there IS a yaml to check against. With no yaml loaded at
+            # all, there's nothing for a class to fail to match, so every
+            # class defaults to Map (create it) same as before - otherwise
+            # running without a yaml would silently skip every single class.
+            has_yaml = bool(self.yaml_global_classes)
+            default_fate = "map" if (matched_yaml_name or not has_yaml) else "skip"
+
             fate_combo = QComboBox()
             for key, label in FATE_LABELS:
                 fate_combo.addItem(label, key)
-            fate_combo.setCurrentIndex(FATE_KEYS.index(info.get("fate", "map")))
-            self.table_classes.setCellWidget(row, self.COL_FATE, fate_combo)
+            fate_combo.setCurrentIndex(FATE_KEYS.index(default_fate))
 
-            target_edit = QLineEdit(info.get("resolved_to", cname) or cname)
-            target_edit.setToolTip("Global class name this local class writes its boxes as (leave as-is to keep its own name)")
-            self.table_classes.setCellWidget(row, self.COL_TARGET, target_edit)
+            target_combo = QComboBox()
+            target_combo.setEditable(True)
+            # Offer every class already defined in the yaml so the user can map
+            # a differently-named local class (e.g. "human") onto an existing
+            # global one (e.g. "person") instead of only ever matching by exact
+            # name or silently creating a brand-new class.
+            existing_options = sorted({*self.yaml_global_classes, cname})
+            target_combo.addItems(existing_options)
+            if matched_yaml_name:
+                target_combo.setCurrentText(matched_yaml_name)
+                target_combo.setEnabled(True)
+                target_combo.setToolTip(
+                    "Global class this local class's boxes are written as. Pick an existing yaml class to "
+                    "merge into it, or type a new name to create one."
+                )
+            elif not has_yaml:
+                target_combo.setCurrentText(cname)
+                target_combo.setEnabled(True)
+                target_combo.setToolTip(
+                    "No data.yaml loaded, so there's nothing to merge into yet - this will be created as a "
+                    "new class. Load a data.yaml on the General tab first if you meant to merge into one."
+                )
+            else:
+                target_combo.setCurrentIndex(-1)
+                target_combo.lineEdit().setPlaceholderText("IGNORE — not in yaml")
+                target_combo.setEnabled(False)
+                target_combo.setToolTip(
+                    "No matching class found in the loaded data.yaml, so this class is ignored by default. "
+                    "Switch Fate to \"Map\" and pick/type a target here to include it instead."
+                )
+            self.table_classes.setCellWidget(row, self.COL_TARGET, target_combo)
+
+            def _on_fate_changed(_index, _fate_combo=fate_combo, _target_combo=target_combo, _cname=cname, _matched=matched_yaml_name):
+                is_map = _fate_combo.currentData() == "map"
+                _target_combo.setEnabled(is_map)
+                if is_map and _target_combo.currentIndex() == -1 and not _target_combo.currentText().strip():
+                    _target_combo.setCurrentText(_matched or _cname)
+
+            fate_combo.currentIndexChanged.connect(_on_fate_changed)
+            self.table_classes.setCellWidget(row, self.COL_FATE, fate_combo)
 
             balance_chk = QCheckBox()
             balance_chk.setChecked(True)
@@ -564,10 +724,6 @@ class VideoToYoloDialog(QDialog):
             cap_spin.setValue(0)
             cap_spin.setToolTip("Manual instance cap for this class (0 = uncapped). Used when Balance Mode = Manual.")
             self.table_classes.setCellWidget(row, self.COL_CAP, cap_spin)
-
-        self.table_classes.resizeColumnsToContents()
-        self.table_classes.horizontalHeader().setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
-        self.table_classes.horizontalHeader().setSectionResizeMode(self.COL_TARGET, QHeaderView.Stretch)
 
     def _populate_mismatches(self, stats: dict):
         mismatches = stats.get("mismatches", [])
@@ -599,8 +755,8 @@ class VideoToYoloDialog(QDialog):
             fate_combo = self.table_classes.cellWidget(row, self.COL_FATE)
             fate_key = fate_combo.currentData() if fate_combo else "map"
 
-            target_edit = self.table_classes.cellWidget(row, self.COL_TARGET)
-            target = (target_edit.text().strip() if target_edit else "") or cname
+            target_combo = self.table_classes.cellWidget(row, self.COL_TARGET)
+            target = (target_combo.currentText().strip() if target_combo else "") or cname
 
             balance_chk = self.table_classes.cellWidget(row, self.COL_BALANCE)
             is_balanced = balance_chk.isChecked() if balance_chk else True
@@ -703,9 +859,15 @@ class VideoToYoloDialog(QDialog):
             "crop_size": (self.spin_crop_w.value(), self.spin_crop_h.value()),
             "min_crop_size": (self.spin_min_crop_w.value(), self.spin_min_crop_h.value()),
             "max_crops_per_frame": self.spin_max_crops.value(),
+            "max_bg_crops_per_frame": self.spin_max_bg_crops.value(),
             "min_visibility": self.spin_min_vis.value(),
             "context_padding": self.spin_context_pad.value(),
             "overlap_iou_threshold": self.spin_overlap.value(),
+            "square_crops": self.chk_square_crops.isChecked(),
+            "default_size_crop_chance": self.spin_default_size_chance.value(),
+            "wide_position": self.chk_wide_position.isChecked(),
+            "include_default_frame": self.chk_default_frame.isChecked(),
+            "default_frame_chance": self.spin_default_frame_chance.value() / 100.0,
             "enable_dedup": self.chk_dedup.isChecked(),
             "dedup_hamming_threshold": self.spin_dedup_thresh.value(),
             "flip_augment_percent": self.spin_flip.value(),

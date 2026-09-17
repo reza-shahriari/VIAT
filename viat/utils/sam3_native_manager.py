@@ -40,6 +40,19 @@ class Sam3NativeManager:
     def is_available(self):
         return check_sam3()
 
+    def _get_device(self):
+        """
+        Returns the torch device the underlying SAM3 model lives on.
+        The vendored SAM3 predictor unconditionally calls `.cuda()` on its model, but
+        prompt tensors we build ourselves default to CPU, which crashes the Triton NMS
+        kernel with a device mismatch. Query the real device instead of assuming.
+        """
+        import torch
+        try:
+            return next(self.video_predictor.model.parameters()).device
+        except Exception:
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     def load_model(self, model_type="sam3.1_l.pt"):
         """
         Loads the SAM3 model.
@@ -108,6 +121,14 @@ class Sam3NativeManager:
         import torch
         import numpy as np
         
+        # Other VIAT managers (e.g. zero_shot_manager's HF `device_map="auto"` loads) can
+        # reset torch's ambient "current device" out from under us at any point. SAM3's
+        # Triton kernels launch on whatever the current device is *at call time*, not on
+        # the device the model weights actually live on, so a stale current device here
+        # makes Triton try to access pointers from the wrong GPU and crash with
+        # "Pointer argument ... cannot be accessed from Triton". Re-pin every call.
+        torch.cuda.set_device(self._get_device())
+
         # Hash image to see if it's new
         img_bytes = image_array.tobytes()
         img_hash = hashlib.md5(img_bytes).hexdigest()
@@ -130,7 +151,11 @@ class Sam3NativeManager:
             cv2.imwrite(img_path, cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR))
             self.current_img_hash = img_hash
 
-        res = self.video_predictor.handle_request({"type": "start_session", "resource_path": self.temp_dir, "offload_video_to_cpu": True})
+        # This session only ever holds a single image, so there's no VRAM pressure to
+        # justify offloading frames to CPU -- and doing so anyway leaves the box/NMS
+        # grounding path operating on a mix of CPU and CUDA tensors, which crashes the
+        # Triton NMS kernel with "Pointer argument ... cannot be accessed from Triton".
+        res = self.video_predictor.handle_request({"type": "start_session", "resource_path": self.temp_dir, "offload_video_to_cpu": False})
         self.current_session_id = res["session_id"]
         self.current_box = box_tuple
         self.current_text_prompt = text_prompt
@@ -141,6 +166,8 @@ class Sam3NativeManager:
         has_box = box is not None and not has_points
         has_text = bool(text_prompt) and not has_points
 
+        device = self._get_device()
+
         if has_points:
             rel_points = [[p[0] / IMG_WIDTH, p[1] / IMG_HEIGHT] for p in points]
             prompt_req = {
@@ -148,8 +175,8 @@ class Sam3NativeManager:
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "points": torch.tensor(rel_points, dtype=torch.float32),
-                "point_labels": torch.tensor(labels, dtype=torch.int32),
+                "points": torch.tensor(rel_points, dtype=torch.float32, device=device),
+                "point_labels": torch.tensor(labels, dtype=torch.int32, device=device),
             }
             print(f"[SAM3 Debug] Sending request with keys: {list(prompt_req.keys())}")
             print(f"[SAM3 Debug] Points prompt count: {len(rel_points)}")
@@ -164,8 +191,8 @@ class Sam3NativeManager:
                 "session_id": self.current_session_id,
                 "frame_index": 0,
                 "obj_id": 1,
-                "bounding_boxes": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                "bounding_box_labels": torch.tensor([1], dtype=torch.int32),
+                "bounding_boxes": torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32, device=device),
+                "bounding_box_labels": torch.tensor([1], dtype=torch.int32, device=device),
                 "output_prob_thresh": 0.1,
             }
             if text_prompt:
@@ -298,11 +325,15 @@ class Sam3NativeManager:
         Yields (success_bool, {"polygons": [...], "boxes": [...]}) for each frame.
         """
         import torch
-        
+
         if not self.video_predictor:
             yield False, "SAM3 Video Predictor not loaded."
             return
-            
+
+        # See the comment in predict_mask_from_prompt: re-pin the ambient CUDA device
+        # before every call, since other VIAT managers can silently reset it.
+        torch.cuda.set_device(self._get_device())
+
         # Close any active preview session to free VRAM and clear state variables
         if self.current_session_id is not None:
             try:
@@ -351,6 +382,8 @@ class Sam3NativeManager:
                     if img is not None:
                         H, W = img.shape[:2]
 
+            device = self._get_device()
+
             if points and labels and len(points) > 0:
                 pts_rel = abs_to_rel_coords(np.array(points), W, H, coord_type="point")
                 prompt_req = dict(
@@ -358,8 +391,8 @@ class Sam3NativeManager:
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    points=torch.tensor(pts_rel, dtype=torch.float32),
-                    point_labels=torch.tensor(labels, dtype=torch.int32),
+                    points=torch.tensor(pts_rel, dtype=torch.float32, device=device),
+                    point_labels=torch.tensor(labels, dtype=torch.int32, device=device),
                 )
             elif box:
                 x1n = max(0.0, min(1.0, box[0] / W))
@@ -371,8 +404,8 @@ class Sam3NativeManager:
                     session_id=session_id,
                     frame_index=start_f,
                     obj_id=obj_id,
-                    bounding_boxes=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32),
-                    bounding_box_labels=torch.tensor([1], dtype=torch.int32),
+                    bounding_boxes=torch.tensor([[x1n, y1n, wn, hn]], dtype=torch.float32, device=device),
+                    bounding_box_labels=torch.tensor([1], dtype=torch.int32, device=device),
                     output_prob_thresh=0.1,
                 )
                 if text_prompt:

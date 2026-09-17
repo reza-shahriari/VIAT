@@ -1657,14 +1657,16 @@ class VideoCanvas(QWidget):
                     # Get current frame from main window
                     if self.main_window and hasattr(self.main_window, "cap"):
                         # Get current frame
-                        ret, frame = self.main_window.cap.read()
+                        with self.main_window._cap_lock:
+                            ret, frame = self.main_window.cap.read()
+                            if ret:
+                                # Move back one frame to get the current frame again
+                                self.main_window.cap.set(
+                                    cv2.CAP_PROP_POS_FRAMES, self.main_window.current_frame
+                                )
                         if ret:
                             if hasattr(self.main_window, '_process_frame_metadata'):
                                 frame = self.main_window._process_frame_metadata(frame, self.main_window.current_frame)
-                            # Move back one frame to get the current frame again
-                            self.main_window.cap.set(
-                                cv2.CAP_PROP_POS_FRAMES, self.main_window.current_frame
-                            )
 
                             # Map edge type to smart_edge format
                             edge_type_map = {

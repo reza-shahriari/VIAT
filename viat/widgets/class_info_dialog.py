@@ -85,52 +85,60 @@ class ClassInfoDialog(QDialog):
             
         # Limit to prevent UI freezing on massive datasets
         max_thumbnails = min(len(self.frames_with_class), 100)
-        
-        for i in range(max_thumbnails):
-            frame_idx = self.frames_with_class[i]
-            frame_img = None
-            
-            # Fetch frame from image dataset
-            if getattr(self.main_window, "is_image_dataset", False) and getattr(self.main_window, "image_files", None):
-                if frame_idx < len(self.main_window.image_files):
-                    img_path = self.main_window.image_files[frame_idx]
-                    frame_img = cv2.imread(img_path)
-            # Fetch frame from video
-            elif self.main_window.cap and self.main_window.cap.isOpened():
-                self.main_window.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame_img = self.main_window.cap.read()
-                if ret and frame_img is not None:
-                    if hasattr(self.main_window, '_process_frame_metadata'):
-                        frame_img = self.main_window._process_frame_metadata(frame_img, frame_idx)
-            
-            if frame_img is not None:
-                # Use the create_thumbnail tool function
-                thumb_rgb = create_thumbnail(frame_img, (160, 90))
-                h, w, c = thumb_rgb.shape
-                qimg = QImage(thumb_rgb.data, w, h, w * c, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(qimg)
-                
-                # Create item
-                item = QListWidgetItem(self.thumbnail_list)
-                item.setIcon(QIcon(pixmap))
-                
-                # Label item with image name or frame number
-                if getattr(self.main_window, "is_image_dataset", False):
-                    import os
-                    basename = os.path.basename(self.main_window.image_files[frame_idx])
-                    # truncate if too long
-                    if len(basename) > 15:
-                        basename = basename[:12] + "..."
-                    item.setText(f"{frame_idx}: {basename}")
-                else:
-                    item.setText(f"Frame {frame_idx}")
-                    
-                # Store frame index in user data
-                item.setData(Qt.UserRole, frame_idx)
-                
-            # Keep UI responsive
-            QApplication.processEvents()
-            
+
+        cap_lock = getattr(self.main_window, '_cap_lock', None)
+        if cap_lock is not None:
+            self.main_window._video_batch_busy = True
+        try:
+            for i in range(max_thumbnails):
+                frame_idx = self.frames_with_class[i]
+                frame_img = None
+
+                # Fetch frame from image dataset
+                if getattr(self.main_window, "is_image_dataset", False) and getattr(self.main_window, "image_files", None):
+                    if frame_idx < len(self.main_window.image_files):
+                        img_path = self.main_window.image_files[frame_idx]
+                        frame_img = cv2.imread(img_path)
+                # Fetch frame from video
+                elif self.main_window.cap and self.main_window.cap.isOpened():
+                    with cap_lock:
+                        self.main_window.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, frame_img = self.main_window.cap.read()
+                    if ret and frame_img is not None:
+                        if hasattr(self.main_window, '_process_frame_metadata'):
+                            frame_img = self.main_window._process_frame_metadata(frame_img, frame_idx)
+
+                if frame_img is not None:
+                    # Use the create_thumbnail tool function
+                    thumb_rgb = create_thumbnail(frame_img, (160, 90))
+                    h, w, c = thumb_rgb.shape
+                    qimg = QImage(thumb_rgb.data, w, h, w * c, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qimg)
+
+                    # Create item
+                    item = QListWidgetItem(self.thumbnail_list)
+                    item.setIcon(QIcon(pixmap))
+
+                    # Label item with image name or frame number
+                    if getattr(self.main_window, "is_image_dataset", False):
+                        import os
+                        basename = os.path.basename(self.main_window.image_files[frame_idx])
+                        # truncate if too long
+                        if len(basename) > 15:
+                            basename = basename[:12] + "..."
+                        item.setText(f"{frame_idx}: {basename}")
+                    else:
+                        item.setText(f"Frame {frame_idx}")
+
+                    # Store frame index in user data
+                    item.setData(Qt.UserRole, frame_idx)
+
+                # Keep UI responsive
+                QApplication.processEvents()
+        finally:
+            if cap_lock is not None:
+                self.main_window._video_batch_busy = False
+
         if len(self.frames_with_class) > max_thumbnails:
             msg = QListWidgetItem(self.thumbnail_list)
             msg.setText(f"...and {len(self.frames_with_class) - max_thumbnails} more")

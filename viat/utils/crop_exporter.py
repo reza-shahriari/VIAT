@@ -52,7 +52,7 @@ class CropExporter:
         
         if format_type == "mp4":
             mp4_path = os.path.join(output_dir, f"{video_basename}_cropped.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
             writer = cv2.VideoWriter(mp4_path, fourcc, fps, (crop_w, crop_h))
         else:
             images_dir = os.path.join(output_dir, f"{video_basename}_cropped_images")

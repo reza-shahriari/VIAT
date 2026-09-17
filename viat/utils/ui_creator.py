@@ -36,6 +36,7 @@ from viat.widgets.video_manager_dock import VideoManagerDock
 from viat.widgets.crop_settings_dock import CropSettingsDock
 from viat.widgets.clip_cuts_dock import ClipCutsDock
 from viat.widgets.evaluation_inspector_dock import EvaluationInspectorDock
+from viat.utils import gpu_utils
 
 
 
@@ -152,6 +153,11 @@ class UICreator:
         self.main_window.update_dataset_labels_action = update_dataset_labels_action
         self.main_window.update_dataset_labels_action.setEnabled(False)
         file_menu.addAction(update_dataset_labels_action)
+
+        file_menu.addSeparator()
+
+        # GPU Device submenu (which GPU AI backends should use)
+        self.create_gpu_menu(file_menu)
 
         file_menu.addSeparator()
 
@@ -1088,6 +1094,56 @@ class UICreator:
             )
             speed_group.addAction(action)
             slideshow_menu.addAction(action)
+
+    def create_gpu_menu(self, menubar):
+        """Create the GPU Device submenu, listing available GPUs by name with live VRAM usage.
+
+        Picking one only saves a preference for the *next* launch (see
+        gpu_utils.py for why a live switch isn't possible), so the menu also
+        shows which GPU this running session actually initialized.
+        """
+        gpu_menu = menubar.addMenu("GPU Device")
+
+        def refresh_gpu_menu():
+            gpu_menu.clear()
+            gpus = gpu_utils.list_gpus()
+            if not gpus:
+                no_gpu_action = QAction("No NVIDIA GPU detected (using CPU)", self.main_window)
+                no_gpu_action.setEnabled(False)
+                gpu_menu.addAction(no_gpu_action)
+                return
+
+            active_name = gpu_utils.get_active_gpu_name()
+            active_action = QAction(
+                f"Active this session: {active_name or 'CPU'}", self.main_window
+            )
+            active_action.setEnabled(False)
+            gpu_menu.addAction(active_action)
+            gpu_menu.addSeparator()
+
+            current_index = gpu_utils.get_saved_gpu_index()
+            if current_index is None:
+                current_index = 0
+
+            gpu_action_group = QActionGroup(self.main_window)
+            gpu_action_group.setExclusive(True)
+            for gpu in gpus:
+                label = f"{gpu['index']}: {gpu['name']}"
+                if gpu['total_gb'] is not None:
+                    used_gb = gpu['total_gb'] - gpu['free_gb']
+                    label += f"  ({used_gb:.1f}/{gpu['total_gb']:.1f} GB used)"
+                action = QAction(label, self.main_window, checkable=True)
+                action.setChecked(gpu['index'] == current_index)
+                action.triggered.connect(
+                    lambda checked, idx=gpu['index']: self.main_window.change_gpu_device(idx)
+                )
+                gpu_action_group.addAction(action)
+                gpu_menu.addAction(action)
+            # Keep the group alive as long as the menu (Qt parents it to main_window).
+            gpu_menu._gpu_action_group = gpu_action_group
+
+        gpu_menu.aboutToShow.connect(refresh_gpu_menu)
+        refresh_gpu_menu()
 
     def create_interpolation_ui(self,):
         """

@@ -173,6 +173,10 @@ def detect_folder_type(folder_path: str) -> str:
 
 def scan_dataset(folder_path: str) -> DatasetInfo:
     """Fully scan a dataset folder and return a :class:`DatasetInfo`."""
+    import time
+    from ..logger import logger
+
+    t0 = time.time()
     info = DatasetInfo(root=folder_path, layout="simple", splits=[])
 
     # 1. Class names (resolve early so we can warn about conflicts)
@@ -182,9 +186,11 @@ def scan_dataset(folder_path: str) -> DatasetInfo:
     _detect_layout_and_splits(info)
 
     # 3. For each split, collect images + detect label format
+    t_list = time.time()
     for split in info.splits:
         split.images = _list_images(split.image_dir)
         split.label_format, _ = _detect_label_format_for_split(split, info)
+    t_list_done = time.time()
 
     # 4. Global default format (from splits, majority vote)
     fmt_votes: Dict[str, int] = {}
@@ -199,6 +205,14 @@ def scan_dataset(folder_path: str) -> DatasetInfo:
         from .label_formats.visdrone import VISDRONE_CLASSES
         info.classes = list(VISDRONE_CLASSES)
         info.classes_source = "visdrone"
+
+    logger.info(
+        f"scan_dataset({folder_path}): {info.image_count} images, "
+        f"{len(info.splits)} split(s), layout={info.layout} -- "
+        f"layout/class detection {t_list - t0:.2f}s, "
+        f"per-split listdir+format-sniff {t_list_done - t_list:.2f}s, "
+        f"total {time.time() - t0:.2f}s (this all runs on the UI thread)"
+    )
 
     return info
 
@@ -217,49 +231,62 @@ class DatasetLoaderThread(QThread):
 
     def run(self):
         import os
+        import time
+        from ..logger import logger
         from .label_formats import get_format, LabelParseError
 
+        t_run_start = time.time()
         warnings = []
         per_split = {}
-        
+
         # Batching setup
         batch_size = 100
         current_img_batch = []
         current_split_batch = []
         current_boxes_batch = {}
-        
+
         total_index = 0
 
         # Collect all images across target splits and sort by filename
         all_images_with_info = []
         split_formats = {}
-        
+
         for split in self.info.splits:
             if split.name not in self.target_splits:
                 continue
-                
+
             fmt = get_format(split.label_format or self.info.label_format or "yolo")
             if fmt is None:
                 warnings.append(f"Split {split.name}: unknown format, skipped.")
                 continue
             split_formats[split.name] = fmt
-            
+
             for img_path in split.images:
                 all_images_with_info.append((img_path, split))
 
         # Sort by basename
         all_images_with_info.sort(key=lambda x: os.path.basename(x[0]))
+        t_sorted = time.time()
+
+        # Cumulative time spent in each per-image sub-step, to find the real
+        # hot spot on large (100k+) datasets without guessing.
+        size_time = 0.0
+        find_label_time = 0.0
+        load_label_time = 0.0
 
         for img_path, split in all_images_with_info:
             if self.is_cancelled:
                 break
-                
+
             fmt = split_formats[split.name]
             current_img_batch.append(img_path)
             current_split_batch.append(split.name)
             per_split[split.name] = per_split.get(split.name, 0) + 1
 
+            t1 = time.perf_counter()
             img_size = _image_size(img_path)
+            t2 = time.perf_counter()
+            size_time += t2 - t1
             if img_size is None:
                 warnings.append(f"Could not read size: {os.path.basename(img_path)}")
                 current_boxes_batch[total_index] = []
@@ -271,6 +298,8 @@ class DatasetLoaderThread(QThread):
             except Exception as e:
                 warnings.append(f"{os.path.basename(img_path)}: {e}")
                 label_path = None
+            t3 = time.perf_counter()
+            find_label_time += t3 - t2
 
             boxes = []
             if label_path:
@@ -278,7 +307,8 @@ class DatasetLoaderThread(QThread):
                     boxes = fmt.load(label_path, img_size, self.info.classes)
                 except LabelParseError as e:
                     warnings.append(str(e))
-            
+            load_label_time += time.perf_counter() - t3
+
             current_boxes_batch[total_index] = boxes or []
             total_index += 1
 
@@ -292,6 +322,18 @@ class DatasetLoaderThread(QThread):
         # Emit remaining batch
         if current_img_batch and not self.is_cancelled:
             self.batchLoaded.emit(current_img_batch, current_split_batch, current_boxes_batch)
+
+        t_done = time.time()
+        logger.info(
+            f"DatasetLoaderThread: {total_index} images processed "
+            f"({'cancelled, ' if self.is_cancelled else ''}"
+            f"collect+sort {t_sorted - t_run_start:.2f}s, "
+            f"per-image loop {t_done - t_sorted:.2f}s "
+            f"[_image_size {size_time:.2f}s, find_label_file {find_label_time:.2f}s, "
+            f"label load {load_label_time:.2f}s], "
+            f"total {t_done - t_run_start:.2f}s, "
+            f"{total_index / max(t_done - t_sorted, 1e-6):.0f} images/sec)"
+        )
 
         if not self.is_cancelled:
             self.finishedLoading.emit({
@@ -658,23 +700,27 @@ def _parse_classes_txt(root: str) -> Optional[List[str]]:
 
 def _detect_layout_and_splits(info: DatasetInfo) -> None:
     root = info.root
+    # Only directories matter for layout detection, and a dataset root can
+    # contain hundreds of thousands of image files alongside a handful of
+    # subfolders. os.scandir()'s DirEntry.is_dir() reads the type cached by
+    # the OS's readdir() call (no extra stat() syscall on most filesystems),
+    # unlike os.listdir() + os.path.isdir() which stats every single entry.
     try:
-        entries = set(os.listdir(root))
+        with os.scandir(root) as it:
+            dir_entries = [e for e in it if e.is_dir(follow_symlinks=False)]
     except OSError:
-        entries = set()
-    lower = {e.lower() for e in entries}
+        dir_entries = []
+
+    lower = {e.name.lower() for e in dir_entries}
 
     # Case 1: explicit train/valid/test subfolders or named splits (e.g. VisDrone2019-DET-train)
     split_dirs = []
-    for e in entries:
-        sp = os.path.join(root, e)
-        if not os.path.isdir(sp):
-            continue
-        elower = e.lower()
+    for e in dir_entries:
+        elower = e.name.lower()
         if elower in ("train", "valid", "val", "test", "validation") or any(
             k in elower for k in ("-train", "_train", "-val", "_val", "-test", "_test", "-dev", "_dev")
         ):
-            split_dirs.append(sp)
+            split_dirs.append(e.path)
 
     if split_dirs:
         # Determine per-split layout (mixed or images/labels/annotations)
@@ -808,12 +854,18 @@ def _detect_label_format_for_split(split: SplitInfo, info: DatasetInfo) -> Tuple
 
 
 def _image_size(path: str) -> Optional[Tuple[int, int]]:
-    """Return (width, height) without loading the full image when possible."""
+    """Return (width, height) by reading only the image header, without decoding pixels."""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            return img.size
+    except Exception:
+        pass
+
     try:
         import cv2
 
-        # imread with reduced load is faster but still decodes; fall back to
-        # full read if needed.
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if img is None:
             return None
@@ -1269,7 +1321,7 @@ def export_raya_video_dataset(config, image_files, frame_annotations, class_colo
         return "Error: Could not determine video resolution."
 
     # 2. Setup video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out_video = cv2.VideoWriter(video_path, fourcc, 30.0, (video_width, video_height))
     
     original_sizes = {}

@@ -155,7 +155,7 @@ class Evaluate():
                                 if os.path.exists(os.path.join(txt_path,name+ext.strip('*'))):
                                     video = cv2.VideoCapture(os.path.join(txt_path,name+ext.strip('*')))
                                     fps:int = int(video.get(5))
-                                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
                                     factor:int = 1
                                     out_FP = cv2.VideoWriter(os.path.join(dets_txt_path,'visualize',name+'_FP.mp4'), fourcc, fps, (int(video.get(3)),int(video.get(4))))
                                     out_FN = cv2.VideoWriter(os.path.join(dets_txt_path,'visualize',name+'_FN.mp4'), fourcc, fps, (int(video.get(3)),int(video.get(4))))
