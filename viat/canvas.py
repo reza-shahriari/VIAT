@@ -1637,16 +1637,16 @@ class VideoCanvas(QWidget):
 
         # If we're moving an edge
         if self.edge_moving and self.selected_annotation:
-            # Get the current display rect
-            display_rect = self.image_to_display_rect(self.original_rect)
-
-            # Move the edge in display coordinates
-            new_display_rect = self.move_edge(
-                display_rect, self.active_edge, event.pos(), self.edge_start_pos
+            # Move the edge directly in image coordinates. Converting the rect to
+            # display pixels and back (as before) round-trips through int()
+            # truncation on both ends, which isn't an exact inverse and lets the
+            # edges that shouldn't move drift by a pixel or two - very visible on
+            # small objects. Working in image space keeps the untouched edges exact.
+            start_img_pos = self.display_to_image_pos(self.edge_start_pos)
+            cur_img_pos = self.display_to_image_pos(event.pos())
+            new_img_rect = self.move_edge(
+                self.original_rect, self.active_edge, cur_img_pos, start_img_pos
             )
-
-            # Convert back to image coordinates
-            new_img_rect = self.display_to_image_rect(new_display_rect)
 
             # Update the annotation with the new rectangle
             if new_img_rect:
@@ -1745,41 +1745,40 @@ class VideoCanvas(QWidget):
 
         # Add this new section to handle resizing via handles
         if hasattr(self, 'resizing_handle') and self.resizing_handle is not None and self.selected_annotation:
-            # Get the current display rect
-            display_rect = self.image_to_display_rect(self.original_rect)
-            
-            # Get position delta
-            delta_x = event.pos().x() - self.resize_start_pos.x()
-            delta_y = event.pos().y() - self.resize_start_pos.y()
-            
+            # Get position delta in image coordinates directly, instead of moving
+            # the handle in display pixels and converting the whole rect back
+            # afterwards. That round trip truncates with int() on both legs, which
+            # isn't an exact inverse and let the corners/edges that weren't being
+            # dragged drift by a pixel or two - very visible on small objects.
+            start_img_pos = self.display_to_image_pos(self.resize_start_pos)
+            cur_img_pos = self.display_to_image_pos(event.pos())
+            delta_x = cur_img_pos.x() - start_img_pos.x()
+            delta_y = cur_img_pos.y() - start_img_pos.y()
+
             # Create a new rectangle based on which handle is being dragged
-            new_rect = copy_qrect(display_rect)
+            new_rect = copy_qrect(self.original_rect)
             handle_idx = self.resizing_handle
-            
+
             if handle_idx == 0:  # Top-left
-                new_rect.setTopLeft(display_rect.topLeft() + QPoint(delta_x, delta_y))
+                new_rect.setTopLeft(self.original_rect.topLeft() + QPoint(delta_x, delta_y))
             elif handle_idx == 1:  # Top-right
-                new_rect.setTopRight(display_rect.topRight() + QPoint(delta_x, delta_y))
+                new_rect.setTopRight(self.original_rect.topRight() + QPoint(delta_x, delta_y))
             elif handle_idx == 2:  # Bottom-left
-                new_rect.setBottomLeft(display_rect.bottomLeft() + QPoint(delta_x, delta_y))
+                new_rect.setBottomLeft(self.original_rect.bottomLeft() + QPoint(delta_x, delta_y))
             elif handle_idx == 3:  # Bottom-right
-                new_rect.setBottomRight(display_rect.bottomRight() + QPoint(delta_x, delta_y))
+                new_rect.setBottomRight(self.original_rect.bottomRight() + QPoint(delta_x, delta_y))
             elif handle_idx == 4:  # Top center
-                new_rect.setTop(display_rect.top() + delta_y)
+                new_rect.setTop(self.original_rect.top() + delta_y)
             elif handle_idx == 5:  # Bottom center
-                new_rect.setBottom(display_rect.bottom() + delta_y)
+                new_rect.setBottom(self.original_rect.bottom() + delta_y)
             elif handle_idx == 6:  # Left center
-                new_rect.setLeft(display_rect.left() + delta_x)
+                new_rect.setLeft(self.original_rect.left() + delta_x)
             elif handle_idx == 7:  # Right center
-                new_rect.setRight(display_rect.right() + delta_x)
-            
-            # Convert back to image coordinates
-            new_img_rect = self.display_to_image_rect(new_rect.normalized())
-            
+                new_rect.setRight(self.original_rect.right() + delta_x)
+
             # Update the annotation with the new rectangle
-            if new_img_rect:
-                self.selected_annotation.rect = new_img_rect
-                self.update()
+            self.selected_annotation.rect = new_rect.normalized()
+            self.update()
             return
 
         # Update cursor based on what's under it
