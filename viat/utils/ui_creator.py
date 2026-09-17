@@ -653,7 +653,7 @@ class UICreator:
 
         self.blur_pen_size_spinbox = QSpinBox()
         self.blur_pen_size_spinbox.setRange(1, 300)
-        self.blur_pen_size_spinbox.setValue(getattr(self.main_window.canvas, 'blur_pen_size', 30))
+        self.blur_pen_size_spinbox.setValue(30)
         self.blur_pen_size_spinbox.setSuffix(" px")
         self.blur_pen_size_spinbox.setToolTip("Radius of the Blur Pen brush, in image pixels")
         def set_blur_pen_size(value):
