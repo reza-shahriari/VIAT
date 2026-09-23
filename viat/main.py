@@ -3529,7 +3529,7 @@ class VideoAnnotationTool(QMainWindow):
         if target_class and isinstance(target_class, str):
             if target_class not in self.canvas.class_colors:
                 self.canvas.class_colors[target_class] = self.canvas.get_next_class_color()
-                logger.debug(f"Created missing class '{target_class}' with auto-assigned color")
+                logger.info(f"Created missing class '{target_class}' with auto-assigned color")
 
     def on_set_track_queue_video_folders(self):
         """Manually (re)point the Track Queue at folder(s) holding its videos
