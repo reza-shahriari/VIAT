@@ -1070,7 +1070,7 @@ def export_dataset(parent, config, image_files, frame_annotations, class_colors)
     fmt = get_format(fmt_name)
     if fmt_name == "raya_video":
         # Handle Raya Video export separately
-        yield from export_raya_video_dataset(config, image_files, frame_annotations, class_colors)
+        yield from export_raya_video_dataset(parent, config, image_files, frame_annotations, class_colors)
         return
     elif fmt is None:
         return f"Unknown format: {fmt_name}"
@@ -1288,7 +1288,7 @@ def create_dataset_dialog(parent, image_files, frame_annotations, class_colors):
     return export_dataset_dialog(parent, image_files, frame_annotations)
 
 
-def export_raya_video_dataset(config, image_files, frame_annotations, class_colors):
+def export_raya_video_dataset(parent, config, image_files, frame_annotations, class_colors):
     import cv2
     import json
     import os

@@ -3505,6 +3505,7 @@ class VideoAnnotationTool(QMainWindow):
                     job['status'] = 'pending'
                     job.setdefault('job_id', uuid.uuid4().hex)
                     job['display'] = self._job_display_text(job)
+                    self._ensure_job_classes_exist(job)
                 self.track_queue.extend(jobs)
                 total_loaded += len(jobs)
                 # Resolved per-file (not against the whole batch at once): each
@@ -3520,6 +3521,15 @@ class VideoAnnotationTool(QMainWindow):
         if failed:
             details = "\n".join(f"{os.path.basename(p)}: {err}" for p, err in failed)
             QMessageBox.warning(self, 'Some Files Failed to Load', details)
+
+    def _ensure_job_classes_exist(self, job):
+        """Ensure all class references in a job exist. Creates missing target
+        classes dynamically so tracks can run without invalid class references."""
+        target_class = job.get('target_class')
+        if target_class and isinstance(target_class, str):
+            if target_class not in self.canvas.class_colors:
+                self.canvas.class_colors[target_class] = self.canvas.get_next_class_color()
+                logger.debug(f"Created missing class '{target_class}' with auto-assigned color")
 
     def on_set_track_queue_video_folders(self):
         """Manually (re)point the Track Queue at folder(s) holding its videos

@@ -240,6 +240,14 @@ class VideoCanvas(QWidget):
         if class_name in self.class_colors:
             self.current_class = class_name
 
+    def get_next_class_color(self):
+        """Generate a random color for a new class."""
+        import random
+        r = random.randint(0, 255)
+        g = random.randint(0, 255)
+        b = random.randint(0, 255)
+        return QColor(r, g, b)
+
     def paintEvent(self, event):
             """Paint the canvas with the current frame and annotations"""
             painter = QPainter(self)
