@@ -25,9 +25,13 @@ from .annotation import BoundingBox, AnnotationManager, ClassManager
 from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions, logger
-from .widgets.auto_annotate_dialog import AutoAnnotateDialog
+from .widgets.auto_annotate_dialog import AutoAnnotateDialog, IGNORE_REGION_ACTION
 from .widgets.scene_detect_dialog import SceneDetectDialog
+from .widgets.annotation_nms_dialog import AnnotationNMSDialog
+from .utils.annotation_nms import apply_plan, inside_any_region, rect_to_xyxy
+from .utils.shadow_filter import looks_like_shadow
 from .utils.zero_shot_manager import ZeroShotManager
+from .managers.autopilot_controller import AutopilotController
 from .tracking.nossort import NOCSORT
 from .tracking.manager import TrackerManager
 from .widgets.tracking_dialog import TrackingDialog
@@ -50,6 +54,7 @@ from viat.utils.object_visibility import ObjectVisibilityManager as _ViatObjectV
 from viat.utils.performance import PerformanceManager as _ViatPerformanceManager, VideoSeekDispatcher as _ViatVideoSeekDispatcher, VideoSeekWorker as _ViatVideoSeekWorker
 from viat.utils.video_io import open_video_writer as _viat_open_video_writer
 from viat.utils.seg_video_labeler import SegmentationVideoLabeler as _ViatSegLabeler
+from viat.utils.file_operations import export_raya_segmentation_with_classes_annotations
 from viat.utils.dataset_merger import merge_dataset_into_target as _viat_merge_dataset, find_unmatched_classes as _viat_find_unmatched_classes
 from viat.utils.icon_provider import IconProvider
 from viat.utils.sam_manager import SamManager
@@ -220,12 +225,24 @@ class AutoLabelWorker(QThread):
             for _c in classes_config:
                 if isinstance(_c, dict):
                     action = _c.get('action', '')
-                    if 'detect' in action.lower() or not action:
+                    if 'detect' in action.lower() or not action or action == IGNORE_REGION_ACTION:
                         prompt = _c.get('extract_prompt', '').strip() or _c.get('name', '').strip()
                         if prompt:
                             detect_prompts.append(prompt)
                 elif isinstance(_c, str) and _c.strip():
                     detect_prompts.append(_c.strip())
+
+            # 'Ignore Region (Suppress)' classes: their boxes (detected this frame, or already
+            # annotated) drop every other detection lying mostly inside them, and aren't saved.
+            region_names = set()
+            for _c in classes_config:
+                if isinstance(_c, dict) and _c.get('action') == IGNORE_REGION_ACTION:
+                    region_names.add(_c['name'].strip().lower())
+                    if _c.get('extract_prompt', '').strip():
+                        region_names.add(_c['extract_prompt'].strip().lower())
+            suppress_overlap = self.config.get('suppress_overlap', 0.6)
+            reject_shadows = self.config.get('reject_shadows', False)
+            shadow_max_score = self.config.get('shadow_max_score', 0.6)
 
             processed_count = 0
             for f_idx, frame in get_frame_generator():
@@ -266,7 +283,7 @@ class AutoLabelWorker(QThread):
                         # those classes; otherwise load ALL existing annotations.
                         refine_class_filter = set()
                         for _c in classes_config:
-                            if _c.get('action', '') not in ('Ignore', 'Remove Labels'):
+                            if _c.get('action', '') not in ('Ignore', 'Remove Labels', IGNORE_REGION_ACTION):
                                 refine_class_filter.add(_c['name'])
                         ex_anns = self.config.get('existing_annotations_data', {}).get(f_idx, [])
                         for i, ann in enumerate(ex_anns):
@@ -311,6 +328,11 @@ class AutoLabelWorker(QThread):
                 existing_anns = self.config.get('existing_annotations_data', {}).get(f_idx, [])
                 helpers = [d for d in current_detections if d.get('is_helper')]
                 detected = [d for d in current_detections if not d.get('is_helper') and d.get('score', 1.0) >= min_score]
+                if region_names:
+                    regions = [d['box'] for d in detected if d['class_name'].strip().lower() in region_names]
+                    regions += [rect_to_xyxy(a.rect) for a in existing_anns if a.class_name.strip().lower() in region_names]
+                    detected = [d for d in detected if d['class_name'].strip().lower() not in region_names
+                        and (d.get('is_existing') or not inside_any_region(d['box'], regions, suppress_overlap))]
                 detected = apply_nms(detected, iou_threshold=0.5, class_agnostic=True, class_priority=self.config.get('classes', []))
                 
                 filtered_detected = []
@@ -371,12 +393,13 @@ class AutoLabelWorker(QThread):
                                     if extract_prompt and ignore_prompt:
                                         final_text_prompt = f"{extract_prompt}, but not {ignore_prompt}"
                                         
-                                    # Try box + text first
-                                    polygon_mask = _sam3_mgr.predict_mask_from_prompt(
-                                        frame_rgb,
-                                        box=box,
-                                        text_prompt=final_text_prompt if final_text_prompt else None
-                                    )
+                                    # Try finding the text prompt inside the box first
+                                    if final_text_prompt:
+                                        polygon_mask = _sam3_mgr.predict_text_in_box(
+                                            frame_rgb, box, final_text_prompt)
+                                    else:
+                                        polygon_mask = _sam3_mgr.predict_mask_from_prompt(
+                                            frame_rgb, box=box)
                                     if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
                                         success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
                                         if rename_to:
@@ -403,10 +426,12 @@ class AutoLabelWorker(QThread):
                                     if extract_prompt and ignore_prompt:
                                         final_text_prompt = f"{extract_prompt}, but not {ignore_prompt}"
                                         
-                                    polygon_mask = self.sam3_native_manager.predict_mask_from_prompt(
-                                        frame_rgb, box=box,
-                                        text_prompt=final_text_prompt if final_text_prompt else None
-                                    )
+                                    if final_text_prompt:
+                                        polygon_mask = self.sam3_native_manager.predict_text_in_box(
+                                            frame_rgb, box, final_text_prompt)
+                                    else:
+                                        polygon_mask = self.sam3_native_manager.predict_mask_from_prompt(
+                                            frame_rgb, box=box)
                                     if polygon_mask and isinstance(polygon_mask, list) and len(polygon_mask) > 0:
                                         success_polygon = [(float(pt[0]), float(pt[1])) for pt in polygon_mask]
                                         if rename_to:
@@ -438,7 +463,13 @@ class AutoLabelWorker(QThread):
                         # Helper refinement could not find the target subpart (no polygon generated).
                         # Skip emitting this helper detection to avoid creating an unrefined duplicate box.
                         continue
-                        
+
+                    # Drop new low-confidence detections whose mask looks like a cast shadow
+                    # (helpers and existing annotations are the user's own boxes: never dropped)
+                    if (reject_shadows and not is_helper and not det.get('is_existing')
+                            and looks_like_shadow(frame, polygon, score, shadow_max_score)):
+                        continue
+
                     frame_anns.append({'box': list(box), 'class_name': c_name, 'score': score, 'segmentation': polygon, 'source': 'refined' if is_helper else 'detected', 'original_ann_idx': det.get('original_ann_idx')})
                     
                 self.frame_processed.emit(f_idx, frame_anns)
@@ -526,6 +557,7 @@ class VideoAnnotationTool(QMainWindow):
         self.sam2_trt_manager = Sam2TrtManager()
         from viat.utils.fast_tracker_manager import FastTrackerManager
         self.fast_tracker_manager = FastTrackerManager()
+        self.autopilot_controller = AutopilotController(self)
 
     def _init_video_seek_worker(self):
         """Set up the background worker that runs slow video seeks off the
@@ -2924,7 +2956,10 @@ class VideoAnnotationTool(QMainWindow):
                 return
             self.statusBar.showMessage(f'Tracking using {model_type}...')
             
-            is_sam_tracker = manager in [getattr(self, 'sam_manager', None), getattr(self, 'sam2_trt_manager', None)]
+            # SAM trackers hold every frame of a session in memory (SAM3: ~6 MB/frame), so track
+            # long ranges in chunks, re-prompting each chunk from the previous chunk's last box.
+            is_sam_tracker = manager in [getattr(self, 'sam_manager', None), getattr(self, 'sam2_trt_manager', None),
+                getattr(self, 'sam3_native_manager', None)]
             CHUNK_SIZE = 400 if is_sam_tracker else (abs(end_f - start_f) + 1)
             
             current_chunk_start = start_f
@@ -2951,7 +2986,8 @@ class VideoAnnotationTool(QMainWindow):
                 if manager == getattr(self, 'sam3_native_manager', None):
                     res_path = getattr(self, 'video_filename', None)
                     if hasattr(self, 'is_image_dataset') and self.is_image_dataset:
-                        res_path = os.path.dirname(self.image_files[0]) if self.image_files else None
+                        # Pass the file list itself so SAM3's frame order matches VIAT's
+                        res_path = list(self.image_files)
                     results_generator = manager.track_video_from_prompt(
                         resource_path=res_path, start_f=current_chunk_start, end_f=current_chunk_end, 
                         points=chunk_points, labels=chunk_labels, box=chunk_box, text_prompt=chunk_text_prompt)
@@ -4061,6 +4097,16 @@ class VideoAnnotationTool(QMainWindow):
             total_f = getattr(self, 'total_frames', None)
             export_raya_with_classes_annotations(export_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
             self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)}')
+            # Companion "<video>_seg.txt" with polygons instead of boxes, only
+            # when at least one annotation carries a segmentation.
+            has_seg = any(getattr(a, 'segmentation', None) for a in all_annotations)
+            seg_export_path = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '_seg.txt'))
+            if has_seg:
+                export_raya_segmentation_with_classes_annotations(seg_export_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
+                self.statusBar.showMessage(f'Fast Exported to {os.path.basename(export_path)} and {os.path.basename(seg_export_path)}')
+                if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
+                    self.track_queue_dock.append_log(batch_job.get('job_id') if batch_job else None,
+                        f"Exported segmentations: {os.path.basename(seg_export_path)}")
             if hasattr(self, 'video_manager_dock'):
                 self.video_manager_dock.update_video_status(self.video_filename, True)
             if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
@@ -4095,6 +4141,9 @@ class VideoAnnotationTool(QMainWindow):
 
                 blurred_txt_path = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '_blurred.txt'))
                 export_raya_with_classes_annotations(blurred_txt_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
+                if has_seg:
+                    blurred_seg_path = self._queue_safe_export_path(os.path.join(default_dir, default_filename + '_blurred_seg.txt'))
+                    export_raya_segmentation_with_classes_annotations(blurred_seg_path, all_annotations, classes, deleted_frames=deleted, total_frames=total_f)
 
                 self.statusBar.showMessage(f'Exported blurred video and {os.path.basename(blurred_txt_path)}')
                 if getattr(self, '_queue_running', False) and hasattr(self, 'track_queue_dock'):
@@ -4814,7 +4863,7 @@ class VideoAnnotationTool(QMainWindow):
             QMessageBox.warning(self, 'Open Image Folder',
                 'No image files found in the selected folder!')
             return
-        image_files.sort()
+        image_files = natsorted(image_files)
         self.image_files = image_files
         self.total_frames = len(image_files)
         self.current_frame = 0
@@ -5678,6 +5727,26 @@ Would you like to load it?"""
         if hasattr(self, 'refresh_empty_frames_dock'):
             self.refresh_empty_frames_dock()
         
+    def open_annotation_nms_dialog(self):
+        """Tools > Remove Duplicate Annotations: NMS / ignore regions over existing boxes (see utils/annotation_nms.py)."""
+        class_names = sorted({ann.class_name for anns in self.frame_annotations.values() for ann in anns}
+            | set(self.canvas.class_colors.keys()))
+        dialog = AnnotationNMSDialog(self.frame_annotations, self.current_frame,
+            getattr(self, 'total_frames', 1), class_names, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        # The plan was computed in the dialog's background thread; applying it is just list swaps
+        plan = dialog.get_plan()
+        if not plan:
+            return
+        self.save_undo_state(list(plan))
+        removed = apply_plan(self.frame_annotations, plan)
+        self.project_modified = True
+        self.load_current_frame_annotations()
+        self.update_frame_display()
+        self.statusBar.showMessage(
+            f'Removed {removed} annotation(s) in {len(plan)} frame(s). Ctrl+Z to undo.', 5000)
+
     def open_zero_shot_refiner_dialog(self):
         from .widgets.zero_shot_classification_dialog import ZeroShotClassificationDialog
         from .utils.zero_shot_classifier import ZeroShotClassifierManager
@@ -9064,6 +9133,19 @@ Do you want to scan the entire video now for duplicate frames?
                 config['start_frame'] = self.current_frame
                 config['end_frame']   = self.current_frame
             self.run_auto_label_dataset(config)
+
+    @log_exceptions
+    def open_autopilot(self):
+        """Tools > Autopilot: unattended detect -> track -> repair -> review for one video."""
+        self.autopilot_controller.open_dialog()
+
+    @log_exceptions
+    def show_autopilot_review(self):
+        """Tools > Autopilot Review: open the review panel for the current video's result."""
+        if self.autopilot_controller.result is None:
+            self.autopilot_controller.load_saved_result()
+        else:
+            self.autopilot_controller.show_dock()
 
     @log_exceptions
     def run_auto_label_dataset(self, config):

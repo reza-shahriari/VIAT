@@ -124,8 +124,8 @@ class SAMInteractiveDock(QDockWidget):
         self.layout.addWidget(self.chk_frame_by_frame)
 
         # Save Segmentations
-        self.chk_save_seg = QCheckBox("Save Segmentations to JSON (Creates large files)")
-        self.chk_save_seg.setChecked(False)
+        self.chk_save_seg = QCheckBox("Save Segmentations (compact polygons)")
+        self.chk_save_seg.setChecked(True)
         self.layout.addWidget(self.chk_save_seg)
 
         # Blur Tracked Objects

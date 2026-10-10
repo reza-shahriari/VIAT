@@ -42,7 +42,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-
+from natsort import natsorted
 try:
     import yaml  # PyYAML -- optional but very common
 except ImportError:  # pragma: no cover
@@ -266,7 +266,7 @@ class DatasetLoaderThread(QThread):
                 all_images_with_info.append((img_path, split))
 
         # Sort by basename
-        all_images_with_info.sort(key=lambda x: os.path.basename(x[0]))
+        all_images_with_info = natsorted(all_images_with_info, key=lambda x: os.path.basename(x[0]))
         t_sorted = time.time()
 
         # Cumulative time spent in each per-image sub-step, to find the real
@@ -806,7 +806,7 @@ def _list_images(folder: str) -> List[str]:
         ]
     except OSError:
         return []
-    files.sort()
+    files = natsorted(files)
     return files
 
 
@@ -1327,7 +1327,7 @@ def export_raya_video_dataset(parent, config, image_files, frame_annotations, cl
     original_sizes = {}
     total = len(image_files)
     all_annotations = []
-    
+
     for i, img_path in enumerate(image_files):
         if i % 5 == 0 and total > 0:
             yield int((i / total) * 80), f"Writing video frame {i}/{total}..."

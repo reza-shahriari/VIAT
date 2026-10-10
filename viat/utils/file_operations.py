@@ -85,11 +85,14 @@ def backup_before_save(filename, use_timestamp=True, backup_limit=5):
             except Exception as e:
                 print(f"Warning: Could not remove old backup {old_backup}: {e}")
 
-def save_json_atomically(filename, data):
+def save_json_atomically(filename, data, indent=2):
     tmp_filename = filename + ".tmp"
     try:
         with open(tmp_filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+            if indent is None:
+                json.dump(data, f, separators=(',', ':'))
+            else:
+                json.dump(data, f, indent=indent)
             f.flush()
             os.fsync(f.fileno())
         backup_before_save(filename)
@@ -134,7 +137,7 @@ def save_project_generator(
     # Convert annotations to serializable format
     serialized_annotations = []
     for annotation in annotations:
-        serialized_annotations.append(annotation.to_dict())
+        serialized_annotations.append(annotation.to_dict(compact=True))
 
     # Convert class colors to serializable format
     serialized_colors = {}
@@ -149,10 +152,10 @@ def save_project_generator(
             if idx % 100 == 0 and total_frames > 0:
                 yield 10 + int((idx / total_frames) * 70), f"Serializing frame {idx}/{total_frames}..."
                 
-            serialized_anns = [ann.to_dict() for ann in frame_anns]
+            serialized_anns = [ann.to_dict(compact=True) for ann in frame_anns]
             if deleted_annotations and frame_num in deleted_annotations:
                 for ann in deleted_annotations[frame_num]:
-                    d_ann = ann.to_dict()
+                    d_ann = ann.to_dict(compact=True)
                     d_ann["deleted"] = True
                     serialized_anns.append(d_ann)
             serialized_frame_annotations[str(frame_num)] = serialized_anns
@@ -206,7 +209,9 @@ def save_project_generator(
 
     yield 85, "Writing to disk..."
     # Save to file
-    save_json_atomically(filename, project_data)
+    # Project files can hold hundreds of thousands of annotations; skipping
+    # indentation roughly halves the write time and shrinks the file.
+    save_json_atomically(filename, project_data, indent=None)
 
     yield 95, "Updating recent projects..."
     # Update recent projects list
@@ -758,6 +763,118 @@ def export_raya_annotations(filename, annotations, deleted_frames=None, total_fr
     except Exception as e:
         raise Exception(f"Error exporting to Raya format: {str(e)}")
 
+def _raya_detection_geometry(annotation):
+    rect = annotation.rect
+    return [rect.x(), rect.y(), rect.width(), rect.height()]
+
+
+def _raya_segmentation_geometry(annotation):
+    """Flattened polygon [x1,y1,...,xn,yn]. Annotations without a
+    segmentation (manual/interpolated/tracked boxes) fall back to their
+    rectangle's 4 corners so no object is dropped from the file."""
+    poly = None
+    if hasattr(annotation, "fitted_segmentation"):
+        poly = annotation.fitted_segmentation()
+    if not poly:
+        r = annotation.rect
+        x1, y1 = r.x(), r.y()
+        x2, y2 = x1 + r.width(), y1 + r.height()
+        poly = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    return [int(v) for pt in poly for v in pt]
+
+
+def _write_raya_with_classes(filename, annotations, geometry_fn, classes=None, deleted_frames=None, total_frames=None):
+    """Shared writer for the Raya-with-classes detection and segmentation
+    formats. geometry_fn(annotation) returns the numbers written between the
+    class id and the size/quality/Difficult attributes."""
+    # Determine present classes from annotations
+    present_classes = []
+    seen = set()
+    for annotation in annotations:
+        cls_name = getattr(annotation, "class_name", None)
+        if cls_name and cls_name not in seen:
+            seen.add(cls_name)
+            present_classes.append(cls_name)
+
+    # Build list of used classes preserving order from `classes`
+    if classes:
+        used_classes = [c for c in classes if c in seen]
+        for c in present_classes:
+            if c not in used_classes:
+                used_classes.append(c)
+    else:
+        used_classes = present_classes
+
+    # Write header
+    with open(filename, "w") as f:
+        f.write("###\n")
+        f.write("clasess:\n")
+        f.write("names:\n")
+        for cls in used_classes:
+            f.write(f"- {cls}\n")
+        f.write(f"-nc:{len(used_classes)}\n")
+        f.write("###\n")
+
+    # Group annotations by frame
+    annotations_by_frame = {}
+    for annotation in annotations:
+        frame_num = getattr(annotation, "frame", 0)
+        if frame_num not in annotations_by_frame:
+            annotations_by_frame[frame_num] = []
+        annotations_by_frame[frame_num].append(annotation)
+
+    # Get the maximum frame number
+    max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
+    if deleted_frames:
+        max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
+    if total_frames is not None and total_frames > 0:
+        max_frame = max(max_frame, total_frames - 1)
+
+    # Create lines for each frame
+    lines = ["[]"] * (max_frame + 1)
+
+    if deleted_frames:
+        for d in deleted_frames:
+            if d <= max_frame:
+                lines[d] = "DELETED;"
+
+    # Fill in annotations for frames that have them
+    for frame_num, frame_annotations in annotations_by_frame.items():
+        if deleted_frames and frame_num in deleted_frames:
+            continue
+        if not frame_annotations:
+            if not (deleted_frames and frame_num in deleted_frames):
+                lines[frame_num] = "[]"
+            continue
+
+        # Format annotations for this frame
+        frame_str = ""
+        for annotation in frame_annotations:
+
+            # Get mapped class ID from used_classes
+            class_id = 0
+            if hasattr(annotation, 'class_name') and annotation.class_name in used_classes:
+                class_id = used_classes.index(annotation.class_name)
+
+            geometry = ",".join(str(v) for v in geometry_fn(annotation))
+            size = annotation.attributes.get("Size", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
+            quality = annotation.attributes.get("Quality", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
+            Difficult = annotation.attributes.get("Difficult", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
+
+            # Format the annotation with a semicolon after each one
+            if Difficult == -1:
+                frame_str += f"[{class_id},{geometry},{size},{quality}];"
+            else:
+                frame_str += f"[{class_id},{geometry},{size},{quality},{Difficult}];"
+
+        lines[frame_num] = frame_str
+
+    # Append to file
+    with open(filename, "a") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+
 def export_raya_with_classes_annotations(filename, annotations, classes=None, deleted_frames=None, total_frames=None):
     """
     Export annotations to Raya text format with a class header.
@@ -773,103 +890,26 @@ def export_raya_with_classes_annotations(filename, annotations, classes=None, de
     [class,x,y,width,height,size,quality,Difficult(optional)];
     """
     try:
-        # Determine present classes from annotations
-        present_classes = []
-        seen = set()
-        for annotation in annotations:
-            cls_name = getattr(annotation, "class_name", None)
-            if cls_name and cls_name not in seen:
-                seen.add(cls_name)
-                present_classes.append(cls_name)
-
-        # Build list of used classes preserving order from `classes`
-        if classes:
-            used_classes = [c for c in classes if c in seen]
-            for c in present_classes:
-                if c not in used_classes:
-                    used_classes.append(c)
-        else:
-            used_classes = present_classes
-
-        # Write header
-        with open(filename, "w") as f:
-            f.write("###\n")
-            f.write("clasess:\n")
-            f.write("names:\n")
-            for cls in used_classes:
-                f.write(f"- {cls}\n")
-            f.write(f"-nc:{len(used_classes)}\n")
-            f.write("###\n")
-
-        # Group annotations by frame
-        annotations_by_frame = {}
-        for annotation in annotations:
-            frame_num = getattr(annotation, "frame", 0)
-            if frame_num not in annotations_by_frame:
-                annotations_by_frame[frame_num] = []
-            annotations_by_frame[frame_num].append(annotation)
-
-        # Get the maximum frame number
-        max_frame = max(annotations_by_frame.keys()) if annotations_by_frame else 0
-        if deleted_frames:
-            max_frame = max(max_frame, max(deleted_frames) if deleted_frames else 0)
-        if total_frames is not None and total_frames > 0:
-            max_frame = max(max_frame, total_frames - 1)
-
-        # Create lines for each frame
-        lines = ["[]"] * (max_frame + 1)
-        
-        if deleted_frames:
-            for d in deleted_frames:
-                if d <= max_frame:
-                    lines[d] = "DELETED;"
-
-        # Fill in annotations for frames that have them
-        for frame_num, frame_annotations in annotations_by_frame.items():
-            if deleted_frames and frame_num in deleted_frames:
-                continue
-            if not frame_annotations:
-                if not (deleted_frames and frame_num in deleted_frames):
-                    lines[frame_num] = "[]"
-                continue
-
-            # Format annotations for this frame
-            frame_str = ""
-            for annotation in frame_annotations:
-
-                # Get annotation properties
-                rect = annotation.rect
-                
-                # Get mapped class ID from used_classes
-                class_id = 0
-                if hasattr(annotation, 'class_name') and annotation.class_name in used_classes:
-                    class_id = used_classes.index(annotation.class_name)
-                    
-                x = rect.x()
-                y = rect.y()
-                width = rect.width()
-                height = rect.height()
-                size = annotation.attributes.get("Size", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
-                quality = annotation.attributes.get("Quality", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
-                Difficult = annotation.attributes.get("Difficult", -1) if hasattr(annotation, 'attributes') and annotation.attributes else -1
-
-                # Format the annotation with a semicolon after each one
-                if Difficult == -1:
-                    frame_str += (
-                        f"[{class_id},{x},{y},{width},{height},{size},{quality}];"
-                    )
-                else:
-                    frame_str += f"[{class_id},{x},{y},{width},{height},{size},{quality},{Difficult}];"
-
-            lines[frame_num] = frame_str
-
-        # Append to file
-        with open(filename, "a") as f:
-            for line in lines:
-                f.write(line + "\n")
-
+        _write_raya_with_classes(filename, annotations, _raya_detection_geometry, classes, deleted_frames, total_frames)
     except Exception as e:
         raise Exception(f"Error exporting to Raya with classes format: {str(e)}")
+
+
+def export_raya_segmentation_with_classes_annotations(filename, annotations, classes=None, deleted_frames=None, total_frames=None):
+    """
+    Export annotations to Raya segmentation text format with a class header.
+
+    Same header and line layout as export_raya_with_classes_annotations, but
+    x,y,width,height is replaced by the polygon's pixel vertices:
+    [class,x1,y1,x2,y2,...,xn,yn,size,quality,Difficult(optional)];
+
+    A line has 2n+3 values without Difficult and 2n+4 with it, so the parity
+    of the value count tells a parser whether Difficult is present.
+    """
+    try:
+        _write_raya_with_classes(filename, annotations, _raya_segmentation_geometry, classes, deleted_frames, total_frames)
+    except Exception as e:
+        raise Exception(f"Error exporting to Raya segmentation with classes format: {str(e)}")
 
 
 
@@ -1740,6 +1780,10 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
     """
     Import annotations from Raya text format with a class header.
 
+    Reads both the detection format ([class,x,y,w,h,...]) and the
+    segmentation format ([class,x1,y1,...,xn,yn,...]) written to
+    <video>_seg.txt; polygon items get a segmentation and a rect fitted to it.
+
     Args:
         filename (str): Path to the Raya text file
         bbox_class (class): Class to use for bounding box objects
@@ -1798,7 +1842,36 @@ def import_raya_with_classes_annotations(filename, bbox_class, class_mapping):
                 annotation_str = annotation_str.replace("[", "").replace("]", "")
                 parts = annotation_str.split(",")
 
-                if len(parts) >= 5:
+                if len(parts) >= 9:
+                    # Segmentation item (see export_raya_segmentation_with_classes_annotations):
+                    # [class,x1,y1,...,xn,yn,size,quality,Difficult(optional)].
+                    # Detection items have at most 8 values, so 9+ is always a
+                    # polygon; an even count means Difficult is present.
+                    try:
+                        vals = [float(v) for v in parts]
+                        class_id = int(vals[0])
+                        has_difficult = len(vals) % 2 == 0
+                        n_attrs = 3 if has_difficult else 2
+                        coords = [int(round(v)) for v in vals[1:len(vals) - n_attrs]]
+                        polygon = list(zip(coords[0::2], coords[1::2]))
+                        xs = [pt[0] for pt in polygon]
+                        ys = [pt[1] for pt in polygon]
+                        rect = QRect(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+                        class_name = class_mapping.get(class_id, f"Class {class_id}")
+                        bbox = bbox_class(rect, class_name, {}, QColor(255, 0, 0), source="loaded", segmentation=polygon)
+                        bbox.frame = frame_num
+                        attrs = vals[len(vals) - n_attrs:]
+                        bbox.attributes["Size"] = attrs[0]
+                        bbox.attributes["Quality"] = attrs[1]
+                        if has_difficult:
+                            bbox.attributes["Difficult"] = attrs[2]
+
+                        frame_annotations[frame_num].append(bbox)
+                    except ValueError as e:
+                        print(f"Error parsing Raya segmentation annotation: {annotation_str}. Error: {e}")
+                        continue
+                elif len(parts) >= 5:
                     try:
                         # Extract basic info
                         class_id = int(float(parts[0]))

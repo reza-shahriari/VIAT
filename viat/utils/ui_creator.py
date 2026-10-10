@@ -410,6 +410,16 @@ class UICreator:
         auto_label_action.triggered.connect(self.main_window.auto_label)
         tools_menu.addAction(auto_label_action)
 
+        # Autopilot: unattended video labeling + review panel
+        autopilot_action = QAction("Autopilot (Unattended Video Labeling)...", self.main_window)
+        autopilot_action.setToolTip("Detect every frame, track objects in/out of the scene, repair tracks and "
+                                    "flag only the likely mistakes for review")
+        autopilot_action.triggered.connect(self.main_window.open_autopilot)
+        tools_menu.addAction(autopilot_action)
+        autopilot_review_action = QAction("Autopilot Review Panel", self.main_window)
+        autopilot_review_action.triggered.connect(self.main_window.show_autopilot_review)
+        tools_menu.addAction(autopilot_review_action)
+
         # Model Evaluation action
         model_eval_action = QAction("Model Evaluation...", self.main_window)
         model_eval_action.setToolTip("Evaluate detector and tracker metrics (COCO mAP, MOT, Center BBox)")
@@ -464,6 +474,14 @@ class UICreator:
         if hasattr(self.main_window, "open_zero_shot_refiner_dialog"):
             zero_shot_refiner_action.triggered.connect(self.main_window.open_zero_shot_refiner_dialog)
         tools_menu.addAction(zero_shot_refiner_action)
+
+        # Remove duplicate (overlapping) annotations via NMS
+        annotation_nms_action = QAction("Remove Duplicate / Overlapping Annotations (NMS)...", self.main_window)
+        annotation_nms_action.setToolTip(
+            "Remove boxes that duplicate an existing box of the same object, or that lie inside "
+            "ignore-region classes such as 'shadow'")
+        annotation_nms_action.triggered.connect(self.main_window.open_annotation_nms_dialog)
+        tools_menu.addAction(annotation_nms_action)
 
         # Add separator
         tools_menu.addSeparator()
@@ -730,7 +748,7 @@ class UICreator:
         # Add save segmentation toggle for Magic Wand
         from PyQt5.QtWidgets import QCheckBox
         self.save_seg_checkbox = QCheckBox("Save Segmentations")
-        self.save_seg_checkbox.setChecked(False)
+        self.save_seg_checkbox.setChecked(True)
         self.save_seg_checkbox.setToolTip("Save polygon segmentations when using Auto BBox (Magic Wand)")
         self.main_window.save_seg_checkbox = self.save_seg_checkbox
         self.main_window.toolbar.addWidget(self.save_seg_checkbox)

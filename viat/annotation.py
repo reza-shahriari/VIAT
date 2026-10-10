@@ -20,6 +20,58 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import QTimer, QRect
 import random
 import re
+from copy import deepcopy
+import cv2
+import numpy as np
+
+
+# Max deviation (in pixels) allowed when simplifying stored segmentation
+# polygons. SAM contours come back with one vertex per pixel step; at 1px the
+# shape is visually identical but typically 5-10x fewer points.
+SEGMENTATION_SIMPLIFY_EPSILON = 1.0
+
+
+def simplify_polygon(points, epsilon=SEGMENTATION_SIMPLIFY_EPSILON):
+    """Simplify a polygon to integer pixel coordinates.
+
+    Accepts any iterable of (x, y) pairs (tuples, lists, numpy rows) and
+    returns a tuple of (int, int) tuples, or None if fewer than 3 points
+    remain. The result is immutable so copies of an annotation can share it.
+    """
+    if points is None:
+        return None
+    pts = np.asarray(
+        [(float(p[0]), float(p[1])) for p in points], dtype=np.float32
+    )
+    if len(pts) < 3:
+        return None
+    pts = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
+    if epsilon and epsilon > 0:
+        pts = cv2.approxPolyDP(pts, epsilon, True)
+    poly = tuple((int(p[0][0]), int(p[0][1])) for p in pts)
+    return poly if len(poly) >= 3 else None
+
+
+# Field values that BoundingBox.__deepcopy__ can share instead of copying.
+_IMMUTABLE_TYPES = (str, int, float, bool, type(None))
+
+
+def encode_segmentation(polygon):
+    """Encode a polygon as a compact 'x1,y1,x2,y2,...' string for JSON."""
+    return ",".join(f"{x},{y}" for (x, y) in polygon)
+
+
+def decode_segmentation(data):
+    """Decode a segmentation stored either as a compact string or as a
+    legacy list of [x, y] pairs."""
+    if not data:
+        return None
+    if isinstance(data, str):
+        vals = list(map(int, data.split(",")))
+        if len(vals) < 6:
+            return None
+        return tuple(zip(vals[0::2], vals[1::2]))
+    return tuple(tuple(p) for p in data)
 
 
 def parse_yolo_class_names(filepath):
@@ -120,8 +172,90 @@ class BoundingBox:
         self.segmentation = segmentation  # None or list of (x, y) pixel tuples
         self.uncertain = uncertain  # Indicates if zero-shot classifier was uncertain
 
-    def to_dict(self):
-        """Convert to a dictionary for serialization"""
+    @property
+    def segmentation(self):
+        # Polygons loaded from a project stay as their compact string until
+        # something actually needs the points; most of a long video's
+        # annotations are never looked at in a session.
+        seg = self._segmentation
+        if seg is None and self._seg_encoded:
+            seg = self._segmentation = decode_segmentation(self._seg_encoded)
+            if seg is None:
+                self._seg_encoded = None
+        return seg
+
+    @segmentation.setter
+    def segmentation(self, polygon):
+        # Every SAM / auto-annotate / import path assigns here, so simplify
+        # once on the way in to keep memory, project JSON and exports small.
+        self._seg_encoded = None
+        self._segmentation = simplify_polygon(polygon) if polygon is not None and len(polygon) else None
+
+    def __deepcopy__(self, memo):
+        # Generic deepcopy rebuilds every QRect/QColor through pickling and
+        # walks each polygon point; with 100k+ annotations a full undo
+        # snapshot took ~20s. Polygons are immutable, so copies share them.
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            if key in ("_segmentation", "_seg_encoded") or type(value) in _IMMUTABLE_TYPES:
+                new.__dict__[key] = value
+            elif type(value) is dict and all(type(v) in _IMMUTABLE_TYPES for v in value.values()):
+                new.__dict__[key] = dict(value)
+            elif isinstance(value, QRect):
+                new.__dict__[key] = QRect(value)
+            elif isinstance(value, QColor):
+                new.__dict__[key] = QColor(value)
+            else:
+                new.__dict__[key] = deepcopy(value, memo)
+        return new
+
+    def fitted_segmentation(self, tolerance=2):
+        """Return the segmentation mapped into the current rect.
+
+        If the box was moved or resized after the polygon was generated, the
+        polygon is translated/scaled so its bounds match the rect again.
+        Returns None when there is no segmentation.
+        """
+        poly = self.segmentation
+        if not poly:
+            return None
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        px, py = min(xs), min(ys)
+        pw, ph = max(xs) - px, max(ys) - py
+        r = self.rect
+        same_size = abs(pw - r.width()) <= tolerance and abs(ph - r.height()) <= tolerance
+        if same_size:
+            if abs(px - r.x()) <= tolerance and abs(py - r.y()) <= tolerance:
+                return list(poly)
+            # Box was only moved: translate without reshaping.
+            dx, dy = r.x() - px, r.y() - py
+            return [(x + dx, y + dy) for (x, y) in poly]
+        sx = r.width() / pw if pw > 0 else 1.0
+        sy = r.height() / ph if ph > 0 else 1.0
+        return [
+            (int(round(r.x() + (x - px) * sx)), int(round(r.y() + (y - py) * sy)))
+            for (x, y) in poly
+        ]
+
+    def to_dict(self, compact=False):
+        """Convert to a dictionary for serialization.
+
+        With compact=True the segmentation is stored as a single
+        'x1,y1,x2,y2,...' string instead of a list of pairs, which keeps
+        indented project JSON files small.
+        """
+        if compact:
+            # Reuse the loaded/previously encoded string when the polygon
+            # hasn't changed, so autosave doesn't re-encode 100k polygons.
+            if self._seg_encoded is None and self._segmentation:
+                self._seg_encoded = encode_segmentation(self._segmentation)
+            segmentation = self._seg_encoded
+        elif self.segmentation:
+            segmentation = [(float(x), float(y)) for (x, y) in self.segmentation]
+        else:
+            segmentation = None
 
         return {
             "rect": {
@@ -146,11 +280,7 @@ class BoundingBox:
             "original_source": self.original_source,
             "verified": self.verified,
             "score": self.score,
-            "segmentation": (
-                [(float(x), float(y)) for (x, y) in self.segmentation]
-                if self.segmentation
-                else None
-            ),
+            "segmentation": segmentation,
             "uncertain": self.uncertain,
         }
 
@@ -182,12 +312,17 @@ class BoundingBox:
 
         source = data.get("source", "manual")
         score = data.get("score", None)
-        segmentation = data.get("segmentation", None)
-        if segmentation:
-            segmentation = [tuple(p) for p in segmentation]
+        raw_segmentation = data.get("segmentation", None)
         uncertain = data.get("uncertain", False)
 
-        bbox = cls(rect, class_name, attributes, color, source, score, segmentation=segmentation, uncertain=uncertain)
+        if isinstance(raw_segmentation, str):
+            # Compact strings were simplified before they were written, so
+            # skip the setter and keep the string; it's decoded lazily on
+            # first access to .segmentation.
+            bbox = cls(rect, class_name, attributes, color, source, score, uncertain=uncertain)
+            bbox._seg_encoded = raw_segmentation or None
+        else:
+            bbox = cls(rect, class_name, attributes, color, source, score, segmentation=decode_segmentation(raw_segmentation), uncertain=uncertain)
         bbox.verified = data.get("verified", source == "manual")
         bbox.original_source = data.get("original_source", source)
         return bbox
@@ -213,13 +348,12 @@ class BoundingBox:
         # Create a copy of attributes
         new_attributes = self.attributes.copy() if self.attributes else {}
 
-        # Copy segmentation (list of tuples) if present
-        new_segmentation = None
-        if self.segmentation:
-            new_segmentation = [(x, y) for (x, y) in self.segmentation]
-
-        # Return a new BoundingBox with the copied properties
-        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score, segmentation=new_segmentation, uncertain=self.uncertain)
+        # Return a new BoundingBox with the copied properties. The
+        # segmentation is already simplified, so assign it directly rather
+        # than running it through the setter again.
+        bbox = BoundingBox(new_rect, self.class_name, new_attributes, new_color, self.source, self.score, uncertain=self.uncertain)
+        bbox._segmentation = self._segmentation
+        bbox._seg_encoded = self._seg_encoded
         bbox.verified = self.verified
         bbox.original_source = self.original_source
         return bbox

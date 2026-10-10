@@ -37,6 +37,9 @@ ZERO_SHOT_MODELS = [
     ('SAM3 Text Prompt',                     'sam3.1_l.pt'),
 ]
 
+# Class action: detect this class only to suppress other detections inside it (not saved)
+IGNORE_REGION_ACTION = 'Ignore Region (Suppress)'
+
 SEG_REFINER_MODELS = [
     ('None',                                 None),
     ('SAM2 Fast (sam2_s.pt)',                'sam2_s.pt'),
@@ -272,6 +275,42 @@ class AutoAnnotateDialog(QDialog):
         dedup_row.addStretch()
         self._adv_section.add_layout(dedup_row)
 
+        # Ignore-region overlap (for 'Ignore Region (Suppress)' classes)
+        suppress_row = QHBoxLayout()
+        suppress_row.addWidget(QLabel('Ignore-region: drop detections inside by at least:'))
+        self.suppress_spin = QSpinBox()
+        self.suppress_spin.setRange(5, 100)
+        self.suppress_spin.setValue(60)
+        self.suppress_spin.setSuffix(' %')
+        self.suppress_spin.setFixedWidth(80)
+        self.suppress_spin.setToolTip(
+            "A detection is dropped when at least this much of its box lies inside a box of an\n"
+            "'Ignore Region (Suppress)' class (detected in the same frame, or already annotated).")
+        suppress_row.addWidget(self.suppress_spin)
+        suppress_row.addStretch()
+        self._adv_section.add_layout(suppress_row)
+
+        # Shadow rejection (colour analysis of each detection's mask)
+        shadow_row = QHBoxLayout()
+        self.chk_reject_shadows = QCheckBox('Reject shadow-like detections, when confidence below:')
+        self.chk_reject_shadows.setToolTip(
+            "Compares each detection's mask with the ground just around it. A cast shadow is that\n"
+            "ground dimmed: darker, never brighter, same colour and no more varied. Detections that\n"
+            "look like that are dropped. Needs segmentation masks (SAM3 / YOLOE / a SAM refiner).\n\n"
+            "Only low-confidence detections are checked: colour can't tell a shadow from a backlit\n"
+            "person or a black car, and those are detected with high confidence.")
+        self.shadow_score_spin = QSpinBox()
+        self.shadow_score_spin.setRange(1, 100)
+        self.shadow_score_spin.setValue(60)
+        self.shadow_score_spin.setSuffix(' %')
+        self.shadow_score_spin.setFixedWidth(80)
+        self.shadow_score_spin.setEnabled(False)
+        self.chk_reject_shadows.toggled.connect(self.shadow_score_spin.setEnabled)
+        shadow_row.addWidget(self.chk_reject_shadows)
+        shadow_row.addWidget(self.shadow_score_spin)
+        shadow_row.addStretch()
+        self._adv_section.add_layout(shadow_row)
+
         # Save segmentation
         self.chk_save_seg = QCheckBox('Save segmentation masks (polygons)')
         self.chk_save_seg.setChecked(True)
@@ -425,6 +464,9 @@ class AutoAnnotateDialog(QDialog):
             'threshold':         threshold,
             'min_score':         threshold / 100.0,
             'dedup_iou':         self.dedup_spin.value(),
+            'suppress_overlap':  self.suppress_spin.value() / 100.0,
+            'reject_shadows':    self.chk_reject_shadows.isChecked(),
+            'shadow_max_score':  self.shadow_score_spin.value() / 100.0,
         }
 
     def _bulk_set_action(self, action_text):
@@ -476,8 +518,13 @@ class AutoAnnotateDialog(QDialog):
         action_combo.addItems([
             'Detect (Zero-Shot)',
             'Use as Helper (SAM3 Refine)',
+            IGNORE_REGION_ACTION,
             'Remove Labels',
             'Ignore'])
+        action_combo.setItemData(
+            2, "Detect this class (e.g. 'shadow') only to drop other detections lying inside it.\n"
+               "Its own boxes are not saved; existing boxes of this class also act as ignore areas.",
+            Qt.ToolTipRole)
         action_combo.setCurrentText('Ignore' if class_name else 'Detect (Zero-Shot)')
         self.classes_table.setCellWidget(row, 1, action_combo)
 
@@ -504,6 +551,10 @@ class AutoAnnotateDialog(QDialog):
             elif 'Detect' in text:
                 ei.setEnabled(True); ii.setEnabled(True)
                 ri.setEnabled(False); ri.clear(); di.setEnabled(True)
+            elif text == IGNORE_REGION_ACTION:
+                ei.setEnabled(True)
+                for w in (ii, ri, di):
+                    w.setEnabled(False); w.clear()
             else:
                 for w in (ei, ii, ri, di):
                     w.setEnabled(False); w.clear()

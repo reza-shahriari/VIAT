@@ -18,10 +18,11 @@ Key features:
 
 import cv2
 from PyQt5.QtWidgets import QWidget, QMenu, QApplication
-from PyQt5.QtCore import Qt, QRect, QPoint, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QRect, QPoint, QTimer, QEvent, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPixmap, QImage
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -390,7 +391,8 @@ class VideoCanvas(QWidget):
                             from PyQt5.QtGui import QPolygonF
                             from PyQt5.QtCore import QPointF
                             poly = QPolygonF()
-                            for (px, py) in annotation.segmentation:
+                            seg_pts = annotation.fitted_segmentation() if hasattr(annotation, 'fitted_segmentation') else annotation.segmentation
+                            for (px, py) in seg_pts:
                                 dp = self.image_to_display_point(px, py)
                                 poly.append(QPointF(dp.x(), dp.y()))
                             if poly.size() >= 3:
@@ -1067,6 +1069,41 @@ class VideoCanvas(QWidget):
             return False
         return True
 
+    # TEMP DEBUG (mouse snap investigation): set VIAT_DEBUG_MOUSE=1 to log every
+    # canvas mouse event with the interaction state before/after it to logs/mouse_trace.log.
+    _MOUSE_TRACE_TYPES = {QEvent.MouseButtonPress: "PRESS", QEvent.MouseMove: "MOVE",
+                          QEvent.MouseButtonRelease: "RELEASE", QEvent.MouseButtonDblClick: "DBLCLICK"}
+
+    def _mouse_trace_state(self):
+        sel = self.selected_annotation
+        return (f"sel={'none' if sel is None else hex(id(sel))} "
+                f"rect={None if sel is None else (sel.rect.x(), sel.rect.y(), sel.rect.width(), sel.rect.height())} "
+                f"handle={getattr(self, 'resizing_handle', None)} edge={self.edge_moving} "
+                f"drag={None if self.drag_start_pos is None else (self.drag_start_pos.x(), self.drag_start_pos.y())} "
+                f"drawing={self.is_drawing} start={None if self.start_point is None else (self.start_point.x(), self.start_point.y())} "
+                f"cur={None if self.current_point is None else (self.current_point.x(), self.current_point.y())} "
+                f"n_ann={len(self.annotations)} zoom={self.zoom_level} pan=({self.pan_offset.x()},{self.pan_offset.y()}) "
+                f"disp={self.get_display_rect().getRect() if self.pixmap else None} "
+                f"pix={None if not self.pixmap else (self.pixmap.width(), self.pixmap.height())}")
+
+    def event(self, e):
+        kind = self._MOUSE_TRACE_TYPES.get(e.type()) if os.environ.get("VIAT_DEBUG_MOUSE") else None
+        if kind is None:
+            return super().event(e)
+        t0 = time.perf_counter()
+        before = self._mouse_trace_state()
+        result = super().event(e)
+        after = self._mouse_trace_state()
+        img = self.display_to_image_pos(e.pos()) if self.pixmap else None
+        line = (f"{time.time():.3f} {kind} pos=({e.pos().x()},{e.pos().y()}) "
+                f"img={None if img is None else (img.x(), img.y())} btns={int(e.buttons())} "
+                f"handler_ms={(time.perf_counter() - t0) * 1000:.1f}\n  before: {before}\n  after:  {after}\n")
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "mouse_trace.log"), "a") as f:
+            f.write(line)
+        return result
+
     def mousePressEvent(self, event):
         # Prevent interaction if AI is currently processing this frame
         if hasattr(self.main_window, "ai_processing_frame") and self.main_window.ai_processing_frame == getattr(self.main_window, "current_frame", -1):
@@ -1199,6 +1236,12 @@ class VideoCanvas(QWidget):
                 if self.selected_annotation and hasattr(self.main_window, "annotation_dock"):
                     self.main_window.annotation_dock.select_annotation_in_list(self.selected_annotation)
         
+                # Clear any stale interaction state from a previous gesture so a
+                # leftover drag_start_pos can't turn a handle resize into a move.
+                self.drag_start_pos = None
+                self.resizing_handle = None
+                self.edge_moving = False
+
                 # Check if we're clicking on an edge
                 display_rect = self.image_to_display_rect(annotation.rect)
                 handle_idx = self.handle_at_pos(display_rect, event.pos())
@@ -1713,44 +1756,6 @@ class VideoCanvas(QWidget):
 
                 self.update()
             return
-        # If we're dragging an annotation
-        if self.drag_start_pos and self.selected_annotation and not self.is_drawing:
-            img_pos = self.display_to_image_pos(event.pos())
-            if not img_pos:
-                return
-
-            # Calculate the delta movement in image coordinates
-            delta_x = img_pos.x() - self.drag_start_pos.x()
-            delta_y = img_pos.y() - self.drag_start_pos.y()
-
-            # Create a new rectangle with the offset
-            new_rect = QRect(
-                self.original_rect.x() + delta_x,
-                self.original_rect.y() + delta_y,
-                self.original_rect.width(),
-                self.original_rect.height(),
-            )
-
-            # Update the annotation
-            self.selected_annotation.rect = new_rect
-            self.update()
-            return
-
-        # If we're drawing a new annotation
-        if self.is_drawing:
-            img_pos = self.display_to_image_pos(event.pos())
-            img_x = min(max(img_pos.x(), 0), self.pixmap.width() - 1)
-            img_y = min(max(img_pos.y(), 0), self.pixmap.height() - 1)
-            self.current_point = QPoint(img_x, img_y)
-            self.update()
-            return
-
-        # If we're moving an edge
-        if self.edge_moving and self.selected_annotation:
-            # Edge moving code remains the same
-            # ...
-            return
-
         # Add this new section to handle resizing via handles
         if hasattr(self, 'resizing_handle') and self.resizing_handle is not None and self.selected_annotation:
             # Get position delta in image coordinates directly, instead of moving
@@ -1787,6 +1792,44 @@ class VideoCanvas(QWidget):
             # Update the annotation with the new rectangle
             self.selected_annotation.rect = new_rect.normalized()
             self.update()
+            return
+
+        # If we're dragging an annotation
+        if self.drag_start_pos and self.selected_annotation and not self.is_drawing:
+            img_pos = self.display_to_image_pos(event.pos())
+            if not img_pos:
+                return
+
+            # Calculate the delta movement in image coordinates
+            delta_x = img_pos.x() - self.drag_start_pos.x()
+            delta_y = img_pos.y() - self.drag_start_pos.y()
+
+            # Create a new rectangle with the offset
+            new_rect = QRect(
+                self.original_rect.x() + delta_x,
+                self.original_rect.y() + delta_y,
+                self.original_rect.width(),
+                self.original_rect.height(),
+            )
+
+            # Update the annotation
+            self.selected_annotation.rect = new_rect
+            self.update()
+            return
+
+        # If we're drawing a new annotation
+        if self.is_drawing:
+            img_pos = self.display_to_image_pos(event.pos())
+            img_x = min(max(img_pos.x(), 0), self.pixmap.width() - 1)
+            img_y = min(max(img_pos.y(), 0), self.pixmap.height() - 1)
+            self.current_point = QPoint(img_x, img_y)
+            self.update()
+            return
+
+        # If we're moving an edge
+        if self.edge_moving and self.selected_annotation:
+            # Edge moving code remains the same
+            # ...
             return
 
         # Update cursor based on what's under it
@@ -1910,6 +1953,7 @@ class VideoCanvas(QWidget):
             if hasattr(self, 'resizing_handle') and self.resizing_handle is not None:
                 self.resizing_handle = None
                 self.resize_start_pos = None
+                self.drag_start_pos = None
                 
                 # Update the annotation list in the main window
                 if self.main_window:
@@ -1942,6 +1986,7 @@ class VideoCanvas(QWidget):
                             )
                 
                 self.edge_start_pos = None
+                self.drag_start_pos = None
 
                 # Update the annotation list in the main window
                 if self.main_window:

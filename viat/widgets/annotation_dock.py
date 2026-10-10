@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QRadioButton,
     QProgressBar,
+    QProgressDialog,
     QApplication,
     QMessageBox,
     QButtonGroup,
@@ -33,6 +34,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QRect, QTimer
 from PyQt5.QtGui import QColor, QIntValidator, QDoubleValidator, QPainter
 import cv2
+
+from viat.widgets.object_range_tracker import ObjectRangeTrackWorker
 
 class SelectAllLineEdit(QLineEdit):
     """A QLineEdit that automatically selects all text when clicked"""
@@ -1784,9 +1787,23 @@ class AnnotationDock(QDockWidget):
     def apply_batch_edit_object(self, start_frame, end_frame, reference_annotation, action, action_params):
         """
         Apply a specific action to an object across frames. Uses visual tracking if track_id is absent.
+
+        Matching/tracking runs on a background thread (ObjectRangeTrackWorker)
+        so the UI stays responsive; each matched frame is edited here on the
+        UI thread as results arrive. Tracking stops at the first frame in the
+        range where the object isn't found.
         """
         if start_frame > end_frame:
             start_frame, end_frame = end_frame, start_frame
+
+        running = getattr(self, "_object_range_worker", None)
+        if running is not None and running.isRunning():
+            QMessageBox.information(
+                self.main_window,
+                "Busy",
+                "An 'Edit Object over Frame Range' operation is already running.",
+            )
+            return
 
         # For "Sync Attributes & Class", match using the OLD/current class
         # (still consistent across not-yet-fixed frames) rather than the
@@ -1798,155 +1815,142 @@ class AnnotationDock(QDockWidget):
         if hasattr(reference_annotation, "attributes") and reference_annotation.attributes:
             ref_track_id = reference_annotation.attributes.get("track_id")
 
-        progress = QDialog(self)
+        # For track_id-based matching, the track_id alone reliably identifies
+        # the object regardless of its (possibly wrong) class label, so no
+        # class filter is needed there. For the no-track_id visual-tracker
+        # fallback, the worker filters by class_name (which for "Sync
+        # Attributes & Class" is the OLD/currently-labeled class picked in the
+        # dialog, not the new one).
+        # The worker only sees this snapshot, never the live frame_annotations.
+        snapshot = {}
+        for frame_num in range(start_frame, end_frame + 1):
+            anns = self.main_window.frame_annotations.get(frame_num)
+            if not anns:
+                continue
+            snapshot[frame_num] = [
+                (
+                    ann,
+                    QRect(ann.rect),
+                    ann.class_name,
+                    ann.attributes.get("track_id") if getattr(ann, "attributes", None) else None,
+                )
+                for ann in anns
+            ]
+
+        video_filename = None
+        if getattr(self.main_window, "cap", None) is not None:
+            video_filename = getattr(self.main_window, "video_filename", None) or None
+
+        progress = QProgressDialog(
+            f"Editing object in frames {start_frame}-{end_frame}...",
+            "Stop",
+            start_frame,
+            end_frame + 1,
+            self.main_window,
+        )
         progress.setWindowTitle(f"Applying Action: {action}")
-        progress.setFixedSize(300, 100)
-        progress_layout = QVBoxLayout(progress)
-        progress_layout.addWidget(
-            QLabel(f"Editing object in frames {start_frame}-{end_frame}...")
-        )
-        progress_bar = QProgressBar()
-        progress_bar.setRange(start_frame, end_frame)
-        progress_layout.addWidget(progress_bar)
-        progress.setModal(False)
+        progress.setWindowModality(Qt.NonModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(start_frame)
         progress.show()
-        QApplication.processEvents()
 
-        edit_count = 0
-        last_matched_rect = reference_annotation.rect
-        iou_threshold = 0.2
-        
-        # Setup visual tracker if no track_id
-        tracker = None
-        cap = getattr(self.main_window, 'cap', None)
-        orig_pos = None
-        cap_lock = getattr(self.main_window, '_cap_lock', None)
-        if cap is not None and cap_lock is not None:
-            self.main_window._video_batch_busy = True
-        try:
-            if ref_track_id is None and cap is not None:
-                try:
-                    with cap_lock:
-                        tracker = cv2.TrackerMIL_create()
-                        orig_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-                        ret, frame = cap.read()
-                        if ret:
-                            rect = (last_matched_rect.x(), last_matched_rect.y(), last_matched_rect.width(), last_matched_rect.height())
-                            tracker.init(frame, rect)
-                except Exception:
-                    tracker = None
-
-            for frame_num in range(start_frame, end_frame + 1):
-                progress_bar.setValue(frame_num)
-                if frame_num % 5 == 0:
-                    QApplication.processEvents()
-
-                if frame_num not in self.main_window.frame_annotations:
-                    continue
-
-                anns = self.main_window.frame_annotations[frame_num]
-                to_edit = []
-
-                # Predict next rect using tracker
-                predicted_rect = last_matched_rect
-                if tracker is not None and frame_num > start_frame:
-                    with cap_lock:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                        ret, frame = cap.read()
-                    if ret:
-                        success, box = tracker.update(frame)
-                        if success:
-                            predicted_rect = QRect(int(box[0]), int(box[1]), int(box[2]), int(box[3]))
-
-                # For track_id-based matching, the track_id alone reliably
-                # identifies the object regardless of its (possibly wrong) class
-                # label, so no class filter is needed there. For the no-track_id
-                # visual-tracker fallback, filtering by class_name (which for
-                # "Sync Attributes & Class" is the OLD/currently-labeled class
-                # picked in the dialog, not the new one) keeps matching precise
-                # without requiring the reference frame to be pre-edited.
-                if ref_track_id is not None:
-                    for ann in anns:
-                        tid = (
-                            ann.attributes.get("track_id")
-                            if hasattr(ann, "attributes") and ann.attributes
-                            else None
-                        )
-                        if tid == ref_track_id:
-                            to_edit.append(ann)
-                else:
-                    best_ann = None
-                    best_iou = 0.0
-                    for ann in anns:
-                        if ann.class_name != class_name:
-                            continue
-                        iou = self.main_window.canvas.iou(predicted_rect, ann.rect)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_ann = ann
-                    if best_ann and best_iou >= iou_threshold:
-                        to_edit.append(best_ann)
-                        last_matched_rect = best_ann.rect
-
-                if to_edit:
-                    edit_count += len(to_edit)
-
-                    # Apply action
-                    for ann in to_edit:
-                        if action == "Blur":
-                            blur_mgr = getattr(self.main_window, 'blur_manager', None)
-                            if blur_mgr is not None:
-                                blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
-                        elif action == "Shift Position":
-                            ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
-                        elif action == "Sync Attributes & Class":
-                            new_class = action_params.get("new_class", reference_annotation.class_name)
-                            ann.class_name = new_class
-                            ann.color = self.main_window.canvas.class_colors.get(
-                                new_class, reference_annotation.color)
-                            if not hasattr(ann, "attributes") or ann.attributes is None:
-                                ann.attributes = {}
-                            new_attributes = action_params.get("new_attributes")
-                            if new_attributes is not None:
-                                for k, v in new_attributes.items():
-                                    ann.attributes[k] = v
-                            elif hasattr(reference_annotation, "attributes"):
-                                # Fallback for any programmatic caller that doesn't
-                                # supply new_attributes (keeps old behavior).
-                                for k, v in reference_annotation.attributes.items():
-                                    ann.attributes[k] = v
-
-                    if action in ["Delete", "Blur"]:
-                        self.main_window.frame_annotations[frame_num] = [
-                            a for a in anns if a not in to_edit
-                        ]
-
-                if frame_num == self.main_window.current_frame:
-                    self.main_window.canvas.annotations = (
-                        self.main_window.frame_annotations[frame_num].copy()
-                    )
-                    if action in ["Delete", "Blur"] and self.main_window.canvas.selected_annotation in to_edit:
-                        self.main_window.canvas.selected_annotation = None
-                        if hasattr(self.main_window.canvas, "selected_annotations"):
-                            self.main_window.canvas.selected_annotations = []
-                    self.main_window.canvas.update()
-                    self.update_annotation_list()
-                    if action == "Blur" and hasattr(self.main_window, '_refresh_blur_display'):
-                        self.main_window._refresh_blur_display()
-
-            if tracker is not None and cap is not None and orig_pos is not None:
-                with cap_lock:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, orig_pos)
-        finally:
-            if cap is not None and cap_lock is not None:
-                self.main_window._video_batch_busy = False
-
-        progress.close()
-
-        self.main_window.statusBar.showMessage(
-            f"Action '{action}' applied to {edit_count} annotations for '{class_name}' "
-            f"across frames {start_frame}-{end_frame}",
-            5000,
+        worker = ObjectRangeTrackWorker(
+            video_filename, start_frame, end_frame, reference_annotation.rect,
+            class_name, ref_track_id, snapshot, self,
         )
-        self.main_window.project_modified = True
+        self._object_range_worker = worker
+        state = {"edit_count": 0}
+
+        def on_frame_matched(frame_num, matched):
+            # The user may have changed the video, or edited/deleted these
+            # annotations while the worker was running -- only touch
+            # annotations that are still on that frame.
+            if getattr(self.main_window, "video_filename", None) != video_filename and video_filename:
+                worker.requestInterruption()
+                return
+            anns = self.main_window.frame_annotations.get(frame_num)
+            if not anns:
+                return
+            to_edit = [ann for ann in matched if any(ann is a for a in anns)]
+            if not to_edit:
+                return
+            self._apply_object_action(frame_num, anns, to_edit, reference_annotation, action, action_params)
+            state["edit_count"] += len(to_edit)
+            self.main_window.project_modified = True
+
+        def on_progress(frame_num):
+            progress.setValue(frame_num + 1)
+
+        def on_finished(last_frame, stopped_frame):
+            # QProgressDialog.close() emits canceled(); detach it first.
+            progress.canceled.disconnect()
+            progress.close()
+            msg = (
+                f"Action '{action}' applied to {state['edit_count']} annotations for '{class_name}'"
+            )
+            if stopped_frame >= 0:
+                msg += (
+                    f" across frames {start_frame}-{last_frame}; object not found at frame "
+                    f"{stopped_frame}, stopped tracking"
+                )
+            elif last_frame < end_frame:
+                msg += f" across frames {start_frame}-{last_frame} (stopped by user)"
+            else:
+                msg += f" across frames {start_frame}-{end_frame}"
+            self.main_window.statusBar.showMessage(msg, 8000)
+            if self._object_range_worker is worker:
+                self._object_range_worker = None
+            worker.deleteLater()
+
+        worker.frameMatched.connect(on_frame_matched)
+        worker.progressChanged.connect(on_progress)
+        worker.finishedTracking.connect(on_finished)
+        progress.canceled.connect(worker.requestInterruption)
+        worker.start()
+
+    def _apply_object_action(self, frame_num, anns, to_edit, reference_annotation, action, action_params):
+        """Apply one "Edit Object over Frame Range" action to the matched
+        annotations on a single frame (UI thread only)."""
+        for ann in to_edit:
+            if action == "Blur":
+                blur_mgr = getattr(self.main_window, 'blur_manager', None)
+                if blur_mgr is not None:
+                    blur_mgr.add_bbox_region(frame_num, ann.rect, getattr(self.main_window.canvas, 'blur_kernel', 151))
+            elif action == "Shift Position":
+                ann.rect.translate(action_params.get("dx", 0), action_params.get("dy", 0))
+            elif action == "Sync Attributes & Class":
+                new_class = action_params.get("new_class", reference_annotation.class_name)
+                ann.class_name = new_class
+                ann.color = self.main_window.canvas.class_colors.get(
+                    new_class, reference_annotation.color)
+                if not hasattr(ann, "attributes") or ann.attributes is None:
+                    ann.attributes = {}
+                new_attributes = action_params.get("new_attributes")
+                if new_attributes is not None:
+                    for k, v in new_attributes.items():
+                        ann.attributes[k] = v
+                elif hasattr(reference_annotation, "attributes"):
+                    # Fallback for any programmatic caller that doesn't
+                    # supply new_attributes (keeps old behavior).
+                    for k, v in reference_annotation.attributes.items():
+                        ann.attributes[k] = v
+
+        if action in ["Delete", "Blur"]:
+            self.main_window.frame_annotations[frame_num] = [
+                a for a in anns if not any(a is e for e in to_edit)
+            ]
+
+        if frame_num == self.main_window.current_frame:
+            self.main_window.canvas.annotations = (
+                self.main_window.frame_annotations[frame_num].copy()
+            )
+            if action in ["Delete", "Blur"] and self.main_window.canvas.selected_annotation in to_edit:
+                self.main_window.canvas.selected_annotation = None
+                if hasattr(self.main_window.canvas, "selected_annotations"):
+                    self.main_window.canvas.selected_annotations = []
+            self.main_window.canvas.update()
+            self.update_annotation_list()
+            if action == "Blur" and hasattr(self.main_window, '_refresh_blur_display'):
+                self.main_window._refresh_blur_display()
