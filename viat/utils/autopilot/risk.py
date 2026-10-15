@@ -25,6 +25,7 @@ def score_track(trk, ctx):
     judge is trained on (calibrated scores: a model's typical confident score is 0.5).
     """
     fps, path, records, n_models, names = ctx['fps'], ctx['path'], ctx['records'], ctx['n_models'], ctx['names']
+    stride = max(1, int(ctx.get('stride', 1)))
     frames = trk.frames
     det = trk.det_frames()
     span = frames[-1] - frames[0] + 1
@@ -56,7 +57,12 @@ def score_track(trk, ctx):
         hid = max(host.items(), key=lambda kv: kv[1])[0]
         add('inside_other', f'lies inside track #{hid} - may be a part of it', frames[len(frames) // 2], 0.35)
 
-    support = len(det) / float(span)
+    # A stride-3 run intentionally asks the detector for roughly one frame in
+    # three.  Comparing detections with every video frame would mark a healthy
+    # fast-mode track as weak support and would make the risk score depend on
+    # performance settings rather than evidence quality.
+    expected_det = max(1, int(np.ceil(span / float(stride))))
+    support = min(1.0, len(det) / float(expected_det))
     longest, run_start, cur, cur_start = 0, frames[0], 0, frames[0]
     det_set = set(det)
     for f in range(frames[0], frames[-1] + 1):
@@ -152,7 +158,7 @@ def score_track(trk, ctx):
         'inside_frac': inside / float(len(frames)), 'jumps': float(jumps),
         'overlap': float(max(trk.overlaps.values())) if trk.overlaps else 0.0,
         'promoted': float(bool(getattr(trk, 'promoted', False))),
-        'longest_gap_sec': longest / fps,
+            'longest_gap_sec': longest / fps,
     }
     feats = {k: round(float(v), 4) for k, v in feats.items()}
     return _noisy_or([r[3] for r in reasons]), reasons, feats
@@ -164,7 +170,7 @@ def find_possible_misses(records, tracks, frames, path, cfg, fps, names):
     for t in tracks:
         for f, v in t.boxes.items():
             covered.setdefault(f, []).append(v[0])
-    min_len = max(5, int(round(cfg.miss_min_sec * fps)))
+    min_len = max(2, int(np.ceil(cfg.miss_min_sec * fps / float(max(1, cfg.stride)))))
     open_groups, done = [], []
     for f in frames:
         rec = records.get(f)
@@ -205,10 +211,11 @@ def find_possible_misses(records, tracks, frames, path, cfg, fps, names):
             continue
         fs = sorted(g['boxes'])
         scores = [g['boxes'][f][1] for f in fs]
+        expected = max(1, int(np.ceil((fs[-1] - fs[0] + 1) / float(max(1, cfg.stride)))))
         misses.append({
             'class': names[int(np.argmax(g['cls']))] if len(names) else '',
             'start': fs[0], 'end': fs[-1], 'mean_score': float(np.mean(scores)),
-            'coverage': len(fs) / float(fs[-1] - fs[0] + 1),
+            'coverage': min(1.0, len(fs) / float(expected)),
             'frame': fs[int(np.argmax(scores))],
             'boxes': [[int(f)] + [round(float(v), 1) for v in g['boxes'][f][0]] + [round(g['boxes'][f][1], 3)] for f in fs],
         })

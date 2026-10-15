@@ -55,6 +55,10 @@ class VideoCanvas(QWidget):
         self.original_rect = None
         self.pixmap = None
         self.annotations = []  # List of BoundingBox objects
+        # Temporary overlays (for example an Autopilot track that was rejected by
+        # the judges).  These are deliberately kept separate from ``annotations``
+        # so selecting a preview can never accidentally save it to the project.
+        self.preview_annotations = []
         self.current_annotation = None
         self.drawing = False
         self.setMouseTracking(True)
@@ -333,10 +337,14 @@ class VideoCanvas(QWidget):
                 if getattr(self, "eval_mode", False):
                     self.draw_evaluation_overlay(painter, update_rect)
                 else:
-                    # Draw annotations
-                    for annotation in self.annotations:
+                    # Draw annotations.  Preview annotations are rendered with the
+                    # project labels, but remain outside ``self.annotations`` and
+                    # therefore cannot be edited/saved as real project labels.
+                    annotations_to_draw = list(self.annotations) + list(
+                        getattr(self, 'preview_annotations', []) or [])
+                    for annotation in annotations_to_draw:
                         # Skip if object_filter is set and this annotation doesn't match
-                        if getattr(self, 'object_filter', None):
+                        if getattr(self, 'object_filter', None) and not getattr(annotation, 'is_autopilot_preview', False):
                             _aid = (getattr(annotation, 'attributes', None) or {}).get('actor_id') or (getattr(annotation, 'attributes', None) or {}).get('track_id')
                             if _aid != self.object_filter:
                                 continue
@@ -368,7 +376,9 @@ class VideoCanvas(QWidget):
                                     modified_color = QColor.fromHsvF(new_h, s, v)
                                     base_color = modified_color
                             # Determine pen style based on source
-                            if hasattr(annotation, 'source'):
+                            if getattr(annotation, 'is_autopilot_preview', False):
+                                pen = QPen(QColor(255, 92, 72), 3, Qt.DashLine)
+                            elif hasattr(annotation, 'source'):
                                 if annotation.source == "manual":
                                     pen = QPen(base_color, 2, Qt.SolidLine)
                                 elif annotation.source == "interpolated":
@@ -424,9 +434,12 @@ class VideoCanvas(QWidget):
                         draw_above = space_above >= space_below
 
                         # Calculate class label width and position
-                        text_width = min(
-                            max(60, display_rect.width()), 120
-                        )  # Min 60px, max 120px
+                        show_detector_info = (getattr(annotation, 'is_autopilot_preview', False) or
+                                              annotation == self.selected_annotation)
+                        if show_detector_info:
+                            text_width = min(max(110, display_rect.width()), 320)
+                        else:
+                            text_width = min(max(60, display_rect.width()), 120)
 
                         # Position the class label centered horizontally with the box
                         text_x = display_rect.left() + (display_rect.width() - text_width) / 2
@@ -487,7 +500,17 @@ class VideoCanvas(QWidget):
                             text_rect.setLeft(text_rect.left() + 16)
 
                         painter.setPen(QPen(QColor(0, 0, 0)))
-                        painter.drawText(text_rect, int(Qt.AlignCenter), annotation.class_name)
+                        label_text = annotation.class_name
+                        if getattr(annotation, 'is_autopilot_preview', False):
+                            label_text = f"REJECTED: {label_text}"
+                        if show_detector_info:
+                            detector_names = ((getattr(annotation, 'attributes', None) or {})
+                                              .get('autopilot_detectors') or [])
+                            if detector_names:
+                                short = [str(name).replace('\\', '/').rsplit('/', 1)[-1]
+                                         for name in detector_names[:3]]
+                                label_text += ' · ' + ', '.join(short)
+                        painter.drawText(text_rect, int(Qt.AlignCenter), label_text)
 
                         # DEBUG: Show score if debug flag is enabled and annotation has a score
                         if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:

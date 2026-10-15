@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import QMessageBox, QWidget, QHBoxLayout, QProgressBar, QPu
 
 from ..annotation import BoundingBox
 from ..logger import logger
-from ..utils.autopilot import (FrameSource, Cancelled, run_autopilot, save_result,
+from ..utils.autopilot import (AutopilotConfig, FrameSource, Cancelled, run_autopilot, save_result,
                                load_result, result_path, sample_frames)
 from ..utils.autopilot.learned import log_decision, train as train_learned_judge
 from ..widgets.autopilot_dialog import AutopilotDialog
@@ -64,6 +64,7 @@ class AutopilotController:
         self.last_config = None
         self.apply_opts = {'replace_previous': True, 'skip_existing': True}
         self._progress_widget = None
+        self._clear_preview()
 
     # ------------------------------------------------------------------ media
     def _source(self):
@@ -90,6 +91,33 @@ class AutopilotController:
     def class_names(self):
         return list(self.mw.canvas.class_colors.keys())
 
+    def _collect_exemplars(self, cfg):
+        """Collect verified, non-Autopilot boxes from the requested frame range."""
+        self.mw.update_frame_annotations()
+        wanted = {name.lower() for name in cfg.class_names()}
+        limit = max(1, int(cfg.exemplar_limit))
+        counts = {}
+        examples = []
+        for frame in sorted(self.mw.frame_annotations):
+            if frame < cfg.start_frame or frame > cfg.end_frame:
+                continue
+            for ann in self.mw.frame_annotations.get(frame, []):
+                name = str(getattr(ann, 'class_name', '') or '')
+                key = name.lower()
+                if key not in wanted or _is_autopilot(ann) or not getattr(ann, 'verified', False):
+                    continue
+                if counts.get(key, 0) >= limit:
+                    continue
+                rect = ann.rect
+                if rect.width() < 3 or rect.height() < 3:
+                    continue
+                examples.append({'frame': int(frame), 'class': name,
+                                 'box': [int(rect.x()), int(rect.y()),
+                                         int(rect.x() + rect.width()),
+                                         int(rect.y() + rect.height())]})
+                counts[key] = counts.get(key, 0) + 1
+        return examples
+
     # -------------------------------------------------------------------- run
     def open_dialog(self):
         if self.worker is not None and self.worker.isRunning():
@@ -99,6 +127,9 @@ class AutopilotController:
         if src is None or src.count <= 0:
             QMessageBox.warning(self.mw, 'Autopilot', 'Please open a video (or an ordered frame folder) first.')
             return
+        # Flush a just-drawn box before the dialog optionally turns it into a
+        # visual exemplar.
+        self.mw.update_frame_annotations()
         last = self.last_config
         if last is None and os.path.exists(result_path(src)):
             try:
@@ -110,11 +141,20 @@ class AutopilotController:
         if not dlg.exec_():
             return
         cfg = dlg.get_config()
+        if cfg.use_exemplars:
+            cfg.exemplars = self._collect_exemplars(cfg)
+            if not cfg.exemplars:
+                QMessageBox.information(
+                    self.mw, 'Autopilot visual examples',
+                    'No manually verified boxes were found in this frame range. '
+                    'Autopilot will continue with text prompts only.')
+                cfg.use_exemplars = False
         self.apply_opts = dlg.apply_options()
         self.last_config = cfg.to_dict()
         self.start(cfg, src)
 
     def start(self, cfg, src):
+        self._clear_preview()
         self.worker = AutopilotWorker(src, cfg)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._on_done)
@@ -203,7 +243,8 @@ class AutopilotController:
         return best + 1
 
     def _make_box(self, row, cls, label_id, verified=False):
-        f, x1, y1, x2, y2, score, kind = row
+        f, x1, y1, x2, y2, score, kind = row[:7]
+        metadata = row[7] if len(row) > 7 and isinstance(row[7], dict) else {}
         W, H = self.result['source'].get('width') or 0, self.result['source'].get('height') or 0
         if W and H:
             x1, x2 = max(0.0, min(x1, W - 1)), max(0.0, min(x2, W))
@@ -213,11 +254,41 @@ class AutopilotController:
         attrs = dict(self.mw.get_default_attributes_for_class(cls) or {})
         attrs['track_id'] = label_id
         attrs['autopilot_id'] = label_id
+        detector_scores = metadata.get('detector_scores') or {}
+        if detector_scores:
+            attrs['autopilot_detector_scores'] = {
+                str(name): round(float(value), 3)
+                for name, value in detector_scores.items()
+            }
+            attrs['autopilot_detectors'] = list(attrs['autopilot_detector_scores'])
+        if 'nmod' in metadata:
+            try:
+                attrs['autopilot_detector_votes'] = int(metadata['nmod'])
+            except (TypeError, ValueError):
+                pass
         ann = BoundingBox(QRect(int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))), cls,
                           attributes=attrs, color=self.mw.canvas.class_colors.get(cls, QColor(0, 255, 0)),
                           source=SOURCE_BY_KIND.get(kind, 'autopilot'), score=float(score))
         ann.verified = verified
         return ann
+
+    @staticmethod
+    def _set_track_provenance(ann, track):
+        """Attach the track-level detector summary to a project annotation."""
+        if ann is None:
+            return
+        detectors = track.get('detectors') or {}
+        if detectors:
+            models = list(detectors)
+            ann.attributes['autopilot_detector_models'] = models
+            ann.attributes.setdefault('autopilot_detectors', models)
+            ann.attributes['autopilot_detector_summary'] = {
+                str(name): {
+                    key: value for key, value in (summary or {}).items()
+                    if key in ('frames', 'coverage', 'mean_score', 'max_score')
+                }
+                for name, summary in detectors.items()
+            }
 
     def _apply(self, res, replace_previous=True, skip_existing=True):
         mw = self.mw
@@ -249,6 +320,7 @@ class AutopilotController:
                         continue
                 ann = self._make_box(row, trk['class'], trk['label_id'], verified)
                 if ann is not None:
+                    self._set_track_provenance(ann, trk)
                     fa.setdefault(f, []).append(ann)
                     added += 1
             trk['skipped_existing'] = skipped
@@ -273,10 +345,73 @@ class AutopilotController:
         return best
 
     def _refresh_canvas(self):
+        self._clear_preview()
         mw = self.mw
         mw.load_current_frame_annotations()
         mw.update_annotation_list()
         mw.canvas.update()
+
+    def _clear_preview(self):
+        """Remove temporary Autopilot-only overlays without touching the project."""
+        canvas = getattr(self.mw, 'canvas', None)
+        if canvas is None:
+            return
+        preview = getattr(canvas, 'preview_annotations', None)
+        if preview:
+            canvas.preview_annotations = []
+            canvas.update()
+
+    def show_rejected_track(self, tid, frame=None):
+        """Show an auto-rejected track on the canvas without adding it to the project."""
+        if not self.result or not self._matches_current(warn=False):
+            return
+        trk = self.track_by_id(tid, include_deleted=True)
+        if not trk or trk.get('route') != 'rejected_by_judge':
+            return
+        self._clear_preview()
+        target = int(frame if frame is not None else trk.get('focus_frame', trk['start']))
+        rows = list(trk.get('boxes', []))
+        if rows and not any(int(row[0]) == target for row in rows):
+            target = int(min(rows, key=lambda row: abs(int(row[0]) - target))[0])
+        self.go_to_frame(target)
+        # If the requested frame was already current, go_to_frame() does not reload
+        # annotations, so explicitly clear any stale preview before adding this one.
+        self._clear_preview()
+        label_id = trk.get('label_id', trk.get('id', tid))
+        overlays = []
+        for row in rows:
+            if int(row[0]) != target:
+                continue
+            ann = self._make_box(row, trk['class'], label_id, verified=False)
+            if ann is not None:
+                self._set_track_provenance(ann, trk)
+                ann.is_autopilot_preview = True
+                ann.color = QColor(255, 92, 72)
+                overlays.append(ann)
+        canvas = getattr(self.mw, 'canvas', None)
+        if canvas is not None:
+            canvas.preview_annotations = overlays
+            canvas.update()
+
+    def rerun_with_detectors(self, models):
+        """Start a cached Autopilot rerun using only the selected detector models."""
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self.mw, 'Autopilot', 'Autopilot is already running.')
+            return
+        if not models:
+            QMessageBox.warning(self.mw, 'Autopilot', 'Select at least one detector.')
+            return
+        src = self._source()
+        if src is None or not self.result or not self._matches_current():
+            return
+        cfg_data = self.result.get('config') or self.last_config or {}
+        cfg = AutopilotConfig.from_dict(cfg_data)
+        cfg.models = list(models)
+        self.last_config = cfg.to_dict()
+        self.start(cfg, src)
+        if self.mw.statusBar:
+            self.mw.statusBar.showMessage(
+                'Autopilot: rerunning with selected detectors; cached detections will be reused.', 6000)
 
     def _save(self):
         if self.result and self.result_file:
@@ -350,6 +485,7 @@ class AutopilotController:
         trk = self.track_by_id(tid)
         if not trk:
             return
+        self._clear_preview()
         self.go_to_frame(frame)
         self._select_on_current(trk)
 
@@ -432,6 +568,7 @@ class AutopilotController:
                 row = [f] + [a[i] * (1 - t) + b[i] * t for i in range(1, 5)] + [min(a[5], b[5]), 'i']
                 ann = self._make_box(row, trk['class'], trk['label_id'], verified=True)
                 if ann is not None:
+                    self._set_track_provenance(ann, trk)
                     mw.frame_annotations.setdefault(f, []).append(ann)
                     trk['boxes'].append(row)
                     added += 1
@@ -469,6 +606,7 @@ class AutopilotController:
         for row in trk['boxes']:
             ann = self._make_box(row, trk['class'], trk['label_id'], verified=True)
             if ann is not None:
+                self._set_track_provenance(ann, trk)
                 mw.frame_annotations.setdefault(int(row[0]), []).append(ann)
         mw.project_modified = True
         self._decide(trk, 'accepted_by_user', label=1)
@@ -478,6 +616,7 @@ class AutopilotController:
         """Agree with the judges: the rejected track was not real."""
         trk = self.track_by_id(tid)
         if trk and trk['route'] == 'rejected_by_judge':
+            self._clear_preview()
             trk['confirmed_reject'] = True
             self._decide(trk, 'rejected_by_judge', label=0)
 
@@ -519,6 +658,7 @@ class AutopilotController:
     def show_miss(self, mid):
         m = self._miss(mid)
         if m and self._matches_current(warn=False):
+            self._clear_preview()
             self.go_to_frame(m['frame'])
 
     def resolve_miss(self, mid, add):

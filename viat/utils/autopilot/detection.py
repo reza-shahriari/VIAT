@@ -48,6 +48,13 @@ class CandidateDetector:
         self.prompts, self.prompt_class = cfg.prompt_table()
         self.n_classes = len(cfg.classes)
         self.backends = []
+        self.exemplars = []
+
+    def set_exemplars(self, exemplars):
+        """Provide optional visual queries to backends that support them."""
+        self.exemplars = list(exemplars or [])
+        for backend in self.backends:
+            backend.set_exemplars(self.exemplars)
 
     def has(self, key):
         return any(b.key == key for b in self.backends)
@@ -62,6 +69,7 @@ class CandidateDetector:
         if not ok:
             return f"{key}: {msg}"
         backend.set_prompts(self.prompts)
+        backend.set_exemplars(self.exemplars)
         self.backends.append(backend)
         self.log(f"[Autopilot] loaded detector {key}")
         return None

@@ -36,6 +36,7 @@ from ..zero_shot_manager import Sam3TextDetector
 from .geometry import iou_matrix
 from .learned import LearnedJudge
 from .weights import resolve_hf, resolve_file, missing_message, CHECKPOINTS
+from .errors import Cancelled
 
 # Judges trusted to auto-reject. The learned judge ranks tracks for review only: on 8 held-out videos it
 # had the best AUC (0.974) but lost 240 real boxes at t=0.3, while clip+sam_zoom lost none.
@@ -318,10 +319,14 @@ def run_judges(source, tracks, cfg, names, fps, workdir=None, progress=None, is_
 
     progress('Judging: reading crops', 0, 1)
     crops = collect_crops(source, tracks, cfg.judge_crops, 'vlm' in judges, is_cancelled)
+    if is_cancelled():
+        # A cancelled crop read must not look like a successful, partially judged
+        # run to the caller.  The worker treats this exception as a resumable stop.
+        raise Cancelled()
     total = len(tracks)
     for n, t in enumerate(tracks):
         if is_cancelled():
-            break
+            raise Cancelled()
         ps, notes = {}, {}
         for name in ('clip', 'sam_zoom', 'vlm'):
             if name not in judges:

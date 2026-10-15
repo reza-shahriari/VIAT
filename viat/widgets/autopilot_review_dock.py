@@ -2,8 +2,9 @@
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QKeySequence
 from PyQt5.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
-                             QListWidgetItem, QPushButton, QTabWidget, QCheckBox, QComboBox,
-                             QDoubleSpinBox, QShortcut, QSpinBox)
+                              QListWidgetItem, QPushButton, QTabWidget, QCheckBox, QComboBox,
+                              QDoubleSpinBox, QShortcut, QSpinBox, QSizePolicy, QScrollArea, QFrame,
+                              QGroupBox)
 
 from ..utils.autopilot import upper_bound, samples_needed
 
@@ -18,12 +19,36 @@ class AutopilotReviewDock(QDockWidget):
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setObjectName('AutopilotReviewDock')
-        root = QWidget()
+        self.setMinimumWidth(340)
+        self.setMinimumHeight(360)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        root = QWidget(self)
+        root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lay = QVBoxLayout(root)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         self.summary = QLabel('No Autopilot result loaded.')
         self.summary.setWordWrap(True)
+        self.summary.setMinimumWidth(0)
+        self.summary.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         lay.addWidget(self.summary)
+        self.detector_box = QGroupBox('Detector sources')
+        self.detector_box.setVisible(False)
+        self.detector_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.detector_layout = QVBoxLayout(self.detector_box)
+        self.detector_layout.setContentsMargins(8, 6, 8, 6)
+        self.detector_layout.setSpacing(4)
+        self.detector_hint = QLabel('Uncheck a noisy detector, then rerun. Existing project labels are kept until the rerun finishes.')
+        self._configure_text_label(self.detector_hint)
+        self.detector_layout.addWidget(self.detector_hint)
+        self.detector_checks = {}
+        self.detector_rerun = QPushButton('Re-run with selected detectors')
+        self.detector_rerun.clicked.connect(self._rerun_detectors)
+        self.detector_layout.addWidget(self.detector_rerun)
+        lay.addWidget(self.detector_box)
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lay.addWidget(self.tabs)
         self.tabs.addTab(self._build_tracks_tab(), 'Flagged tracks')
         self.tabs.addTab(self._build_misses_tab(), 'Possible misses')
@@ -48,15 +73,18 @@ class AutopilotReviewDock(QDockWidget):
     def _build_tracks_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         self.show_all = QCheckBox('Show every track (not only flagged)')
         self.show_all.toggled.connect(self.refresh)
         lay.addWidget(self.show_all)
         self.track_list = QListWidget()
+        self._configure_list(self.track_list)
         self.track_list.currentItemChanged.connect(lambda cur, _prev: self._show_track(cur))
         lay.addWidget(self.track_list)
         self.reason_label = QLabel('')
-        self.reason_label.setWordWrap(True)
-        lay.addWidget(self.reason_label)
+        self._configure_text_label(self.reason_label)
+        lay.addWidget(self._text_panel(self.reason_label, 130))
         nav = QHBoxLayout()
         b_prev, b_next = QPushButton('<< Step back'), QPushButton('Step forward >>')
         b_prev.setToolTip('Jump half a second back along the selected track')
@@ -79,7 +107,7 @@ class AutopilotReviewDock(QDockWidget):
         b_fill = QPushButton('Fill gaps')
         b_fill.setToolTip('Interpolate every frame the track skips (e.g. a close-up the detector missed)')
         b_fill.clicked.connect(lambda: self._track_action('fill'))
-        act.addWidget(b_fill)
+        rel.addWidget(b_fill)
         b_rel = QPushButton('Relabel track')
         b_rel.clicked.connect(lambda: self._track_action('relabel'))
         rel.addWidget(self.relabel_combo, 1)
@@ -106,8 +134,10 @@ class AutopilotReviewDock(QDockWidget):
         trk = self.controller.track_by_id(item.data(ROLE_ID))
         if not trk:
             return
-        lines = [f"Track #{trk['label_id']} {trk['class']}  frames {trk['start'] + 1}-{trk['end'] + 1}, "
+        label_id = trk.get('label_id', f"auto-{trk.get('id', '?')}")
+        lines = [f"Track #{label_id} {trk['class']}  frames {trk['start'] + 1}-{trk['end'] + 1}, "
                  f"{trk['n_det']} detections, avg score {trk['mean_score']:.2f}, risk {trk['risk']:.2f}"]
+        lines.append(self._detector_summary(trk))
         for r in trk['reasons']:
             lines.append(f"- {r['text']}")
         self.reason_label.setText('\n'.join(lines))
@@ -117,6 +147,27 @@ class AutopilotReviewDock(QDockWidget):
         tid = self._selected_track()
         if tid is not None:
             self.controller.step_track(tid, direction)
+
+    @staticmethod
+    def _detector_summary(track):
+        detectors = track.get('detectors') or {}
+        if not detectors:
+            models = track.get('detector_models') or []
+            return 'Detectors: ' + (', '.join(str(m) for m in models) if models else 'not recorded (legacy result)')
+        parts = []
+        for name, values in detectors.items():
+            values = values or {}
+            mean = values.get('mean_score')
+            coverage = values.get('coverage')
+            if mean is None:
+                parts.append(str(name))
+            else:
+                parts.append(f"{name} (mean {float(mean):.2f}, coverage {float(coverage or 0):.0%})")
+        return 'Detectors: ' + ', '.join(parts)
+
+    def _rerun_detectors(self):
+        models = [key for key, cb in self.detector_checks.items() if cb.isChecked()]
+        self.controller.rerun_with_detectors(models)
 
     def _track_action(self, action):
         tid = self._selected_track()
@@ -139,11 +190,14 @@ class AutopilotReviewDock(QDockWidget):
     def _build_misses_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         info = QLabel('Objects the detectors kept seeing with medium confidence but that never became a track. '
                       'Add the real ones; dismiss the rest.')
-        info.setWordWrap(True)
+        self._configure_text_label(info)
         lay.addWidget(info)
         self.miss_list = QListWidget()
+        self._configure_list(self.miss_list)
         self.miss_list.currentItemChanged.connect(
             lambda cur, _p: cur and self.controller.show_miss(cur.data(ROLE_ID)))
         lay.addWidget(self.miss_list)
@@ -170,16 +224,19 @@ class AutopilotReviewDock(QDockWidget):
     def _build_rejected_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         info = QLabel('Tracks the judges rejected automatically. They are not in the project; '
                       'restore any that are real (this also teaches the learned judge).')
-        info.setWordWrap(True)
+        self._configure_text_label(info)
         lay.addWidget(info)
         self.rejected_list = QListWidget()
+        self._configure_list(self.rejected_list)
         self.rejected_list.currentItemChanged.connect(lambda cur, _p: self._show_rejected(cur))
         lay.addWidget(self.rejected_list)
         self.rejected_reason = QLabel('')
-        self.rejected_reason.setWordWrap(True)
-        lay.addWidget(self.rejected_reason)
+        self._configure_text_label(self.rejected_reason)
+        lay.addWidget(self._text_panel(self.rejected_reason, 110))
         row = QHBoxLayout()
         b_restore, b_ok = QPushButton('Restore (it is real)'), QPushButton('Correctly rejected')
         b_restore.clicked.connect(lambda: self._rejected_action(True))
@@ -196,8 +253,16 @@ class AutopilotReviewDock(QDockWidget):
         trk = self.controller.track_by_id(item.data(ROLE_ID))
         if not trk:
             return
-        self.rejected_reason.setText('\n'.join(f"- {r['text']}" for r in trk['reasons'][:5]))
-        self.controller.go_to_frame(trk.get('focus_frame', trk['start']))
+        details = [self._detector_summary(trk)]
+        details.extend(f"- {r['text']}" for r in trk['reasons'][:5])
+        self.rejected_reason.setText('\n'.join(details))
+        track_id = item.data(ROLE_ID)
+        focus_frame = trk.get('focus_frame', trk['start'])
+        show_rejected_track = getattr(self.controller, 'show_rejected_track', None)
+        if callable(show_rejected_track):
+            show_rejected_track(track_id, focus_frame)
+        else:
+            self.controller.go_to_frame(focus_frame)
 
     def _rejected_action(self, restore):
         item = self.rejected_list.currentItem()
@@ -216,11 +281,14 @@ class AutopilotReviewDock(QDockWidget):
     def _build_audit_tab(self):
         w = QWidget()
         lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
         info = QLabel('Check these randomly chosen frames. Mark a frame "Has error" if any box is wrong or '
                       'missing (then fix it). The result is a proven upper bound on how many frames are wrong.')
-        info.setWordWrap(True)
+        self._configure_text_label(info)
         lay.addWidget(info)
         self.audit_list = QListWidget()
+        self._configure_list(self.audit_list)
         self.audit_list.currentItemChanged.connect(
             lambda cur, _p: cur and self.controller.go_to_frame(cur.data(ROLE_ID)))
         lay.addWidget(self.audit_list)
@@ -248,13 +316,43 @@ class AutopilotReviewDock(QDockWidget):
         tgt.addWidget(b_more)
         lay.addLayout(tgt)
         self.audit_stats = QLabel('')
-        self.audit_stats.setWordWrap(True)
-        lay.addWidget(self.audit_stats)
+        self._configure_text_label(self.audit_stats)
+        lay.addWidget(self._text_panel(self.audit_stats, 90))
         for key, mark in (('Y', 'ok'), ('N', 'error')):
             sc = QShortcut(QKeySequence(key), w)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda m=mark: self._audit_mark(m))
         return w
+
+    @staticmethod
+    def _configure_list(widget):
+        """Keep a long result description from forcing the dock wider."""
+        widget.setMinimumWidth(0)
+        widget.setWordWrap(False)
+        widget.setTextElideMode(Qt.ElideRight)
+        widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    @staticmethod
+    def _configure_text_label(label):
+        label.setWordWrap(True)
+        label.setMinimumWidth(0)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+
+    @staticmethod
+    def _text_panel(label, maximum_height):
+        """Show variable-length explanatory text without pushing out controls."""
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        panel = QScrollArea()
+        panel.setWidgetResizable(True)
+        panel.setFrameShape(QFrame.NoFrame)
+        panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        panel.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        panel.setMinimumHeight(0)
+        panel.setMaximumHeight(maximum_height)
+        panel.setWidget(label)
+        return panel
 
     def _audit_mark(self, mark):
         item = self.audit_list.currentItem()
@@ -318,8 +416,11 @@ class AutopilotReviewDock(QDockWidget):
                       (self.show_all.isChecked() or t['route'] == 'review')]
             for t in sorted(tracks, key=lambda t: -t['risk']):
                 first = t['reasons'][0]['text'] if t['reasons'] else 'no issues found'
-                item = QListWidgetItem(f"#{t['label_id']} {t['class']}  risk {t['risk']:.2f}  "
-                                       f"[{t['start'] + 1}-{t['end'] + 1}]  {first}")
+                label_id = t.get('label_id', f"auto-{t.get('id', '?')}")
+                text = (f"#{label_id} {t['class']}  risk {t['risk']:.2f}  "
+                        f"[{t['start'] + 1}-{t['end'] + 1}]  {first}")
+                item = QListWidgetItem(text)
+                item.setToolTip(text + '\n' + self._detector_summary(t))
                 item.setData(ROLE_ID, t['id'])
                 item.setForeground(ROUTE_COLORS.get(t['route'], QColor(0, 0, 0)))
                 self.track_list.addItem(item)
@@ -329,15 +430,19 @@ class AutopilotReviewDock(QDockWidget):
                 if t['route'] != 'rejected_by_judge' or t.get('confirmed_reject'):
                     continue
                 box = t['boxes'][len(t['boxes']) // 2]
-                item = QListWidgetItem(f"#{t['id']} {t['class']}  judge p {t.get('judge_p', 0):.2f}  "
-                                       f"[{t['start'] + 1}-{t['end'] + 1}]  ~{int(box[3] - box[1])}x{int(box[4] - box[2])} px")
+                text = (f"#{t['id']} {t['class']}  judge p {t.get('judge_p', 0):.2f}  "
+                        f"[{t['start'] + 1}-{t['end'] + 1}]  ~{int(box[3] - box[1])}x{int(box[4] - box[2])} px")
+                item = QListWidgetItem(text)
+                item.setToolTip(text + '\n' + self._detector_summary(t))
                 item.setData(ROLE_ID, t['id'])
                 self.rejected_list.addItem(item)
             for m in res['misses']:
                 if m.get('status') != 'open':
                     continue
-                item = QListWidgetItem(f"{m['class']}  score {m['mean_score']:.2f}  "
-                                       f"[{m['start'] + 1}-{m['end'] + 1}]  {len(m['boxes'])} frames")
+                text = (f"{m['class']}  score {m['mean_score']:.2f}  "
+                        f"[{m['start'] + 1}-{m['end'] + 1}]  {len(m['boxes'])} frames")
+                item = QListWidgetItem(text)
+                item.setToolTip(text)
                 item.setData(ROLE_ID, m['id'])
                 self.miss_list.addItem(item)
             decisions = res['audit'].get('decisions', {})
@@ -359,6 +464,7 @@ class AutopilotReviewDock(QDockWidget):
             self.relabel_combo.addItems(names)
             if current in names:
                 self.relabel_combo.setCurrentText(current)
+        self._refresh_detector_controls(res)
         self.track_list.blockSignals(False)
         self.miss_list.blockSignals(False)
         self.audit_list.blockSignals(False)
@@ -367,3 +473,33 @@ class AutopilotReviewDock(QDockWidget):
         self.tabs.setTabText(0, f"Flagged tracks ({self.track_list.count()})")
         self.tabs.setTabText(1, f"Possible misses ({self.miss_list.count()})")
         self._update_audit_stats()
+
+    def _refresh_detector_controls(self, result):
+        """Rebuild the small detector filter panel when a new result is loaded."""
+        models = []
+        if result:
+            models = list((result.get('config') or {}).get('models') or
+                          (result.get('stats') or {}).get('models_loaded') or [])
+        # Keep the panel hidden for old/empty results that have no detector metadata.
+        self.detector_box.setVisible(bool(models))
+        if not models:
+            for key in list(self.detector_checks):
+                widget = self.detector_checks[key]
+                self.detector_layout.removeWidget(widget)
+                widget.deleteLater()
+            self.detector_checks.clear()
+            return
+        old = {key: cb.isChecked() for key, cb in self.detector_checks.items()}
+        for key in list(self.detector_checks):
+            widget = self.detector_checks[key]
+            self.detector_layout.removeWidget(widget)
+            widget.deleteLater()
+        self.detector_checks = {}
+        insert_at = self.detector_layout.indexOf(self.detector_hint) + 1
+        for key in models:
+            cb = QCheckBox(str(key))
+            cb.setChecked(old.get(key, True))
+            self.detector_checks[key] = cb
+            self.detector_layout.insertWidget(insert_at, cb)
+            insert_at += 1
+        self.detector_rerun.setEnabled(bool(self.detector_checks))

@@ -1,10 +1,11 @@
 """Settings dialog for Tools > Autopilot (unattended video labeling)."""
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QTableWidget,
-                             QTableWidgetItem, QPushButton, QListWidget, QListWidgetItem, QSpinBox,
-                             QDoubleSpinBox, QComboBox, QCheckBox, QGroupBox, QDialogButtonBox,
-                             QHeaderView, QAbstractItemView, QMessageBox)
+from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
+                             QTableWidget, QTableWidgetItem, QPushButton, QListWidget,
+                             QListWidgetItem, QSpinBox, QDoubleSpinBox, QComboBox, QCheckBox,
+                             QGroupBox, QDialogButtonBox, QHeaderView, QAbstractItemView,
+                             QMessageBox, QScrollArea, QSizePolicy, QFrame, QWidget)
 
 from .auto_annotate_dialog import ZERO_SHOT_MODELS
 from ..utils.autopilot import AutopilotConfig
@@ -52,13 +53,29 @@ class AutopilotDialog(QDialog):
     def __init__(self, parent, class_names, current_frame, total_frames, checkpoints_dir, last_config=None):
         super().__init__(parent)
         self.setWindowTitle('Autopilot - Unattended Video Labeling')
-        self.setMinimumWidth(640)
         self.total_frames = total_frames
         self.checkpoints_dir = checkpoints_dir
         last = AutopilotConfig.from_dict(last_config) if last_config else AutopilotConfig()
         self._adv = {}
 
-        lay = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(10)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content = QWidget()
+        content.setMinimumWidth(0)
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(2, 2, 8, 2)
+        lay.setSpacing(10)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+
         intro = QLabel(
             'Detects every frame, follows each object from when it enters until it leaves, repairs tracks '
             'using the whole video, and flags only the tracks that are probably wrong. '
@@ -70,10 +87,14 @@ class AutopilotDialog(QDialog):
         # ---------------------------------------------------------------- classes
         cls_box = QGroupBox('Classes and prompts (comma-separated prompts map to one class)')
         cl = QVBoxLayout(cls_box)
+        cl.setContentsMargins(10, 10, 10, 10)
+        cl.setSpacing(8)
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(['Class', 'Prompts'])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setMinimumHeight(140)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         cl.addWidget(self.table)
         prev = {c['name']: ', '.join(c.get('prompts') or []) for c in last.classes}
         for name in class_names:
@@ -92,9 +113,39 @@ class AutopilotDialog(QDialog):
         cl.addLayout(row)
         lay.addWidget(cls_box)
 
+        # ---------------------------------------------------------- visual seeds
+        seed_box = QGroupBox('Visual examples (optional)')
+        seed_layout = QVBoxLayout(seed_box)
+        seed_layout.setContentsMargins(10, 8, 10, 8)
+        seed_layout.setSpacing(6)
+        self.use_exemplars = QCheckBox(
+            'Use verified boxes already drawn in this frame range as visual examples')
+        self.use_exemplars.setChecked(last.use_exemplars)
+        self.use_exemplars.setToolTip(
+            'Useful for OWLv2: draw a few boxes for difficult objects first, then use their appearance '
+            'as one-shot queries on every frame. This does not fine-tune the model.')
+        seed_layout.addWidget(self.use_exemplars)
+        seed_row = QHBoxLayout()
+        seed_row.addWidget(QLabel('Examples per class:'))
+        self.exemplar_limit = QSpinBox()
+        self.exemplar_limit.setRange(1, 10)
+        self.exemplar_limit.setValue(max(1, min(10, int(last.exemplar_limit))))
+        self.exemplar_limit.setToolTip('At most this many manually verified boxes per class are collected.')
+        seed_row.addWidget(self.exemplar_limit)
+        seed_row.addStretch()
+        seed_layout.addLayout(seed_row)
+        seed_hint = QLabel(
+            'Only manually verified project boxes are used. OWLv2 uses the first representative crop '
+            'per class; other detectors continue to use text prompts.')
+        self._configure_hint(seed_hint)
+        seed_layout.addWidget(seed_hint)
+        lay.addWidget(seed_box)
+
         # ----------------------------------------------------------------- models
         mdl_box = QGroupBox('Detectors (several = agreement-weighted fusion)')
         ml = QVBoxLayout(mdl_box)
+        ml.setContentsMargins(10, 10, 10, 10)
+        ml.setSpacing(8)
         self.models = QListWidget()
         chosen = set(last.models) or {self._default_model()}
         for display, key in [m for m in ZERO_SHOT_MODELS if m[1] != 'existing_annotations'] + EXTRA_MODELS:
@@ -107,13 +158,17 @@ class AutopilotDialog(QDialog):
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                 item.setToolTip(missing_message(key))
             self.models.addItem(item)
-        self.models.setMaximumHeight(150)
+        self.models.setMinimumHeight(120)
+        self.models.setMaximumHeight(180)
+        self.models.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         ml.addWidget(self.models)
         lay.addWidget(mdl_box)
 
         # ----------------------------------------------------------------- judges
         jbox = QGroupBox('Judges (second opinion on every track)')
         jl = QVBoxLayout(jbox)
+        jl.setContentsMargins(10, 10, 10, 10)
+        jl.setSpacing(6)
         self.judge_checks = {}
         vlm_local = [k for k in VLM_MODELS if is_available(k)]
         for key, label in JUDGE_INFO:
@@ -161,6 +216,8 @@ class AutopilotDialog(QDialog):
 
         # ------------------------------------------------------------ range/quality
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.start = QSpinBox()
         self.end = QSpinBox()
         for sb in (self.start, self.end):
@@ -195,6 +252,8 @@ class AutopilotDialog(QDialog):
         adv.setCheckable(True)
         adv.setChecked(False)
         af = QFormLayout()
+        af.setHorizontalSpacing(12)
+        af.setVerticalSpacing(7)
         holder = QGroupBox()
         holder.setFlat(True)
         holder.setLayout(af)
@@ -215,6 +274,8 @@ class AutopilotDialog(QDialog):
         self.video_calibration.setChecked(last.video_calibration)
         af.addRow(self.video_calibration)
         al = QVBoxLayout(adv)
+        al.setContentsMargins(10, 8, 10, 8)
+        al.setSpacing(6)
         al.addWidget(holder)
         holder.setVisible(False)
         adv.toggled.connect(holder.setVisible)
@@ -225,9 +286,34 @@ class AutopilotDialog(QDialog):
         buttons.addButton(QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
+        root.addWidget(buttons)
+
+        self._set_responsive_size()
 
     # ------------------------------------------------------------------ helpers
+    def _set_responsive_size(self):
+        """Choose a useful initial size without exceeding the available screen."""
+        screen = self.screen()
+        if screen is None and self.parentWidget() is not None:
+            screen = self.parentWidget().screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(760, 720)
+            return
+
+        available = screen.availableGeometry()
+        max_width = max(1, available.width() - 32)
+        max_height = max(1, available.height() - 48)
+
+        # Keep the dialog comfortably readable on a desktop, but allow it to
+        # shrink below those preferences on a small or tiled display.  The
+        # scroll area handles the remaining vertical content in either case.
+        preferred_width = min(900, max(560, int(available.width() * 0.72)))
+        preferred_height = min(900, max(420, int(available.height() * 0.84)))
+        self.setMinimumSize(min(560, max_width), min(360, max_height))
+        self.resize(min(max_width, preferred_width), min(max_height, preferred_height))
+
     def _add_row(self, name, prompts, checked):
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -236,6 +322,11 @@ class AutopilotDialog(QDialog):
         item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
         self.table.setItem(r, 0, item)
         self.table.setItem(r, 1, QTableWidgetItem(prompts))
+
+    @staticmethod
+    def _configure_hint(label):
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
     def _default_model(self):
         for key in ('sam3.1_l.pt', 'yolov8x-worldv2.pt', 'yoloe-26x-seg.pt', 'yolov8m-worldv2.pt'):
@@ -278,6 +369,8 @@ class AutopilotDialog(QDialog):
         stride, tiles, flip = PRESETS[self.preset.currentIndex()][1]
         cfg = AutopilotConfig(classes=classes, models=models, start_frame=self.start.value() - 1,
                               end_frame=self.end.value() - 1, stride=stride, tiles=tiles, flip_tta=flip,
+                              use_exemplars=self.use_exemplars.isChecked(),
+                              exemplar_limit=self.exemplar_limit.value(),
                               cut_detection=self.cut_detection.isChecked(),
                               video_calibration=self.video_calibration.isChecked(),
                               judges=[k for k, cb in self.judge_checks.items() if cb.isChecked()],

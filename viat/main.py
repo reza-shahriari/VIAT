@@ -6061,6 +6061,10 @@ Would you like to load it?"""
             if getattr(self, '_viat_update_visibility_labels', None):
                 self._viat_update_visibility_labels()
             self._in_auto_erase = False
+        # Autopilot/review previews are transient and must not follow the user
+        # into another frame.  They are not part of frame_annotations.
+        if hasattr(self.canvas, 'preview_annotations'):
+            self.canvas.preview_annotations = []
         self.canvas.selected_annotation = None
         if self.current_frame in self.frame_annotations:
             self.canvas.annotations = self.frame_annotations[self.current_frame]

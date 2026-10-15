@@ -23,13 +23,10 @@ from .tracker import LifecycleTracker
 from .repair import TrackRec, Repairer, class_vote
 from .risk import score_track, find_possible_misses
 from .audit import sample_frames
+from .errors import Cancelled
 
-RESULT_VERSION = 2
+RESULT_VERSION = 3
 CHUNK = 500
-
-
-class Cancelled(Exception):
-    pass
 
 
 @dataclass
@@ -44,6 +41,12 @@ class AutopilotConfig:
     tiles: int = 0
     tile_overlap: float = 0.25
     flip_tta: bool = False
+    # optional one-shot visual queries (currently used by OWLv2).  The specs are
+    # frame/box references into the source, not image data, so results remain JSON
+    # serialisable and cache keys change when the user changes the examples.
+    use_exemplars: bool = False
+    exemplar_limit: int = 3
+    exemplars: list = field(default_factory=list)
     # Scores below are on the calibrated scale: each model's typical "confident"
     # raw score maps to 0.5 (YOLO-World 0.3, SAM 3 0.5, Grounding DINO 0.35, OWLv2 0.15).
     candidate_score: float = 0.08
@@ -122,7 +125,8 @@ class AutopilotConfig:
         """Cache key of one detector's raw candidates (independent of the other detectors)."""
         _, mapping = self.prompt_table()
         key = json.dumps([model, sorted(mapping.items()), self.class_names(), self.tiles, self.tile_overlap,
-                          self.flip_tta, self.candidate_score, self.fuse_iou, 'v2'], sort_keys=True)
+                          self.flip_tta, self.candidate_score, self.fuse_iou, self.use_exemplars,
+                          self.exemplar_limit, self.exemplars, 'v3'], sort_keys=True)
         name = ''.join(ch if ch.isalnum() else '_' for ch in os.path.basename(model))[:30]
         return f"{name}_{hashlib.sha1(key.encode()).hexdigest()[:10]}"
 
@@ -193,6 +197,97 @@ def result_path(source, workdir=None):
     return os.path.join(source_dir(source, workdir), 'result.json')
 
 
+def _record_box_index(rec, det_idx, box=None):
+    """Return a fused-record index, including for promoted miss candidates.
+
+    Normal tracker observations retain the fused candidate index.  Promoted
+    candidates are intentionally created by the miss finder with ``-1`` after
+    copying the candidate box, so recover that index by matching the copied
+    coordinates.  A conservative IoU threshold avoids assigning unrelated
+    detector evidence when an old/partial record is loaded.
+    """
+    if rec is None:
+        return -1
+    try:
+        det_idx = int(det_idx)
+    except (TypeError, ValueError):
+        det_idx = -1
+    rec_boxes = np.asarray(rec.get('boxes', np.zeros((0, 4))), dtype=np.float32)
+    if rec_boxes.ndim != 2 or rec_boxes.shape[1] != 4 or not len(rec_boxes):
+        return -1
+    if 0 <= det_idx < len(rec_boxes):
+        return det_idx
+    if box is None:
+        return -1
+    target = np.asarray(box, dtype=np.float32).reshape(-1)
+    if target.size != 4:
+        return -1
+    exact = np.isclose(rec_boxes, target, rtol=1e-5, atol=1e-3).all(axis=1)
+    if exact.any():
+        return int(np.where(exact)[0][0])
+    inter_x1 = np.maximum(rec_boxes[:, 0], target[0])
+    inter_y1 = np.maximum(rec_boxes[:, 1], target[1])
+    inter_x2 = np.minimum(rec_boxes[:, 2], target[2])
+    inter_y2 = np.minimum(rec_boxes[:, 3], target[3])
+    inter = np.clip(inter_x2 - inter_x1, 0, None) * np.clip(inter_y2 - inter_y1, 0, None)
+    area = np.clip(rec_boxes[:, 2] - rec_boxes[:, 0], 0, None) * \
+        np.clip(rec_boxes[:, 3] - rec_boxes[:, 1], 0, None)
+    target_area = max(float(target[2] - target[0]), 0.0) * max(float(target[3] - target[1]), 0.0)
+    iou = inter / np.maximum(area + target_area - inter, 1e-6)
+    best = int(np.argmax(iou))
+    return best if float(iou[best]) >= 0.95 else -1
+
+
+def _box_detector_evidence(rec, det_idx, keys, box=None):
+    """Build JSON-safe evidence for one detection-backed fused candidate."""
+    if rec is None:
+        return {}
+    idx = _record_box_index(rec, det_idx, box)
+    raw_mscores = rec.get('mscores')
+    raw_nmod = rec.get('nmod')
+    mscores = np.asarray(raw_mscores if raw_mscores is not None else np.zeros((0, len(keys))),
+                        dtype=np.float32)
+    nmod = np.asarray(raw_nmod if raw_nmod is not None else np.zeros(0),
+                      dtype=np.int64).reshape(-1)
+    if mscores.ndim != 2 or idx < 0 or idx >= len(mscores):
+        return {'detector_scores': {}, 'nmod': int(nmod[idx]) if 0 <= idx < len(nmod) else 0}
+    scores = {}
+    for key, score in zip(keys, mscores[idx]):
+        score = float(score)
+        if np.isfinite(score) and score > 0.0:
+            scores[str(key)] = round(score, 3)
+    return {'detector_scores': scores,
+            'nmod': int(nmod[idx]) if 0 <= idx < len(nmod) else 0}
+
+
+def _track_detector_provenance(track, records, keys):
+    """Aggregate per-box calibrated detector evidence for one output track.
+
+    Coverage is the number of frames on which a detector contributed divided by
+    the inclusive track span.  Interpolated boxes do not contribute evidence.
+    """
+    values = {str(key): [] for key in keys}
+    for frame in track.frames:
+        box, _score, det_idx, kind = track.boxes[frame]
+        if kind not in ('d', 'e'):
+            continue
+        evidence = _box_detector_evidence(records.get(frame), det_idx, keys, box)
+        for key, score in evidence.get('detector_scores', {}).items():
+            values.setdefault(key, []).append(float(score))
+    span = max(1, int(track.end) - int(track.start) + 1)
+    out = {}
+    for key, scores in values.items():
+        if not scores:
+            continue
+        out[key] = {
+            'frames': len(scores),
+            'coverage': round(len(scores) / float(span), 3),
+            'mean_score': round(float(np.mean(scores)), 3),
+            'max_score': round(float(max(scores)), 3),
+        }
+    return out
+
+
 class ChunkCache:
     """``frame -> value`` stored in pickled chunks of 500 frames (resumable, crash-safe)."""
 
@@ -237,6 +332,53 @@ class ChunkCache:
         self.dirty.clear()
 
 
+def _load_exemplar_crops(source, cfg, log=print):
+    """Read configured frame boxes and return ``(class_index, BGR crop)`` pairs."""
+    if not cfg.use_exemplars or not cfg.exemplars:
+        return []
+    names = {name.lower(): i for i, name in enumerate(cfg.class_names())}
+    specs = []
+    for item in cfg.exemplars:
+        try:
+            frame = int(item['frame'])
+            cls = names.get(str(item['class']).strip().lower())
+            box = [float(v) for v in item['box']]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cls is None or len(box) != 4 or frame < 0 or frame >= source.count:
+            continue
+        specs.append((frame, cls, box))
+    if not specs:
+        return []
+    by_frame = {}
+    for frame, cls, box in specs:
+        by_frame.setdefault(frame, []).append((cls, box))
+    out = []
+    counts = {}
+    first, last = min(by_frame), max(by_frame)
+    wanted = set(by_frame)
+    for frame, image in source.frames(first, last):
+        if frame not in wanted:
+            continue
+        h, w = image.shape[:2]
+        for cls, box in by_frame[frame]:
+            if counts.get(cls, 0) >= max(1, int(cfg.exemplar_limit)):
+                continue
+            x1, y1, x2, y2 = box
+            bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
+            margin_x, margin_y = bw * 0.12, bh * 0.12
+            ix1 = max(0, int(round(x1 - margin_x)))
+            iy1 = max(0, int(round(y1 - margin_y)))
+            ix2 = min(w, int(round(x2 + margin_x)))
+            iy2 = min(h, int(round(y2 + margin_y)))
+            if ix2 - ix1 >= 4 and iy2 - iy1 >= 4:
+                out.append((cls, image[iy1:iy2, ix1:ix2].copy()))
+                counts[cls] = counts.get(cls, 0) + 1
+    if not out:
+        log('[Autopilot] visual exemplars were configured but no valid crops could be read')
+    return out
+
+
 def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, workdir=None):
     """Run the whole pipeline and return a JSON-serialisable result dict."""
     t0 = time.time()
@@ -267,6 +409,8 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
             first_missing = f
             break
     detector = CandidateDetector(cfg, log=log)
+    if first_missing is not None:
+        detector.set_exemplars(_load_exemplar_crops(source, cfg, log=log))
     load_errors = {}
     if first_missing is not None:
         estimator = MotionEstimator()
@@ -374,7 +518,11 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
     names_idx = {n: i for i, n in enumerate(names)}
     n_promoted = 0
     if cfg.promote_min_sec > 0:
-        min_len = max(cfg.min_track_frames, int(round(cfg.promote_min_sec * fps)))
+        # ``m['boxes']`` only contains detector-sampled frames.  Scale the
+        # minimum candidate count with the requested stride instead of requiring
+        # a fast-mode run to produce one candidate per video frame.
+        min_len = max(cfg.min_track_frames,
+                      int(round(cfg.promote_min_sec * fps / max(1, cfg.stride))))
         next_id = max([t.id for t in tracks] + [tracker.next_id]) + 1
         promoted = []
         for m in find_possible_misses(records, tracks, frames, path, cfg, fps, names):
@@ -398,6 +546,7 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
         for f, v in t.boxes.items():
             by_frame.setdefault(f, []).append((t.id, v[0]))
     ctx = {'fps': fps, 'path': path, 'records': records, 'n_models': len(keys), 'names': names,
+           'stride': cfg.stride,
            'by_frame': by_frame,
            'desc': repairer._mean_desc, 'bhatt': Repairer.bhattacharyya}
     out_tracks = []
@@ -406,9 +555,23 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
         top, margin, shares = class_vote(t, names)
         route = 'review' if risk >= cfg.review_risk else 'accept'
         focus = reasons[0][2] if reasons else t.frames[len(t.frames) // 2]
+        detector_info = _track_detector_provenance(t, records, keys)
+        box_rows = []
+        for f in t.frames:
+            box, score, det_idx, kind = t.boxes[f]
+            evidence = (_box_detector_evidence(records.get(f), det_idx, keys, box)
+                        if kind in ('d', 'e') else {})
+            # The first seven elements retain the historical row layout.  The
+            # optional eighth object is deliberately plain JSON data so a later
+            # controller can attach it to annotation attributes without knowing
+            # anything about NumPy records.
+            box_rows.append([int(f)] + [round(float(v), 1) for v in box] +
+                            [round(float(score), 3), kind, evidence])
         out_tracks.append({
             'id': int(t.id), 'class': names[top], 'class_margin': round(margin, 3),
             'class_shares': {k: round(v, 3) for k, v in shares.items()},
+            'detector_models': list(detector_info),
+            'detectors': detector_info,
             'route': route, 'risk': round(risk, 3), 'focus_frame': int(focus),
             'reasons': [{'code': c, 'text': txt, 'frame': fr, 'weight': round(w, 3)} for c, txt, fr, w in reasons],
             'start': int(t.start), 'end': int(t.end), 'shot': int(t.shot),
@@ -417,9 +580,8 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
             'promoted': bool(getattr(t, 'promoted', False)),
             'mean_score': round(t.mean_score(), 3),
             'features': feats,
-            # [frame, x1, y1, x2, y2, score, kind]
-            'boxes': [[int(f)] + [round(float(v), 1) for v in t.boxes[f][0]] +
-                      [round(float(t.boxes[f][1]), 3), t.boxes[f][3]] for f in t.frames],
+            # [frame, x1, y1, x2, y2, score, kind, detector_evidence]
+            'boxes': box_rows,
         })
     misses = find_possible_misses(records, tracks, frames, path, cfg, fps, names)
     for i, m in enumerate(misses):
@@ -430,7 +592,9 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
     judge_info = {}
     if cfg.judges and out_tracks:
         judge_info = run_judges(source, out_tracks, cfg, names, fps, workdir=workdir, progress=progress,
-                                is_cancelled=is_cancelled, log=log)
+                                 is_cancelled=is_cancelled, log=log)
+        if is_cancelled():
+            raise Cancelled()
 
     n_review = sum(1 for t in out_tracks if t['route'] == 'review')
     n_judge_rejected = sum(1 for t in out_tracks if t['route'] == 'rejected_by_judge')
@@ -469,5 +633,6 @@ def save_result(path, result):
 
 
 def load_result(path):
+    """Load an Autopilot result, including legacy seven-element box rows."""
     with open(path, 'r', encoding='utf-8') as fh:
         return json.load(fh)

@@ -40,6 +40,10 @@ class Backend:
     def set_prompts(self, prompts):
         self.prompts = list(prompts)
 
+    def set_exemplars(self, exemplars):
+        """Set optional ``(class_index, BGR_crop)`` visual queries."""
+        return None
+
     def predict(self, image):
         raise NotImplementedError
 
@@ -143,12 +147,21 @@ class Owlv2Backend(Backend):
         except Exception as exc:
             return False, f"OWLv2 failed to load from {path}: {exc}"
 
-    def predict(self, image):
-        if not self.prompts:
-            return []
+    def set_exemplars(self, exemplars):
+        # OWLv2's image-guided API returns unlabeled boxes, so we run one visual
+        # query at a time and restore the configured class from the query record.
+        self.exemplars = {}
+        for class_index, image in exemplars or []:
+            self.exemplars.setdefault(int(class_index), []).append(image)
+
+    def _text_predict(self, image, class_indices=None):
+        """Text-conditioned fallback for classes without visual examples."""
         h, w = image.shape[:2]
+        class_indices = list(range(len(self.prompts))) if class_indices is None else list(class_indices)
+        if not class_indices:
+            return []
         pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        queries = [[f"a photo of a {p}" for p in self.prompts]]
+        queries = [[f"a photo of a {self.prompts[i]}" for i in class_indices]]
         inputs = self.processor(text=queries, images=pil, return_tensors='pt').to(_device())
         with torch.no_grad():
             outputs = self.model(**inputs)
@@ -162,9 +175,49 @@ class Owlv2Backend(Backend):
             x1, y1, x2, y2 = [float(v) for v in box]
             x1, x2 = max(0.0, x1), min(float(w), x2)
             y1, y2 = max(0.0, y1), min(float(h), y2)
-            if x2 > x1 and y2 > y1:
-                out.append(([x1, y1, x2, y2], float(score), self.prompts[int(label)]))
+            label = int(label)
+            if x2 > x1 and y2 > y1 and 0 <= label < len(class_indices):
+                out.append(([x1, y1, x2, y2], float(score), self.prompts[class_indices[label]]))
         return out
+
+    def predict(self, image):
+        if not self.prompts:
+            return []
+        h, w = image.shape[:2]
+        pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if getattr(self, 'exemplars', None):
+            out = []
+            post = getattr(self.processor, 'post_process_image_guided_detection', None)
+            if post is not None and hasattr(self.model, 'image_guided_detection'):
+                for class_index, queries in self.exemplars.items():
+                    if not queries or not 0 <= class_index < len(self.prompts):
+                        continue
+                    # One representative query per class is intentional: it keeps
+                    # the per-frame cost bounded while still allowing the user to
+                    # label several seed frames and choose the best crop later.
+                    query = Image.fromarray(cv2.cvtColor(queries[0], cv2.COLOR_BGR2RGB))
+                    try:
+                        inputs = self.processor(images=pil, query_images=query, return_tensors='pt').to(_device())
+                        with torch.no_grad():
+                            outputs = self.model.image_guided_detection(**inputs)
+                        res = post(outputs=outputs, threshold=0.02, nms_threshold=0.3,
+                                   target_sizes=torch.tensor([[h, w]], device=_device()))[0]
+                    except Exception as exc:
+                        self.log(f"[Autopilot] OWLv2 visual query failed; using text prompts: {exc}")
+                        return self._text_predict(image)
+                    boxes = res.get('boxes')
+                    scores = res.get('scores')
+                    if boxes is None or scores is None:
+                        continue
+                    for box, score in zip(boxes.cpu().numpy(), scores.cpu().numpy()):
+                        x1, y1, x2, y2 = [float(v) for v in box]
+                        x1, x2 = max(0.0, x1), min(float(w), x2)
+                        y1, y2 = max(0.0, y1), min(float(h), y2)
+                        if x2 > x1 and y2 > y1:
+                            out.append(([x1, y1, x2, y2], float(score), self.prompts[class_index]))
+                remaining = [i for i in range(len(self.prompts)) if i not in self.exemplars]
+                return out + self._text_predict(image, remaining)
+        return self._text_predict(image)
 
 
 def make_backend(key, log=print):
@@ -188,4 +241,3 @@ def match_prompt(label, prompt_class):
         if (p in key or key in p) and len(p) > best_len and key:
             best, best_len = c, len(p)
     return best
-
