@@ -1,6 +1,7 @@
 from .annotation_dock import AnnotationDock
 from .class_dock import ClassDock
 from .toolbar import AnnotationToolbar
+from .primary_toolbar import PrimaryAnnotationToolbar
 from .styles import StyleManager
 from .class_info_dialog import ClassInfoDialog
 from .sam_interactive_dock import SAMInteractiveDock
@@ -8,4 +9,3 @@ from .crop_settings_dock import CropSettingsDock
 from .evaluation_dialog import EvaluationDialog
 from viat.evaluation.visualization.visual_inspector import VisualInspectorDock
 from .evaluation_inspector_dock import EvaluationInspectorDock
-

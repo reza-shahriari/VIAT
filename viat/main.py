@@ -15,14 +15,14 @@ import random
 import math
 import threading
 import cv2
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QLabel, QAction, QFileDialog, QStatusBar, QComboBox, QMessageBox, QListWidget, QListWidgetItem, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QLineEdit, QColorDialog, QActionGroup, QGroupBox, QDoubleSpinBox, QApplication, QProgressBar, QCheckBox, QTextEdit, QProgressDialog, QPlainTextEdit
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider, QLabel, QAction, QFileDialog, QStatusBar, QComboBox, QMessageBox, QListWidget, QListWidgetItem, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QLineEdit, QColorDialog, QActionGroup, QGroupBox, QDoubleSpinBox, QApplication, QProgressBar, QCheckBox, QTextEdit, QProgressDialog, QPlainTextEdit, QMenu
 from PyQt5.QtCore import Qt, QTimer, QRect, QPoint, QDateTime, QEvent, QThread, pyqtSignal,QRectF, QEventLoop
 from PyQt5.QtGui import QColor, QIcon, QImage, QPixmap
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .canvas import VideoCanvas
 from .annotation import BoundingBox, AnnotationManager, ClassManager
-from .widgets import AnnotationDock, StyleManager, ClassDock, AnnotationToolbar
+from .widgets import AnnotationDock, StyleManager, ClassDock
 from .interpolation import InterpolationManager
 from .logger import VIATLogger, log_exceptions, logger
 from .widgets.auto_annotate_dialog import AutoAnnotateDialog, IGNORE_REGION_ACTION
@@ -617,10 +617,15 @@ class VideoAnnotationTool(QMainWindow):
                 self.styles[style_name] = getattr(StyleManager, method_name)
             elif style_name.lower() == 'default':
                 self.styles[style_name] = StyleManager.set_darkmodern_style
-        self.annotation_methods = {'Rectangle':
-            'Draw rectangular bounding boxes', 'Polygon':
-            'Draw polygon shapes', 'Point': 'Mark specific points'}
-        self.current_annotation_method = 'Rectangle'
+        # The canvas currently implements these two box-creation workflows.
+        # Keep the selector aligned with the actual canvas API instead of
+        # advertising the old Rectangle/Polygon/Point names that were ignored
+        # by ``change_annotation_method``.
+        self.annotation_methods = {
+            'Drag': 'Click and drag to create a bounding box',
+            'TwoClick': 'Click two corners to create a bounding box',
+        }
+        self.current_annotation_method = 'Drag'
         self.current_style = 'DarkModern'
         self.playback_speed = 1.0
         self.cap = None
@@ -686,8 +691,11 @@ class VideoAnnotationTool(QMainWindow):
     def setup_ui(self):
         """Set up the user interface."""
         self.ui_creator = UICreator(self)
-        self.ui_creator.create_menu_bar()
+        # Build the action-backed toolbar first.  Menus then reuse the same
+        # QAction instances, keeping checked state and shortcuts synchronized
+        # instead of creating a second copy for every advanced tool.
         self.ui_creator.create_toolbar()
+        self.ui_creator.create_menu_bar()
         self.ui_creator.create_dock_widgets()
         self.ui_creator.create_status_bar()
         self.ui_creator.setup_playback_timer()
@@ -787,11 +795,23 @@ class VideoAnnotationTool(QMainWindow):
             act = file_menu.addAction('View Labeler Analytics from JSON...')
             act.triggered.connect(lambda: self.view_labeler_analytics())
             
-            act = file_menu.addAction('Model Evaluation...')
-            act.triggered.connect(lambda: self.open_evaluation_dialog())
-
             
-        dataset_menu = menubar.addMenu('&Dataset')
+        # Keep the top-level menu order readable: Dataset belongs immediately
+        # before Help rather than being appended after Help by this late
+        # feature-menu injection.
+        dataset_menu = QMenu('&Dataset', self)
+        help_action = next(
+            (
+                action
+                for action in menubar.actions()
+                if action.text().replace('&', '') == 'Help'
+            ),
+            None,
+        )
+        if help_action is not None:
+            menubar.insertMenu(help_action, dataset_menu)
+        else:
+            menubar.addMenu(dataset_menu)
         img_menu = dataset_menu.addMenu('Image Dataset Operations')
         act = img_menu.addAction('Export Image Dataset...')
         act.triggered.connect(lambda : self.export_image_dataset())
@@ -856,21 +876,13 @@ class VideoAnnotationTool(QMainWindow):
         act.triggered.connect(lambda : self.open_dataset_cleaner_dialog())
         act = img_menu.addAction('Dataset Integration Wizard (Roadmap)...')
         act.triggered.connect(lambda : self.viat_launch_integration_wizard())
-        img_menu.addSeparator()
-        act = img_menu.addAction('Auto Blur Labels...')
-        act.triggered.connect(lambda : self.open_auto_blur_dialog())
         vid_menu = dataset_menu.addMenu('Video Annotation Operations')
-        act = vid_menu.addAction('Auto Blur Labels...')
-        act.triggered.connect(lambda : self.open_auto_blur_dialog())
         act = vid_menu.addAction('Split Video by Scene Cuts...')
         act.triggered.connect(lambda : self.viat_split_video_scenes())
         act = vid_menu.addAction('Import VIAT JSON Annotations...')
         act.triggered.connect(lambda : self.viat_import_video_json())
         act = vid_menu.addAction('Fix Video Borders (remove/clip labels)...')
         act.triggered.connect(lambda : self.viat_detect_and_fix_borders())
-        act = vid_menu.addAction('Object Visibility Mode...')
-        act.triggered.connect(lambda : self.viat_start_object_visibility_mode()
-            )
         vid_menu.addSeparator()
         seg_menu = vid_menu.addMenu('Segmentation Video')
         act = seg_menu.addAction('Pick Object Color...')
@@ -905,10 +917,6 @@ class VideoAnnotationTool(QMainWindow):
         act = view_menu.addAction('Toggle Attribute Display')
         act.setShortcut('Shift+A')
         act.triggered.connect(lambda : self.viat_toggle_attribute_display())
-        act = view_menu.addAction('Dataset Statistics...')
-        act.triggered.connect(lambda : self.viat_dataset_stats())
-        act = view_menu.addAction('View Dataset Log...')
-        act.triggered.connect(lambda : self.viat_view_dataset_log())
         self._viat_extra_menus = dataset_menu
 
     @log_exceptions
@@ -1266,12 +1274,14 @@ class VideoAnnotationTool(QMainWindow):
                 on_add_current_prompt_to_queue)
             self.sam_interactive_dock.next_cut_requested.connect(self.
                 on_sam_next_cut_requested)
-            view_menu = self.menuBar().addMenu('&SAM Tracking')
-            self.action_sam_interactive = view_menu.addAction(
-                'Toggle SAM Interactive Mode')
-            self.action_sam_interactive.setCheckable(True)
-            self.action_sam_interactive.triggered.connect(self.
-                toggle_sam_interactive_mode)
+            # The action is created once by UICreator and shared between the
+            # View menu and the compact AI & Tracking menu.  Older startup
+            # paths may not have created it, so retain a small fallback.
+            if not hasattr(self, 'action_sam_interactive'):
+                self.action_sam_interactive = QAction(
+                    'SAM Interactive', self, checkable=True)
+                self.action_sam_interactive.triggered.connect(
+                    self.toggle_sam_interactive_mode)
 
     def setup_track_queue(self):
         """Set up the Track Queue Dock signals."""
@@ -6407,15 +6417,17 @@ Would you like to load it?"""
             self.class_frames_dock.update_classes(list(self.canvas.class_colors.keys()))
         if hasattr(self, 'annotation_dock'):
             self.annotation_dock.update_class_selector()
-        if hasattr(self, 'class_selector'):
+        if hasattr(self, 'toolbar') and hasattr(
+            self.toolbar, 'update_class_selector'
+        ):
+            self.toolbar.update_class_selector(
+                sorted(self.canvas.class_colors.keys())
+            )
+        elif hasattr(self, 'class_selector'):
             self.class_selector.blockSignals(True)
-            current_text = self.class_selector.currentText()
             self.class_selector.clear()
-            self.class_selector.addItems(sorted(self.canvas.class_colors.
-                keys()))
-            if current_text in self.canvas.class_colors:
-                self.class_selector.setCurrentText(current_text)
-            elif self.canvas.current_class in self.canvas.class_colors:
+            self.class_selector.addItems(sorted(self.canvas.class_colors.keys()))
+            if self.canvas.current_class in self.canvas.class_colors:
                 self.class_selector.setCurrentText(self.canvas.current_class)
             self.class_selector.blockSignals(False)
         self.canvas.update()

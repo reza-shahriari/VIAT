@@ -19,8 +19,8 @@ class AutopilotReviewDock(QDockWidget):
         self.controller = controller
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.setObjectName('AutopilotReviewDock')
-        self.setMinimumWidth(340)
-        self.setMinimumHeight(360)
+        self.setMinimumWidth(280)
+        self.setMinimumHeight(320)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         root = QWidget(self)
         root.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -54,17 +54,22 @@ class AutopilotReviewDock(QDockWidget):
         self.tabs.addTab(self._build_misses_tab(), 'Possible misses')
         self.tabs.addTab(self._build_rejected_tab(), 'Auto-rejected')
         self.tabs.addTab(self._build_audit_tab(), 'Random audit')
-        foot = QHBoxLayout()
-        b_reload = QPushButton('Load result for this video')
-        b_reload.clicked.connect(self.controller.load_saved_result)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        foot = QVBoxLayout()
+        foot.setSpacing(4)
+        foot_top = QHBoxLayout()
         b_reapply = QPushButton('Re-apply to project')
         b_reapply.setToolTip('Write the result boxes into the project again (replaces earlier Autopilot boxes).')
         b_reapply.clicked.connect(self.controller.reapply_result)
-        b_train = QPushButton('Retrain judge')
+        b_reload = QPushButton('Load saved result')
+        b_reload.setToolTip('Load the saved Autopilot result for this video.')
+        b_reload.clicked.connect(self.controller.load_saved_result)
+        foot_top.addWidget(b_reapply)
+        foot_top.addWidget(b_reload)
+        foot.addLayout(foot_top)
+        b_train = QPushButton('Retrain learned judge')
         b_train.setToolTip('Train the learned judge from every Accept/Delete/Restore decision so far')
         b_train.clicked.connect(self.controller.retrain_judge)
-        foot.addWidget(b_reload)
-        foot.addWidget(b_reapply)
         foot.addWidget(b_train)
         lay.addLayout(foot)
         self.setWidget(root)
@@ -81,10 +86,11 @@ class AutopilotReviewDock(QDockWidget):
         self.track_list = QListWidget()
         self._configure_list(self.track_list)
         self.track_list.currentItemChanged.connect(lambda cur, _prev: self._show_track(cur))
+        self.track_list.itemClicked.connect(self._show_track)
         lay.addWidget(self.track_list)
         self.reason_label = QLabel('')
         self._configure_text_label(self.reason_label)
-        lay.addWidget(self._text_panel(self.reason_label, 130))
+        lay.addWidget(self._text_panel(self.reason_label, 100))
         nav = QHBoxLayout()
         b_prev, b_next = QPushButton('<< Step back'), QPushButton('Step forward >>')
         b_prev.setToolTip('Jump half a second back along the selected track')
@@ -102,21 +108,25 @@ class AutopilotReviewDock(QDockWidget):
         act.addWidget(b_ok)
         act.addWidget(b_del)
         lay.addLayout(act)
-        rel = QHBoxLayout()
-        self.relabel_combo = QComboBox()
-        b_fill = QPushButton('Fill gaps')
+        tools = QHBoxLayout()
+        b_fill = QPushButton('Fill track gaps')
         b_fill.setToolTip('Interpolate every frame the track skips (e.g. a close-up the detector missed)')
         b_fill.clicked.connect(lambda: self._track_action('fill'))
-        rel.addWidget(b_fill)
-        b_rel = QPushButton('Relabel track')
+        b_accept_rest = QPushButton('Accept unflagged')
+        b_accept_rest.setToolTip('Mark every low-risk track as verified (do this after the audit passes).')
+        b_accept_rest.clicked.connect(self.controller.accept_unflagged)
+        tools.addWidget(b_fill)
+        tools.addWidget(b_accept_rest)
+        lay.addLayout(tools)
+        rel = QHBoxLayout()
+        self.relabel_combo = QComboBox()
+        self.relabel_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        b_rel = QPushButton('Relabel')
+        b_rel.setToolTip('Change the class of this track across all frames')
         b_rel.clicked.connect(lambda: self._track_action('relabel'))
         rel.addWidget(self.relabel_combo, 1)
         rel.addWidget(b_rel)
         lay.addLayout(rel)
-        b_accept_rest = QPushButton('Accept all unflagged tracks')
-        b_accept_rest.setToolTip('Mark every low-risk track as verified (do this after the audit passes).')
-        b_accept_rest.clicked.connect(self.controller.accept_unflagged)
-        lay.addWidget(b_accept_rest)
         for key, action in (('A', 'accept'), ('D', 'delete')):
             sc = QShortcut(QKeySequence(key), w)
             sc.setContext(Qt.WidgetWithChildrenShortcut)
@@ -200,7 +210,16 @@ class AutopilotReviewDock(QDockWidget):
         self._configure_list(self.miss_list)
         self.miss_list.currentItemChanged.connect(
             lambda cur, _p: cur and self.controller.show_miss(cur.data(ROLE_ID)))
+        self.miss_list.itemClicked.connect(
+            lambda item: item and self.controller.show_miss(item.data(ROLE_ID)))
         lay.addWidget(self.miss_list)
+        nav = QHBoxLayout()
+        b_prev, b_next = QPushButton('<< Step back'), QPushButton('Step forward >>')
+        b_prev.clicked.connect(lambda: self._step_miss(-1))
+        b_next.clicked.connect(lambda: self._step_miss(1))
+        nav.addWidget(b_prev)
+        nav.addWidget(b_next)
+        lay.addLayout(nav)
         row = QHBoxLayout()
         b_add, b_dis = QPushButton('Add as track'), QPushButton('Dismiss')
         b_add.clicked.connect(lambda: self._miss_action(True))
@@ -209,6 +228,12 @@ class AutopilotReviewDock(QDockWidget):
         row.addWidget(b_dis)
         lay.addLayout(row)
         return w
+
+    def _step_miss(self, direction):
+        item = self.miss_list.currentItem()
+        if not item:
+            return
+        self.controller.step_miss(item.data(ROLE_ID), direction)
 
     def _miss_action(self, add):
         item = self.miss_list.currentItem()
@@ -233,18 +258,38 @@ class AutopilotReviewDock(QDockWidget):
         self.rejected_list = QListWidget()
         self._configure_list(self.rejected_list)
         self.rejected_list.currentItemChanged.connect(lambda cur, _p: self._show_rejected(cur))
+        self.rejected_list.itemClicked.connect(self._show_rejected)
         lay.addWidget(self.rejected_list)
         self.rejected_reason = QLabel('')
         self._configure_text_label(self.rejected_reason)
-        lay.addWidget(self._text_panel(self.rejected_reason, 110))
+        lay.addWidget(self._text_panel(self.rejected_reason, 90))
+        nav = QHBoxLayout()
+        b_prev, b_next = QPushButton('<< Step back'), QPushButton('Step forward >>')
+        b_prev.clicked.connect(lambda: self._step_rejected(-1))
+        b_next.clicked.connect(lambda: self._step_rejected(1))
+        nav.addWidget(b_prev)
+        nav.addWidget(b_next)
+        lay.addLayout(nav)
         row = QHBoxLayout()
-        b_restore, b_ok = QPushButton('Restore (it is real)'), QPushButton('Correctly rejected')
+        b_restore, b_ok = QPushButton('Restore track (R)'), QPushButton('Confirm rejected (C)')
+        b_restore.setToolTip('Restore this track into the project as verified')
+        b_ok.setToolTip('Confirm this track was correctly rejected')
         b_restore.clicked.connect(lambda: self._rejected_action(True))
         b_ok.clicked.connect(lambda: self._rejected_action(False))
         row.addWidget(b_restore)
         row.addWidget(b_ok)
         lay.addLayout(row)
+        for key, act in (('R', True), ('C', False)):
+            sc = QShortcut(QKeySequence(key), w)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda a=act: self._rejected_action(a))
         return w
+
+    def _step_rejected(self, direction):
+        item = self.rejected_list.currentItem()
+        if not item:
+            return
+        self.controller.step_rejected_track(item.data(ROLE_ID), direction)
 
     def _show_rejected(self, item):
         if not item:
@@ -291,6 +336,8 @@ class AutopilotReviewDock(QDockWidget):
         self._configure_list(self.audit_list)
         self.audit_list.currentItemChanged.connect(
             lambda cur, _p: cur and self.controller.go_to_frame(cur.data(ROLE_ID)))
+        self.audit_list.itemClicked.connect(
+            lambda item: item and self.controller.go_to_frame(item.data(ROLE_ID)))
         lay.addWidget(self.audit_list)
         row = QHBoxLayout()
         b_ok, b_err = QPushButton('Correct (Y)'), QPushButton('Has error (N)')
@@ -324,11 +371,29 @@ class AutopilotReviewDock(QDockWidget):
             sc.activated.connect(lambda m=mark: self._audit_mark(m))
         return w
 
+    def _on_tab_changed(self, index):
+        if index == 0:
+            item = self.track_list.currentItem()
+            if item:
+                self._show_track(item)
+        elif index == 1:
+            item = self.miss_list.currentItem()
+            if item:
+                self.controller.show_miss(item.data(ROLE_ID))
+        elif index == 2:
+            item = self.rejected_list.currentItem()
+            if item:
+                self._show_rejected(item)
+        elif index == 3:
+            item = self.audit_list.currentItem()
+            if item:
+                self.controller.go_to_frame(item.data(ROLE_ID))
+
     @staticmethod
     def _configure_list(widget):
         """Keep a long result description from forcing the dock wider."""
         widget.setMinimumWidth(0)
-        widget.setWordWrap(False)
+        widget.setWordWrap(True)
         widget.setTextElideMode(Qt.ElideRight)
         widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -396,9 +461,13 @@ class AutopilotReviewDock(QDockWidget):
         self.miss_list.blockSignals(True)
         self.audit_list.blockSignals(True)
         self.rejected_list.blockSignals(True)
-        self.rejected_list.clear()
         cur_track, cur_audit = self._selected_track(), self.audit_list.currentItem()
         cur_audit = cur_audit.data(ROLE_ID) if cur_audit else None
+        cur_rejected = self.rejected_list.currentItem()
+        cur_rejected = cur_rejected.data(ROLE_ID) if cur_rejected else None
+        cur_miss = self.miss_list.currentItem()
+        cur_miss = cur_miss.data(ROLE_ID) if cur_miss else None
+        self.rejected_list.clear()
         self.track_list.clear()
         self.miss_list.clear()
         self.audit_list.clear()
@@ -417,8 +486,8 @@ class AutopilotReviewDock(QDockWidget):
             for t in sorted(tracks, key=lambda t: -t['risk']):
                 first = t['reasons'][0]['text'] if t['reasons'] else 'no issues found'
                 label_id = t.get('label_id', f"auto-{t.get('id', '?')}")
-                text = (f"#{label_id} {t['class']}  risk {t['risk']:.2f}  "
-                        f"[{t['start'] + 1}-{t['end'] + 1}]  {first}")
+                text = (f"#{label_id} {t['class']}  (risk {t['risk']:.2f})  "
+                        f"[{t['start'] + 1}-{t['end'] + 1}]\n  ↳ {first}")
                 item = QListWidgetItem(text)
                 item.setToolTip(text + '\n' + self._detector_summary(t))
                 item.setData(ROLE_ID, t['id'])
@@ -430,21 +499,26 @@ class AutopilotReviewDock(QDockWidget):
                 if t['route'] != 'rejected_by_judge' or t.get('confirmed_reject'):
                     continue
                 box = t['boxes'][len(t['boxes']) // 2]
-                text = (f"#{t['id']} {t['class']}  judge p {t.get('judge_p', 0):.2f}  "
-                        f"[{t['start'] + 1}-{t['end'] + 1}]  ~{int(box[3] - box[1])}x{int(box[4] - box[2])} px")
+                first_r = t['reasons'][0]['text'] if t.get('reasons') else f"~{int(box[3] - box[1])}x{int(box[4] - box[2])} px"
+                text = (f"#{t['id']} {t['class']}  (p {t.get('judge_p', 0):.2f})  "
+                        f"[{t['start'] + 1}-{t['end'] + 1}]\n  ↳ {first_r}")
                 item = QListWidgetItem(text)
                 item.setToolTip(text + '\n' + self._detector_summary(t))
                 item.setData(ROLE_ID, t['id'])
                 self.rejected_list.addItem(item)
+                if t['id'] == cur_rejected:
+                    self.rejected_list.setCurrentItem(item)
             for m in res['misses']:
                 if m.get('status') != 'open':
                     continue
-                text = (f"{m['class']}  score {m['mean_score']:.2f}  "
-                        f"[{m['start'] + 1}-{m['end'] + 1}]  {len(m['boxes'])} frames")
+                text = (f"Miss #{m['id']} {m['class']}  (score {m['mean_score']:.2f})\n"
+                        f"  ↳ [{m['start'] + 1}-{m['end'] + 1}] · {len(m['boxes'])} detections")
                 item = QListWidgetItem(text)
                 item.setToolTip(text)
                 item.setData(ROLE_ID, m['id'])
                 self.miss_list.addItem(item)
+                if m['id'] == cur_miss:
+                    self.miss_list.setCurrentItem(item)
             decisions = res['audit'].get('decisions', {})
             for f in res['audit'].get('frames', []):
                 d = decisions.get(str(f))

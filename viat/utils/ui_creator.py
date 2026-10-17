@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (
     QActionGroup,
     QLabel,
     QComboBox,
+    QToolBar,
+    QWidgetAction,
     QWidget,
     QHBoxLayout,
     QPushButton,
@@ -26,7 +28,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from viat.widgets import AnnotationDock, ClassDock, AnnotationToolbar
+from viat.widgets import AnnotationDock, ClassDock, PrimaryAnnotationToolbar
 from viat.widgets.sam_interactive_dock import SAMInteractiveDock
 from viat.widgets.track_queue_dock import TrackQueueDock
 from viat.widgets.empty_frames_dock import EmptyFramesManagerDock
@@ -308,20 +310,38 @@ class UICreator:
         )
         view_menu.addAction(self.toggle_classes_action)
 
-        # SAM Interactive Dock
-        self.toggle_sam_action = QAction("SAM Interactive Panel", self.main_window, checkable=True)
-        self.toggle_sam_action.setChecked(False)
-        self.toggle_sam_action.triggered.connect(
-            _make_right_dock_toggler('sam_interactive_dock')
+        # SAM Interactive mode is a workflow state rather than a passive dock
+        # visibility toggle.  Reuse the action created for the compact
+        # toolbar's AI menu so both surfaces stay synchronized.
+        self.toggle_sam_action = getattr(
+            self.main_window, "action_sam_interactive", None
         )
+        if self.toggle_sam_action is None:
+            self.toggle_sam_action = QAction(
+                "SAM Interactive", self.main_window, checkable=True
+            )
+            self.toggle_sam_action.setChecked(False)
+            self.toggle_sam_action.setToolTip(
+                "Open the interactive SAM prompting workflow"
+            )
+            self.toggle_sam_action.triggered.connect(
+                self.main_window.toggle_sam_interactive_mode
+            )
+            self.main_window.action_sam_interactive = self.toggle_sam_action
         view_menu.addAction(self.toggle_sam_action)
 
         # Track Queue Dock (batch SAM tracking jobs)
-        self.toggle_track_queue_action = QAction("Track Queue Panel", self.main_window, checkable=True)
-        self.toggle_track_queue_action.setChecked(False)
-        self.toggle_track_queue_action.triggered.connect(
-            _make_right_dock_toggler('track_queue_dock')
+        self.toggle_track_queue_action = getattr(
+            self.main_window, "track_queue_toolbar_action", None
         )
+        if self.toggle_track_queue_action is None:
+            self.toggle_track_queue_action = QAction(
+                "Track Queue Panel", self.main_window, checkable=True
+            )
+            self.toggle_track_queue_action.setChecked(False)
+            self.toggle_track_queue_action.triggered.connect(
+                _make_right_dock_toggler('track_queue_dock')
+            )
         view_menu.addAction(self.toggle_track_queue_action)
 
         # Empty Frames Manager
@@ -339,7 +359,7 @@ class UICreator:
             _make_right_dock_toggler('class_frames_dock', lambda: getattr(self.main_window, 'refresh_class_frames_dock', lambda: None)())
         )
         view_menu.addAction(self.toggle_class_frames_action)
-        
+
         # Uncertain Frames Manager
         self.toggle_uncertain_frames_action = QAction("Uncertain Frames Manager", self.main_window, checkable=True)
         self.toggle_uncertain_frames_action.setChecked(False)
@@ -347,13 +367,19 @@ class UICreator:
             _make_right_dock_toggler('uncertain_frames_dock', lambda: getattr(self.main_window, 'refresh_uncertain_frames_dock', lambda: None)())
         )
         view_menu.addAction(self.toggle_uncertain_frames_action)
-        
+
         # Clip Cuts Manager
-        self.toggle_clip_cuts_action = QAction("Clip Cuts Manager", self.main_window, checkable=True)
-        self.toggle_clip_cuts_action.setChecked(False)
-        self.toggle_clip_cuts_action.triggered.connect(
-            _make_right_dock_toggler('clip_cuts_dock')
+        self.toggle_clip_cuts_action = getattr(
+            self.main_window, "clip_cuts_action", None
         )
+        if self.toggle_clip_cuts_action is None:
+            self.toggle_clip_cuts_action = QAction(
+                "Clip Cuts Manager", self.main_window, checkable=True
+            )
+            self.toggle_clip_cuts_action.setChecked(False)
+            self.toggle_clip_cuts_action.triggered.connect(
+                _make_right_dock_toggler('clip_cuts_dock')
+            )
         view_menu.addAction(self.toggle_clip_cuts_action)
 
         # Crop Settings Dock
@@ -375,14 +401,19 @@ class UICreator:
         view_menu.addSeparator()
 
         # Toggle Video Manager (Left Area)
-        self.toggle_video_manager_action = QAction("Video Manager", self.main_window, checkable=True)
-        self.toggle_video_manager_action.setChecked(False)
-        def toggle_video_manager(checked):
-            if hasattr(self.main_window, 'video_manager_dock'):
-                self.main_window.video_manager_dock.setVisible(checked)
-                if checked:
-                    self.main_window.video_manager_dock.raise_()
-        self.toggle_video_manager_action.triggered.connect(toggle_video_manager)
+        self.toggle_video_manager_action = getattr(
+            self.main_window, "video_manager_toolbar_action", None
+        )
+        if self.toggle_video_manager_action is None:
+            self.toggle_video_manager_action = QAction(
+                "Video Manager", self.main_window, checkable=True
+            )
+            self.toggle_video_manager_action.setChecked(False)
+            self.toggle_video_manager_action.triggered.connect(
+                lambda checked: self._set_dock_visible(
+                    "video_manager_dock", checked
+                )
+            )
         view_menu.addAction(self.toggle_video_manager_action)
 
         # Toggle Visual Inspector (Bottom Area)
@@ -401,7 +432,7 @@ class UICreator:
         # Add Style Menu as a submenu
         self.create_style_menu(view_menu)
 
-    def create_tools_menu(self, menubar):
+    def create_tools_menu_legacy(self, menubar):
         """Create the Tools menu and its actions."""
         tools_menu = menubar.addMenu("Tools")
 
@@ -578,6 +609,119 @@ class UICreator:
         # Store reference to keep menu and toolbar in sync
         self.main_window.smart_edge_action = smart_edge_action
 
+    def create_tools_menu(self, menubar):
+        """Create a grouped Tools menu using the toolbar's shared actions."""
+        main_window = self.main_window
+        tools_menu = menubar.addMenu("Tools")
+
+        ai_menu = tools_menu.addMenu("AI & Tracking")
+        for attribute_name in (
+            "auto_label_action",
+            "autopilot_action",
+            "autopilot_review_action",
+            "zero_shot_refiner_action",
+            "annotation_nms_action",
+            "tracking_mode_action",
+            "sam_interactive_action",
+            "auto_bbox_action",
+            "duplicate_frames_action",
+            "scan_duplicate_frames_action",
+            "propagate_action",
+            "similar_frames_action",
+        ):
+            action = getattr(main_window, attribute_name, None)
+            if action is not None:
+                ai_menu.addAction(action)
+
+        smart_edge_action = self._create_action(
+            ai_menu,
+            "smart_edge_action",
+            "Smart Edge Movement",
+            main_window.toggle_smart_edge,
+            checkable=True,
+            tooltip="Snap annotation edges to image features",
+        )
+
+        review_menu = tools_menu.addMenu("Review")
+        for attribute_name in (
+            "verify_mode_action",
+            "verify_selected_action",
+            "verify_all_action",
+            "object_visibility_action",
+            "evaluation_action",
+        ):
+            action = getattr(main_window, attribute_name, None)
+            if action is not None:
+                review_menu.addAction(action)
+
+        tools_menu.addSeparator()
+        dataset_tools_menu = tools_menu.addMenu("Dataset Preparation")
+
+        create_dataset_action = QAction("Create Dataset...", main_window)
+        create_dataset_action.setToolTip(
+            "Create a new dataset from the current annotations"
+        )
+        create_dataset_action.triggered.connect(main_window.create_dataset)
+        dataset_tools_menu.addAction(create_dataset_action)
+
+        merge_video_dataset_action = QAction(
+            "Merge Video Dataset to Single Video...", main_window
+        )
+        merge_video_dataset_action.setToolTip(
+            "Merge annotated videos in a folder into one video and label file"
+        )
+        merge_video_dataset_action.triggered.connect(
+            lambda: getattr(
+                main_window, "open_merge_video_dataset_dialog", lambda: None
+            )()
+        )
+        dataset_tools_menu.addAction(merge_video_dataset_action)
+
+        convert_video_to_yolo_action = QAction(
+            "Convert Video Dataset to YOLO Dataset...", main_window
+        )
+        convert_video_to_yolo_action.setToolTip(
+            "Convert annotated videos into a YOLO image dataset"
+        )
+        convert_video_to_yolo_action.triggered.connect(
+            lambda: getattr(
+                main_window, "open_video_to_yolo_dialog", lambda: None
+            )()
+        )
+        dataset_tools_menu.addAction(convert_video_to_yolo_action)
+
+        tools_menu.addSeparator()
+        privacy_menu = tools_menu.addMenu("Privacy & Blur Tools")
+        for attribute_name in (
+            "auto_blur_action",
+            "auto_blur_dialog_action",
+            "auto_save_blur_action",
+            "clear_frame_blur_action",
+            "clear_range_blur_action",
+            "clear_all_blur_action",
+            "crop_mode_action",
+            "clip_cuts_action",
+        ):
+            action = getattr(main_window, attribute_name, None)
+            if action is not None:
+                privacy_menu.addAction(action)
+
+        auto_remove_blur_action = QAction(
+            "Auto-Remove BBoxes Under Blur (>70%)", main_window, checkable=True
+        )
+        auto_remove_blur_action.setToolTip(
+            "Remove boxes that are more than 70% covered by a blur region"
+        )
+        auto_remove_blur_action.setChecked(
+            getattr(main_window, "auto_remove_under_blur", True)
+        )
+        auto_remove_blur_action.triggered.connect(
+            lambda checked: setattr(main_window, "auto_remove_under_blur", checked)
+        )
+        privacy_menu.addAction(auto_remove_blur_action)
+
+        main_window.smart_edge_action = smart_edge_action
+
     def create_style_menu(self, menubar):
         """Create the Style menu and its actions."""
         self.main_window.style_menu = menubar.addMenu("Style")
@@ -607,208 +751,519 @@ class UICreator:
         help_menu.addAction(about_action)
 
     def create_toolbar(self):
-        """Create the annotation toolbar."""
-        self.main_window.toolbar = AnnotationToolbar(
-            self.main_window, self.main_window.icon_provider
+        """Create the complete, uncollapsed annotation toolbar.
+
+        The second toolbar is intentionally kept as the full working toolbar:
+        annotation, tracking, AI, review, privacy, dataset, and temporary
+        integration controls are all placed directly on it.  The application
+        menus reuse the same actions, so moving an action into a menu does not
+        remove it from this toolbar or create a second stateful copy.
+        """
+        main_window = self.main_window
+        toolbar = PrimaryAnnotationToolbar(
+            main_window=main_window,
+            icon_provider=main_window.icon_provider,
+            parent=main_window,
         )
-        self.main_window.addToolBar(self.main_window.toolbar)
-        self.main_window.class_selector = self.main_window.toolbar.class_selector
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        main_window.toolbar = toolbar
+        main_window.addToolBar(Qt.TopToolBarArea, toolbar)
 
-        # Add annotation method selector
-        method_label = QLabel("Method:")
-        self.main_window.toolbar.addWidget(method_label)
+        # Compatibility aliases used by the canvas, annotation manager, and
+        # existing refresh code.
+        main_window.class_selector = toolbar.class_selector
+        main_window.method_selector = toolbar.method_selector
+        main_window.pan_tool_action = toolbar.pan_button
 
-        self.main_window.method_selector = QComboBox()
-        self.main_window.method_selector.addItems(["Drag", "TwoClick"])
-        self.main_window.method_selector.setToolTip(
-            "Drag: Click and drag to create box\nTwoClick: Click two corners to create box"
+        toolbar.class_selected.connect(self._set_current_class)
+        toolbar.add_class_requested.connect(main_window.add_class)
+        toolbar.method_selected.connect(main_window.change_annotation_method)
+        toolbar.add_annotation_requested.connect(main_window.add_annotation)
+        toolbar.edit_annotation_requested.connect(self._edit_selected_annotation)
+        toolbar.delete_annotation_requested.connect(
+            main_window.delete_selected_annotation
         )
-        self.main_window.method_selector.currentTextChanged.connect(
-            self.main_window.change_annotation_method
+        toolbar.pan_toggled.connect(lambda _checked: main_window.toggle_pan_mode())
+        toolbar.zoom_in_requested.connect(main_window.zoom_in)
+        toolbar.zoom_out_requested.connect(main_window.zoom_out)
+        toolbar.zoom_reset_requested.connect(main_window.reset_zoom)
+
+        self._create_full_toolbar_controls(toolbar)
+
+    def _set_current_class(self, class_name):
+        """Apply a class selection from the primary toolbar to the canvas."""
+        canvas = getattr(self.main_window, "canvas", None)
+        if canvas is not None and hasattr(canvas, "set_current_class"):
+            canvas.set_current_class(class_name)
+
+    def _edit_selected_annotation(self):
+        """Edit the current canvas selection when one exists."""
+        canvas = getattr(self.main_window, "canvas", None)
+        selected = getattr(canvas, "selected_annotation", None)
+        if selected is not None and hasattr(self.main_window, "edit_annotation"):
+            self.main_window.edit_annotation(selected)
+
+    def _create_action(
+        self,
+        menu,
+        attribute_name,
+        text,
+        callback,
+        *,
+        checkable=False,
+        checked=False,
+        icon_name=None,
+        tooltip=None,
+    ):
+        """Create and register one reusable action for a grouped menu."""
+        action = QAction(text, self.main_window)
+        action.setObjectName(attribute_name)
+        action.setCheckable(checkable)
+        action.setChecked(checked)
+        if tooltip:
+            action.setToolTip(tooltip)
+            action.setStatusTip(tooltip)
+        if icon_name:
+            action.icon_name = icon_name
+        if callback is not None:
+            action.triggered.connect(callback)
+        menu.addAction(action)
+        setattr(self.main_window, attribute_name, action)
+        if icon_name and hasattr(self.main_window.toolbar, "register_icon_action"):
+            self.main_window.toolbar.register_icon_action(action, icon_name)
+        return action
+
+    def _add_widget_action(self, menu, widget, object_name, label=None):
+        """Add a compact widget control to a grouped menu."""
+        widget.setObjectName(object_name)
+        if label:
+            widget.setToolTip(label)
+        widget_action = QWidgetAction(menu)
+        widget_action.setDefaultWidget(widget)
+        menu.addAction(widget_action)
+        return widget_action
+
+    def _create_full_toolbar_controls(self, toolbar):
+        """Add every working control directly to the second toolbar.
+
+        This deliberately does not create a ``More`` button or hide the
+        controls behind submenus.  Some of these actions are also inserted in
+        the File/View/Tools menus later; Qt allows one QAction to be displayed
+        in several containers while keeping one checked state and one
+        callback.
+        """
+        main_window = self.main_window
+
+        toolbar.addSeparator()
+
+        # Controls that were historically on the full annotation toolbar.
+        main_window.tracking_toggle_btn = self._create_action(
+            toolbar,
+            "tracking_mode_action",
+            "Tracking Mode",
+            main_window.toggle_tracking_mode,
+            checkable=True,
+            checked=getattr(main_window, "tracking_mode_enabled", False),
+            tooltip="Toggle automatic tracking ID assignment",
         )
-        self.main_window.toolbar.addWidget(self.main_window.method_selector)
+        main_window.tracking_toggle_btn.setObjectName("TrackingModeAction")
 
-        self.main_window.toolbar.addSeparator()
-
-        # Add Tracking Mode button (made into a cleaner tool button instead of large push button)
-        self.tracking_toggle_btn = QPushButton("Tracking Mode")
-        self.tracking_toggle_btn.setCheckable(True)
-        self.tracking_toggle_btn.setToolTip("Toggle automatic tracking ID assignment")
-        self.tracking_toggle_btn.toggled.connect(self.main_window.toggle_tracking_mode)
-        self.main_window.toolbar.addWidget(self.tracking_toggle_btn)
-        self.main_window.tracking_toggle_btn = self.tracking_toggle_btn
-
-        # Add pan tool action
-        self.pan_tool_action = QAction("Pan Tool", self.main_window)
-        self.pan_tool_action.setIcon(self.main_window.icon_provider.get_icon("pan-tool"))
-        self.pan_tool_action.setShortcut("P")
-        self.pan_tool_action.setCheckable(True)
-        self.pan_tool_action.setChecked(False)
-        self.pan_tool_action.setToolTip("Enable pan mode (left-click to pan the canvas) [P]")
-        self.pan_tool_action.triggered.connect(self.main_window.toggle_pan_mode)
-        self.main_window.toolbar.addAction(self.pan_tool_action)
-        self.main_window.pan_tool_action = self.pan_tool_action
-
-        # Add blur pen tool action
-        self.blur_pen_action = QAction("Blur Pen", self.main_window)
-        self.blur_pen_action.setIcon(self.main_window.icon_provider.get_icon("blur-pen"))
-        self.blur_pen_action.setCheckable(True)
-        self.blur_pen_action.setChecked(False)
-        self.blur_pen_action.setToolTip("Enable Blur Pen (left-click to draw blur, right-click to erase)")
-        def toggle_blur_pen(checked):
-            self.main_window.canvas.blur_pen_active = checked
-            if checked:
-                self.main_window.canvas.setCursor(Qt.CrossCursor)
-            else:
-                self.main_window.canvas.setCursor(Qt.ArrowCursor)
-        self.blur_pen_action.triggered.connect(toggle_blur_pen)
-        self.main_window.toolbar.addAction(self.blur_pen_action)
-        self.main_window.blur_pen_action = self.blur_pen_action
-
-        # Blur pen size control
-        pen_size_label = QLabel("Pen Size:")
-        self.main_window.toolbar.addWidget(pen_size_label)
-
-        self.blur_pen_size_spinbox = QSpinBox()
-        self.blur_pen_size_spinbox.setRange(1, 300)
-        self.blur_pen_size_spinbox.setValue(30)
-        self.blur_pen_size_spinbox.setSuffix(" px")
-        self.blur_pen_size_spinbox.setToolTip("Radius of the Blur Pen brush, in image pixels")
-        def set_blur_pen_size(value):
-            self.main_window.canvas.blur_pen_size = value
-            self.main_window.canvas.update()
-        self.blur_pen_size_spinbox.valueChanged.connect(set_blur_pen_size)
-        self.main_window.toolbar.addWidget(self.blur_pen_size_spinbox)
-        self.main_window.blur_pen_size_spinbox = self.blur_pen_size_spinbox
-
-        # Add auto blur toggle action
-        self.auto_blur_action = QAction("Auto Blur", self.main_window)
-        self.auto_blur_action.setIcon(self.main_window.icon_provider.get_icon("auto-blur"))
-        self.auto_blur_action.setCheckable(True)
-        self.auto_blur_action.setChecked(getattr(self.main_window, 'auto_blur_labels', False))
-        self.auto_blur_action.setToolTip("Auto-blur all new labels (manual, pasted, tracked, detected)")
-        self.auto_blur_action.triggered.connect(
-            lambda checked: getattr(self.main_window, 'toggle_auto_blur_labels', lambda c: None)(checked)
+        main_window.blur_pen_action = self._create_action(
+            toolbar,
+            "blur_pen_action",
+            "Blur Pen",
+            self._toggle_blur_pen,
+            checkable=True,
+            icon_name="blur-pen",
+            tooltip="Enable Blur Pen (left-click to draw blur, right-click to erase)",
         )
-        self.main_window.toolbar.addAction(self.auto_blur_action)
-        self.main_window.auto_blur_action = self.auto_blur_action
 
-        # Add auto bbox tool action
-        self.auto_bbox_action = QAction("Auto BBox", self.main_window)
-        self.auto_bbox_action.setIcon(self.main_window.icon_provider.get_icon("magic"))
-        self.auto_bbox_action.setCheckable(True)
-        self.auto_bbox_action.setChecked(False)
-        self.auto_bbox_action.setToolTip("Enable Auto BBox mode (left-click on object to auto-segment)")
-        self.auto_bbox_action.triggered.connect(self.main_window.toggle_auto_bbox_mode)
-        self.main_window.toolbar.addAction(self.auto_bbox_action)
-        self.main_window.auto_bbox_action = self.auto_bbox_action
+        pen_size_label = QLabel("Pen Size:", toolbar)
+        toolbar.addWidget(pen_size_label)
+        main_window.blur_pen_size_spinbox = QSpinBox(toolbar)
+        main_window.blur_pen_size_spinbox.setRange(1, 300)
+        main_window.blur_pen_size_spinbox.setValue(30)
+        main_window.blur_pen_size_spinbox.setSuffix(" px")
+        main_window.blur_pen_size_spinbox.setToolTip(
+            "Radius of the Blur Pen brush, in image pixels"
+        )
+        main_window.blur_pen_size_spinbox.valueChanged.connect(
+            self._set_blur_pen_size
+        )
+        toolbar.addWidget(main_window.blur_pen_size_spinbox)
 
-        # Add Crop Mode tool action
-        self.crop_mode_action = QAction("Crop Mode", self.main_window)
-        self.crop_mode_action.setIcon(self.main_window.icon_provider.get_icon("transform-crop")) # Using generic crop icon name
-        self.crop_mode_action.setCheckable(True)
-        self.crop_mode_action.setChecked(False)
-        self.crop_mode_action.setToolTip("Enable Crop Mode (define a crop region to extract dataset)")
-        self.crop_mode_action.triggered.connect(self.main_window.toggle_crop_mode)
-        self.main_window.toolbar.addAction(self.crop_mode_action)
-        self.main_window.crop_mode_action = self.crop_mode_action
+        main_window.auto_blur_action = self._create_action(
+            toolbar,
+            "auto_blur_action",
+            "Auto Blur",
+            main_window.toggle_auto_blur_labels,
+            checkable=True,
+            checked=getattr(main_window, "auto_blur_labels", False),
+            icon_name="auto-blur",
+            tooltip="Auto-blur all new labels (manual, pasted, tracked, detected)",
+        )
+        main_window.auto_blur_menu_action = main_window.auto_blur_action
 
-        # Add Clip Cuts toggle action
-        self.clip_cuts_action = QAction("Clip Cuts", self.main_window)
-        self.clip_cuts_action.setCheckable(True)
-        self.clip_cuts_action.setChecked(False)
-        self.clip_cuts_action.setToolTip("Toggle Clip Cuts Manager")
-        def toggle_clip_cuts_toolbar(checked):
-            if hasattr(self.main_window, 'clip_cuts_dock'):
-                if checked:
-                    if hasattr(self.main_window, 'annotation_dock'):
-                        self.main_window.tabifyDockWidget(self.main_window.annotation_dock, self.main_window.clip_cuts_dock)
-                    self.main_window.clip_cuts_dock.setVisible(True)
-                    self.main_window.clip_cuts_dock.raise_()
-                else:
-                    self.main_window.clip_cuts_dock.setVisible(False)
-        self.clip_cuts_action.triggered.connect(toggle_clip_cuts_toolbar)
-        self.main_window.toolbar.addAction(self.clip_cuts_action)
-        self.main_window.clip_cuts_action = self.clip_cuts_action
+        main_window.auto_bbox_action = self._create_action(
+            toolbar,
+            "auto_bbox_action",
+            "Auto BBox",
+            main_window.toggle_auto_bbox_mode,
+            checkable=True,
+            checked=getattr(main_window, "auto_bbox_mode", False),
+            icon_name="magic",
+            tooltip="Enable Auto BBox mode (left-click on an object to auto-segment)",
+        )
 
-        # Add model selector for Auto BBox
-        self.main_window.sam_model_selector = QComboBox()
-        self.main_window.sam_model_selector.addItems([
-            "SAM2 Fast (sam2.1_s.pt)", 
+        main_window.crop_mode_action = self._create_action(
+            toolbar,
+            "crop_mode_action",
+            "Crop Mode",
+            main_window.toggle_crop_mode,
+            checkable=True,
+            checked=False,
+            icon_name="transform-crop",
+            tooltip="Enable Crop Mode (define a crop region to extract a dataset)",
+        )
+
+        main_window.clip_cuts_action = self._create_action(
+            toolbar,
+            "clip_cuts_action",
+            "Clip Cuts",
+            self._toggle_clip_cuts,
+            checkable=True,
+            checked=False,
+            tooltip="Toggle Clip Cuts Manager",
+        )
+
+        model_label = QLabel("SAM Model:", toolbar)
+        toolbar.addWidget(model_label)
+        main_window.sam_model_selector = QComboBox(toolbar)
+        main_window.sam_model_selector.addItems([
+            "SAM2 Fast (sam2.1_s.pt)",
             "SAM2 Huge (sam2.1_l.pt)",
-            "SAM3 Fast (sam3.1_s.pt)", 
+            "SAM3 Fast (sam3.1_s.pt)",
             "SAM3 Huge (sam3.1_l.pt)",
             "SAM2 TRT C++ (TensorRT)",
-            "SAM2 TRT C++ Tiny (TensorRT)"
+            "SAM2 TRT C++ Tiny (TensorRT)",
         ])
-        self.main_window.sam_model_selector.setToolTip("Select the model to use for Auto BBox")
-        self.main_window.sam_model_selector.currentTextChanged.connect(self.main_window.change_sam_model)
-        self.main_window.toolbar.addWidget(self.main_window.sam_model_selector)
-
-        # Add save segmentation toggle for Magic Wand
-        from PyQt5.QtWidgets import QCheckBox
-        self.save_seg_checkbox = QCheckBox("Save Segmentations")
-        self.save_seg_checkbox.setChecked(True)
-        self.save_seg_checkbox.setToolTip("Save polygon segmentations when using Auto BBox (Magic Wand)")
-        self.main_window.save_seg_checkbox = self.save_seg_checkbox
-        self.main_window.toolbar.addWidget(self.save_seg_checkbox)
-
-        self.main_window.toolbar.addSeparator()
-
-        # Add cancel loading button
-        self.main_window.cancel_loading_btn = QPushButton("Cancel Loading")
-        self.main_window.cancel_loading_btn.setStyleSheet(
-            "background-color: #F56C6C; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;"
+        main_window.sam_model_selector.setToolTip(
+            "Select the model to use for Auto BBox"
         )
-        self.main_window.cancel_loading_btn.clicked.connect(self.main_window.cancel_dataset_loading)
-        
-        self.main_window.cancel_loading_action = self.main_window.toolbar.addWidget(self.main_window.cancel_loading_btn)
-        self.main_window.cancel_loading_action.setVisible(False)
-        self.main_window.toolbar.addSeparator()
+        main_window.sam_model_selector.currentTextChanged.connect(
+            main_window.change_sam_model
+        )
+        toolbar.addWidget(main_window.sam_model_selector)
 
-        # Add verification mode toggle
-        self.verify_mode_action = QAction("Auto Clean Mode", self.main_window)
-        self.verify_mode_action.setCheckable(True)
-        self.verify_mode_action.setChecked(False)
-        self.verify_mode_action.setToolTip("Toggle verification mode (delete unverified annotations when changing frames)")
-        self.verify_mode_action.triggered.connect(self.main_window.toggle_verification_mode)
-        self.main_window.toolbar.addAction(self.verify_mode_action)
-        
-        # Add verify selected button
-        verify_selected_action = QAction("Verify Selected", self.main_window)
-        verify_selected_action.setToolTip("Mark selected annotation as verified")
-        verify_selected_action.triggered.connect(self.main_window.verify_selected_annotation)
-        self.main_window.toolbar.addAction(verify_selected_action)
-        
-        # Add verify all button
-        verify_all_action = QAction("Verify All", self.main_window)
-        verify_all_action.setToolTip("Mark all annotations in current frame as verified")
-        verify_all_action.triggered.connect(self.main_window.verify_all_annotations)
-        self.main_window.toolbar.addAction(verify_all_action)
+        self.save_seg_checkbox = QCheckBox("Save Segmentations", toolbar)
+        self.save_seg_checkbox.setChecked(True)
+        self.save_seg_checkbox.setToolTip(
+            "Save polygon segmentations when using Auto BBox (Magic Wand)"
+        )
+        main_window.save_seg_checkbox = self.save_seg_checkbox
+        toolbar.addWidget(self.save_seg_checkbox)
 
-        self.main_window.finish_integration_sep = self.main_window.toolbar.addSeparator()
-        self.main_window.finish_integration_sep.setVisible(False)
+        toolbar.addSeparator()
 
-        # Finish & Merge Integration Mode action
-        btn_finish = QPushButton("Finish Integration & Merge")
-        btn_finish.setStyleSheet("background-color: #67C23A; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;")
-        btn_finish.setToolTip("Finish reviewing and merge the dataset into the main dataset")
-        btn_finish.clicked.connect(self.main_window.viat_finish_integration)
-        
-        self.finish_integration_action = self.main_window.toolbar.addWidget(btn_finish)
-        self.main_window.finish_integration_action = self.finish_integration_action
-        self.finish_integration_action.setVisible(False)
+        # Temporary loading/integration controls stay on this same toolbar;
+        # their actions are hidden until the corresponding workflow is active.
+        cancel_button = QPushButton("Cancel Loading", toolbar)
+        cancel_button.setStyleSheet(
+            "background-color: #F56C6C; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        cancel_button.clicked.connect(main_window.cancel_dataset_loading)
+        cancel_action = toolbar.addWidget(cancel_button)
+        cancel_action.setVisible(False)
+        main_window.cancel_loading_btn = cancel_button
+        main_window.cancel_loading_action = cancel_action
 
-        # Move Integration Mode action
-        btn_move = QPushButton("Move to Review")
-        btn_move.setStyleSheet("background-color: #E6A23C; color: white; font-weight: bold; padding: 4px 8px; border-radius: 3px;")
-        btn_move.setToolTip("Move the dataset to a different folder and add details")
-        if hasattr(self.main_window, "viat_finish_integration_move"):
-            btn_move.clicked.connect(self.main_window.viat_finish_integration_move)
-        
-        self.finish_integration_move_action = self.main_window.toolbar.addWidget(btn_move)
-        self.main_window.finish_integration_move_action = self.finish_integration_move_action
-        self.finish_integration_move_action.setVisible(False)
+        main_window.verify_mode_action = self._create_action(
+            toolbar,
+            "verify_mode_action",
+            "Auto Clean Mode",
+            main_window.toggle_verification_mode,
+            checkable=True,
+            checked=False,
+            tooltip=(
+                "Delete unverified annotations when changing frames"
+            ),
+        )
+        main_window.verify_selected_action = self._create_action(
+            toolbar,
+            "verify_selected_action",
+            "Verify Selected",
+            main_window.verify_selected_annotation,
+            tooltip="Mark the selected annotation as verified",
+        )
+        main_window.verify_all_action = self._create_action(
+            toolbar,
+            "verify_all_action",
+            "Verify All",
+            main_window.verify_all_annotations,
+            tooltip="Mark all annotations in the current frame as verified",
+        )
+
+        finish_separator = toolbar.addSeparator()
+        finish_separator.setVisible(False)
+        main_window.finish_integration_sep = finish_separator
+
+        finish_button = QPushButton("Finish Integration & Merge", toolbar)
+        finish_button.setStyleSheet(
+            "background-color: #67C23A; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        finish_button.setToolTip(
+            "Finish reviewing and merge the dataset into the main dataset"
+        )
+        finish_button.clicked.connect(main_window.viat_finish_integration)
+        finish_action = toolbar.addWidget(finish_button)
+        finish_action.setVisible(False)
+        main_window.finish_integration_action = finish_action
+
+        move_button = QPushButton("Move to Review", toolbar)
+        move_button.setStyleSheet(
+            "background-color: #E6A23C; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        move_button.setToolTip(
+            "Move the dataset to a different folder and add details"
+        )
+        if hasattr(main_window, "viat_finish_integration_move"):
+            move_button.clicked.connect(main_window.viat_finish_integration_move)
+        move_action = toolbar.addWidget(move_button)
+        move_action.setVisible(False)
+        main_window.finish_integration_move_action = move_action
+
+        # The remaining actions are kept directly visible as well.  They were
+        # previously placed in the experimental More menu, and keeping them
+        # here avoids silently changing the user's established workflow.
+        toolbar.addSeparator()
+
+        self._create_action(
+            toolbar,
+            "autopilot_action",
+            "Autopilot...",
+            main_window.open_autopilot,
+            tooltip="Run unattended labeling and flag likely mistakes for review",
+        )
+        self._create_action(
+            toolbar,
+            "autopilot_review_action",
+            "Autopilot Review",
+            main_window.show_autopilot_review,
+        )
+        self._create_action(
+            toolbar,
+            "zero_shot_refiner_action",
+            "Zero-Shot Refiner...",
+            getattr(main_window, "open_zero_shot_refiner_dialog", None),
+        )
+        self._create_action(
+            toolbar,
+            "annotation_nms_action",
+            "Remove Duplicates (NMS)...",
+            main_window.open_annotation_nms_dialog,
+        )
+        main_window.action_sam_interactive = self._create_action(
+            toolbar,
+            "sam_interactive_action",
+            "SAM Interactive",
+            main_window.toggle_sam_interactive_mode,
+            checkable=True,
+            checked=False,
+            tooltip="Open the interactive SAM prompting workflow",
+        )
+        main_window.action_sam_interactive.setObjectName("SAMInteractiveAction")
+
+        main_window.duplicate_frames_action = self._create_action(
+            toolbar,
+            "duplicate_frames_action",
+            "Detect Duplicate Frames",
+            main_window.toggle_duplicate_frames_detection,
+            checkable=True,
+            checked=getattr(main_window, "duplicate_frames_enabled", True),
+            tooltip="Automatically detect and propagate annotations to duplicate frames",
+        )
+        self._create_action(
+            toolbar,
+            "scan_duplicate_frames_action",
+            "Scan Video for Duplicates",
+            main_window.scan_video_for_duplicates,
+        )
+        propagate_action = self._create_action(
+            toolbar,
+            "propagate_action",
+            "Propagate Annotations...",
+            main_window.propagate_annotations,
+            tooltip="Copy current frame annotations to multiple frames",
+        )
+        propagate_action.setShortcut("Ctrl+P")
+        self._create_action(
+            toolbar,
+            "similar_frames_action",
+            "Propagate to Similar Frames...",
+            main_window.propagate_to_similar_frames,
+            tooltip="Copy annotations to frames that look similar",
+        )
+
+        self._create_action(
+            toolbar,
+            "object_visibility_action",
+            "Object Visibility...",
+            main_window.viat_start_object_visibility_mode,
+        )
+        self._create_action(
+            toolbar,
+            "evaluation_action",
+            "Model Evaluation...",
+            getattr(main_window, "open_evaluation_dialog", None),
+        )
+        self._create_action(
+            toolbar,
+            "auto_blur_dialog_action",
+            "Auto Blur Labels...",
+            getattr(main_window, "open_auto_blur_dialog", None),
+        )
+        main_window.auto_save_blur_action = self._create_action(
+            toolbar,
+            "auto_save_blur_action",
+            "Auto-Save/Burn Blur on Frame Switch",
+            main_window.toggle_auto_save_blur_on_switch,
+            checkable=True,
+            checked=getattr(main_window, "auto_save_blur_on_switch", False),
+        )
+        for attribute_name, label, callback in (
+            ("clear_frame_blur_action", "Clear Current Frame Blur", "clear_current_frame_blur"),
+            ("clear_range_blur_action", "Clear Blur in Range...", "clear_blur_range"),
+            ("clear_all_blur_action", "Clear All Blurs Across Video", "clear_all_blurs"),
+        ):
+            self._create_action(
+                toolbar,
+                attribute_name,
+                label,
+                getattr(main_window, callback, None),
+            )
+
+        main_window.video_manager_toolbar_action = self._create_action(
+            toolbar,
+            "video_manager_toolbar_action",
+            "Video Manager",
+            lambda checked=False: self._set_dock_visible(
+                "video_manager_dock", checked
+            ),
+            checkable=True,
+            checked=False,
+        )
+        main_window.track_queue_toolbar_action = self._create_action(
+            toolbar,
+            "track_queue_toolbar_action",
+            "Track Queue",
+            lambda checked=False: self._set_dock_visible(
+                "track_queue_dock", checked
+            ),
+            checkable=True,
+            checked=False,
+        )
+
+
+    def _toggle_blur_pen(self, checked):
+        canvas = getattr(self.main_window, "canvas", None)
+        if canvas is None:
+            return
+        canvas.blur_pen_active = bool(checked)
+        canvas.setCursor(Qt.CrossCursor if checked else Qt.ArrowCursor)
+
+    def _set_blur_pen_size(self, value):
+        canvas = getattr(self.main_window, "canvas", None)
+        if canvas is not None:
+            canvas.blur_pen_size = value
+            canvas.update()
+
+    def _toggle_clip_cuts(self, checked):
+        dock = getattr(self.main_window, "clip_cuts_dock", None)
+        if dock is None:
+            return
+        if checked:
+            annotation_dock = getattr(self.main_window, "annotation_dock", None)
+            if annotation_dock is not None:
+                self.main_window.tabifyDockWidget(annotation_dock, dock)
+            dock.setVisible(True)
+            dock.raise_()
+        else:
+            dock.setVisible(False)
+
+    def _set_dock_visible(self, dock_attribute, visible):
+        dock = getattr(self.main_window, dock_attribute, None)
+        if dock is not None:
+            dock.setVisible(bool(visible))
+            if visible:
+                dock.raise_()
+
+    def _create_contextual_toolbar(self):
+        """Create a hidden bar for loading and integration-only controls."""
+        main_window = self.main_window
+        toolbar = QToolBar("Contextual Tools", main_window)
+        toolbar.setObjectName("ContextualToolsToolbar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        main_window.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        cancel_button = QPushButton("Cancel Loading")
+        cancel_button.setStyleSheet(
+            "background-color: #F56C6C; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        cancel_button.clicked.connect(main_window.cancel_dataset_loading)
+        cancel_action = toolbar.addWidget(cancel_button)
+
+        integration_separator = toolbar.addSeparator()
+
+        finish_button = QPushButton("Finish Integration & Merge")
+        finish_button.setStyleSheet(
+            "background-color: #67C23A; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        finish_button.setToolTip("Finish reviewing and merge the dataset")
+        finish_button.clicked.connect(main_window.viat_finish_integration)
+        finish_action = toolbar.addWidget(finish_button)
+
+        move_button = QPushButton("Move to Review")
+        move_button.setStyleSheet(
+            "background-color: #E6A23C; color: white; font-weight: bold; "
+            "padding: 4px 8px; border-radius: 3px;"
+        )
+        move_button.setToolTip("Move the dataset to a review folder")
+        if hasattr(main_window, "viat_finish_integration_move"):
+            move_button.clicked.connect(main_window.viat_finish_integration_move)
+        move_action = toolbar.addWidget(move_button)
+
+        contextual_actions = [
+            cancel_action,
+            integration_separator,
+            finish_action,
+            move_action,
+        ]
+        for action in contextual_actions:
+            action.setVisible(False)
+            action.changed.connect(
+                lambda _action=None: self._sync_contextual_toolbar(
+                    toolbar, contextual_actions
+                )
+            )
+
+        main_window.cancel_loading_btn = cancel_button
+        main_window.cancel_loading_action = cancel_action
+        main_window.finish_integration_sep = integration_separator
+        main_window.finish_integration_action = finish_action
+        main_window.finish_integration_move_action = move_action
+        self._contextual_toolbar = toolbar
+        self._sync_contextual_toolbar(toolbar, contextual_actions)
+
+    @staticmethod
+    def _sync_contextual_toolbar(toolbar, actions):
+        toolbar.setVisible(any(action.isVisible() for action in actions))
 
     def create_dock_widgets(self):
         """Create and set up the dock widgets."""
@@ -1186,8 +1641,15 @@ class UICreator:
         Args:
             main_window: The main application window
         """
-        # Create Interpolation menu
-        interpolation_menu = self.main_window.menuBar().addMenu("&Interpolation")
+        # Add interpolation commands to the grouped Review menu.  The
+        # temporary toolbar below still appears only while the mode is active.
+        interpolation_menu = getattr(
+            getattr(self.main_window, "toolbar", None), "review_menu", None
+        )
+        if interpolation_menu is None:
+            interpolation_menu = self.main_window.menuBar().addMenu("&Interpolation")
+        else:
+            interpolation_menu.addSeparator()
         
         # Toggle interpolation mode
         toggle_interpolation_action = QAction("Enable Interpolation Mode", self.main_window)
@@ -1207,7 +1669,9 @@ class UICreator:
         # Perform interpolation
         interpolate_action = QAction("Interpolate Now", self.main_window)
         interpolate_action.triggered.connect(self.main_window.perform_interpolation)
-        interpolate_action.setShortcut("Ctrl+I")
+        # Ctrl+I is reserved for importing annotations; keep interpolation
+        # discoverable without colliding with the File menu shortcut.
+        interpolate_action.setShortcut("Ctrl+Shift+I")
         interpolation_menu.addAction(interpolate_action)
         
         # Add to toolbar

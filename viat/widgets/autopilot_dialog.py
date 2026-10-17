@@ -38,6 +38,7 @@ ADVANCED = [
     ('candidate_score', 'Candidate score', 0.01, 0.9, 0.01, 2, 'Detections kept as candidates (low on purpose: recall first).'),
     ('high_score', 'Track-match score', 0.05, 0.95, 0.05, 2, 'Detections this confident are matched to tracks first.'),
     ('birth_score', 'New-object score', 0.05, 0.99, 0.05, 2, 'A new track starts only from a detection at least this confident.'),
+    ('box_slack', 'Box padding (slack)', 0.0, 0.20, 0.01, 2, 'Fraction of width/height added to edges to prevent clipping car corners/bumpers.'),
     ('min_hits', 'Confirm after (detections)', 1, 20, 1, 0, 'A tentative track becomes real after this many matched detections.'),
     ('max_lost_sec', 'Keep lost track (s)', 0.1, 10.0, 0.1, 1, 'How long a lost object may stay unseen before its track ends.'),
     ('ext_max_sec', 'Extend tracks up to (s)', 0.0, 10.0, 0.5, 1, 'Walk each track backward/forward along weak detections.'),
@@ -50,7 +51,7 @@ ADVANCED = [
 
 
 class AutopilotDialog(QDialog):
-    def __init__(self, parent, class_names, current_frame, total_frames, checkpoints_dir, last_config=None):
+    def __init__(self, parent, class_names, current_frame, total_frames, checkpoints_dir, last_config=None, seed_counts=None):
         super().__init__(parent)
         self.setWindowTitle('Autopilot - Unattended Video Labeling')
         self.total_frames = total_frames
@@ -118,28 +119,118 @@ class AutopilotDialog(QDialog):
         seed_layout = QVBoxLayout(seed_box)
         seed_layout.setContentsMargins(10, 8, 10, 8)
         seed_layout.setSpacing(6)
+
+        self.seed_status = QLabel()
+        self.seed_status.setWordWrap(True)
+        if seed_counts:
+            total_seeds = sum(seed_counts.values())
+            summary = ', '.join(f"{cls} ({cnt})" for cls, cnt in sorted(seed_counts.items()))
+            self.seed_status.setText(f"<b>Visual seeds available:</b> {total_seeds} verified box(es) found ({summary}).")
+            self.seed_status.setStyleSheet("color: #2e7d32; padding: 2px;")
+        else:
+            self.seed_status.setText("<i>No verified boxes found in project yet. Draw a few boxes for difficult objects on any frame to use as visual prompts.</i>")
+            self.seed_status.setStyleSheet("color: #757575; padding: 2px;")
+        seed_layout.addWidget(self.seed_status)
+
         self.use_exemplars = QCheckBox(
             'Use verified boxes already drawn in this frame range as visual examples')
-        self.use_exemplars.setChecked(last.use_exemplars)
+        self.use_exemplars.setChecked(last.use_exemplars or bool(seed_counts))
         self.use_exemplars.setToolTip(
             'Useful for OWLv2: draw a few boxes for difficult objects first, then use their appearance '
             'as one-shot queries on every frame. This does not fine-tune the model.')
         seed_layout.addWidget(self.use_exemplars)
+
         seed_row = QHBoxLayout()
         seed_row.addWidget(QLabel('Examples per class:'))
         self.exemplar_limit = QSpinBox()
         self.exemplar_limit.setRange(1, 10)
-        self.exemplar_limit.setValue(max(1, min(10, int(last.exemplar_limit))))
+        self.exemplar_limit.setValue(max(1, min(10, int(getattr(last, 'exemplar_limit', 3)))))
         self.exemplar_limit.setToolTip('At most this many manually verified boxes per class are collected.')
         seed_row.addWidget(self.exemplar_limit)
+
+        seed_row.addSpacing(16)
+        seed_row.addWidget(QLabel('Prompt mode:'))
+        self.prompt_mode = QComboBox()
+        self.prompt_mode.addItem('Hybrid (Visual + Text)', 'hybrid')
+        self.prompt_mode.addItem('Visual Exemplars Only', 'visual_only')
+        self.prompt_mode.addItem('Text Prompts Only', 'text_only')
+        cur_mode = getattr(last, 'prompt_mode', 'hybrid')
+        idx = self.prompt_mode.findData(cur_mode)
+        if idx >= 0:
+            self.prompt_mode.setCurrentIndex(idx)
+        self.prompt_mode.setToolTip(
+            'Hybrid: Uses visual crops for seed objects and text prompts for general detection.\n'
+            'Visual Only: Detects only objects matching the visual examples.\n'
+            'Text Only: Ignores visual crops and detects using text prompts.')
+        seed_row.addWidget(self.prompt_mode)
+
+        seed_row.addSpacing(16)
+        seed_row.addWidget(QLabel('Visual threshold:'))
+        self.visual_query_threshold = QDoubleSpinBox()
+        self.visual_query_threshold.setRange(0.04, 0.60)
+        self.visual_query_threshold.setSingleStep(0.02)
+        self.visual_query_threshold.setDecimals(2)
+        self.visual_query_threshold.setValue(float(getattr(last, 'visual_query_threshold', 0.10)))
+        self.visual_query_threshold.setToolTip(
+            'OWLv2 image-guided similarity threshold (default 0.10).\n'
+            'Prevents background false positives (values below 0.08 often match walls, grass, or pavement).')
+        seed_row.addWidget(self.visual_query_threshold)
         seed_row.addStretch()
         seed_layout.addLayout(seed_row)
+
         seed_hint = QLabel(
-            'Only manually verified project boxes are used. OWLv2 uses the first representative crop '
-            'per class; other detectors continue to use text prompts.')
+            'Draw a few boxes for difficult objects on any frame (e.g. frame 1). '
+            'OWLv2 uses their appearance as visual queries across all frames; other detectors use text prompts.')
         self._configure_hint(seed_hint)
         seed_layout.addWidget(seed_hint)
         lay.addWidget(seed_box)
+
+        # ------------------------------------------------ boundary refinement (SAM)
+        sam_box = QGroupBox('Boundary refinement (SAM)')
+        sl = QVBoxLayout(sam_box)
+        sl.setContentsMargins(10, 8, 10, 8)
+        sl.setSpacing(6)
+        self.refine_with_sam = QCheckBox(
+            'Refine detected boxes with SAM (ensures whole object is captured)')
+        self.refine_with_sam.setChecked(getattr(last, 'refine_with_sam', True))
+        self.refine_with_sam.setToolTip(
+            'Passes candidate bounding boxes to SAM (Segment Anything) to segment exact object contours.\n'
+            'Snaps the bounding box to the physical object envelope, capturing corners, bumpers, heads,\n'
+            'and feet without clipping, and eliminates coordinate averaging noise across models.')
+        sl.addWidget(self.refine_with_sam)
+
+        sam_row = QHBoxLayout()
+        sam_row.addWidget(QLabel('SAM refiner model:'))
+        self.sam_refine_model = QComboBox()
+        sam_candidates = [
+            ('SAM 2.1 Large (sam2.1_l.pt)', 'sam2.1_l.pt'),
+            ('SAM 3.1 Large (sam3.1_l.pt)', 'sam3.1_l.pt'),
+            ('SAM 2 Large (sam2_l.pt)', 'sam2_l.pt'),
+            ('SAM 2.1 Small (sam2.1_s.pt)', 'sam2.1_s.pt'),
+            ('SAM 2 Small (sam2_s.pt)', 'sam2_s.pt'),
+            ('SAM 3 Large (sam3_l.pt)', 'sam3_l.pt'),
+        ]
+        cur_sam = getattr(last, 'sam_refine_model', 'sam2.1_l.pt')
+        for display, key in sam_candidates:
+            avail = is_available(key)
+            item_text = display if avail else f"{display}  (missing)"
+            self.sam_refine_model.addItem(item_text, key)
+            if not avail:
+                m_item = self.sam_refine_model.model().item(self.sam_refine_model.count() - 1)
+                if m_item:
+                    m_item.setEnabled(False)
+        s_idx = self.sam_refine_model.findData(cur_sam)
+        if s_idx >= 0 and self.sam_refine_model.model().item(s_idx) and self.sam_refine_model.model().item(s_idx).isEnabled():
+            self.sam_refine_model.setCurrentIndex(s_idx)
+        else:
+            for i in range(self.sam_refine_model.count()):
+                item = self.sam_refine_model.model().item(i)
+                if item and item.isEnabled():
+                    self.sam_refine_model.setCurrentIndex(i)
+                    break
+        sam_row.addWidget(self.sam_refine_model, 1)
+        sl.addLayout(sam_row)
+        lay.addWidget(sam_box)
 
         # ----------------------------------------------------------------- models
         mdl_box = QGroupBox('Detectors (several = agreement-weighted fusion)')
@@ -273,6 +364,20 @@ class AutopilotDialog(QDialog):
         self.video_calibration = QCheckBox('Adapt score calibration to each video')
         self.video_calibration.setChecked(last.video_calibration)
         af.addRow(self.video_calibration)
+        self.fusion_box_mode = QComboBox()
+        self.fusion_box_mode.addItem('Best model box (no coordinate blur; recommended with SAM)', 'best')
+        self.fusion_box_mode.addItem('Weighted coordinate average (legacy)', 'average')
+        self.fusion_box_mode.addItem('Enclosing union envelope', 'union')
+        cur_fusion = getattr(last, 'fusion_box_mode', 'best')
+        f_idx = self.fusion_box_mode.findData(cur_fusion)
+        if f_idx >= 0:
+            self.fusion_box_mode.setCurrentIndex(f_idx)
+        self.fusion_box_mode.setToolTip(
+            'How candidate boxes from agreeing models are combined:\n'
+            'Best model: keeps the sharpest box from the most confident model.\n'
+            'Weighted average: blends coordinates together (can blur edges).\n'
+            'Enclosing union: bounding envelope of all agreeing models.')
+        af.addRow('Fusion box mode:', self.fusion_box_mode)
         al = QVBoxLayout(adv)
         al.setContentsMargins(10, 8, 10, 8)
         al.setSpacing(6)
@@ -293,16 +398,46 @@ class AutopilotDialog(QDialog):
     # ------------------------------------------------------------------ helpers
     def _set_responsive_size(self):
         """Choose a useful initial size without exceeding the available screen."""
-        screen = self.screen()
+        # ``QWidget.screen()`` is not exposed by some PyQt5/Qt5 builds used by
+        # VIAT.  Prefer it when available, but keep the desktop fallback so the
+        # dialog can still be constructed on those versions and in offscreen
+        # smoke tests.
+        screen = None
+        desktop = None
+        screen_number = 0
+        screen_getter = getattr(self, 'screen', None)
+        if callable(screen_getter):
+            screen = screen_getter()
         if screen is None and self.parentWidget() is not None:
-            screen = self.parentWidget().screen()
+            parent_screen = getattr(self.parentWidget(), 'screen', None)
+            if callable(parent_screen):
+                screen = parent_screen()
+        if screen is None:
+            desktop = QApplication.desktop()
+            if desktop is not None:
+                try:
+                    screen_number = desktop.screenNumber(self)
+                except TypeError:
+                    screen_number = desktop.screenNumber()
+                screen = desktop.screen(screen_number if screen_number >= 0 else 0)
         if screen is None:
             screen = QApplication.primaryScreen()
         if screen is None:
             self.resize(760, 720)
             return
 
-        available = screen.availableGeometry()
+        if hasattr(screen, 'availableGeometry'):
+            available = screen.availableGeometry()
+        elif desktop is not None:
+            # QApplication.desktop().screen() returns a QWidget in PyQt5,
+            # while its geometry is exposed by the desktop object itself.
+            available = desktop.availableGeometry(screen_number if screen_number >= 0 else 0)
+        else:
+            primary = QApplication.primaryScreen()
+            available = primary.availableGeometry() if primary is not None else None
+        if available is None:
+            self.resize(760, 720)
+            return
         max_width = max(1, available.width() - 32)
         max_height = max(1, available.height() - 48)
 
@@ -371,6 +506,11 @@ class AutopilotDialog(QDialog):
                               end_frame=self.end.value() - 1, stride=stride, tiles=tiles, flip_tta=flip,
                               use_exemplars=self.use_exemplars.isChecked(),
                               exemplar_limit=self.exemplar_limit.value(),
+                              prompt_mode=self.prompt_mode.currentData(),
+                              visual_query_threshold=self.visual_query_threshold.value(),
+                              refine_with_sam=self.refine_with_sam.isChecked(),
+                              sam_refine_model=self.sam_refine_model.currentData(),
+                              fusion_box_mode=self.fusion_box_mode.currentData(),
                               cut_detection=self.cut_detection.isChecked(),
                               video_calibration=self.video_calibration.isChecked(),
                               judges=[k for k, cb in self.judge_checks.items() if cb.isChecked()],

@@ -21,7 +21,17 @@ from .im_tools import (
     mse_similarity,
     create_thumbnail,
 )
-from .ui_creator import UICreator
+# ``ui_creator`` imports widgets, while some widgets import utility modules
+# (for example ``icon_provider``).  Importing UICreator eagerly here therefore
+# creates a package-initialization cycle when the widgets package is imported.
+# Keep the historical ``from viat.utils import UICreator`` API, but resolve it
+# only when a caller actually requests the class.
+def __getattr__(name):
+    if name == "UICreator":
+        from .ui_creator import UICreator
+
+        return UICreator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 try:
     from .performance import PerfomanceManger, PerformanceManager
 except ImportError:
