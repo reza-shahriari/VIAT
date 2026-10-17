@@ -76,6 +76,25 @@ class SamManager:
             self.current_model_type = None
             return False, f"Failed to load model: {str(e)}"
 
+    def _get_target_imgsz(self, image_array=None):
+        """
+        Determines the optimal square image size for SAM models:
+        - SAM3: ViT patch size 14. Native resolution 1008x1008 (72 * 14).
+        - SAM2 / FastSAM: Hiera stride 32. 1024 is native; 1280 (40 * 32) for frames >= 1080p.
+        """
+        if self.current_model_type and "sam3" in self.current_model_type.lower():
+            if image_array is not None:
+                max_dim = max(image_array.shape[:2])
+                nearest = int(round(max_dim / 14.0)) * 14
+                return max(644, min(1008, nearest))
+            return 1008
+        else:
+            if image_array is not None:
+                max_dim = max(image_array.shape[:2])
+                if max_dim >= 1920:
+                    return 1280  # 40 * 32 = 1280
+            return 1024
+
     def predict_bbox_from_point(self, image_array, x, y):
         """
         Given an image and a click coordinate (x, y), uses SAM to generate a mask 
@@ -88,24 +107,17 @@ class SamManager:
             return None
 
         try:
-            # Run inference. ultralytics accepts numpy arrays.
-            # Format expected by ultralytics for a single point is [x, y]
-            print(f"[DEBUG LOG] Running ultralytics SAM inference with points=[{x}, {y}] and labels=[1]")
-            results = self.model(image_array, points=[x, y], labels=[1], verbose=False)
+            target_imgsz = self._get_target_imgsz(image_array)
+            print(f"[DEBUG LOG] Running ultralytics SAM inference with points=[{x}, {y}] and labels=[1], imgsz={target_imgsz}")
+            results = self.model(image_array, points=[x, y], labels=[1], imgsz=target_imgsz, verbose=False)
             print(f"[DEBUG LOG] Inference completed. len(results)={len(results)}")
             
             if len(results) > 0:
                 result = results[0]
-                print(f"[DEBUG LOG] result.boxes={result.boxes is not None}, len(boxes)={len(result.boxes) if result.boxes is not None else 0}")
-                print(f"[DEBUG LOG] result.masks={result.masks is not None}, len(masks)={len(result.masks.xy) if result.masks is not None and hasattr(result.masks, 'xy') else 0}")
-                
-                # Check for boxes first
                 if result.boxes is not None and len(result.boxes) > 0:
                     box = result.boxes.xyxy[0].cpu().float().numpy()
-                    print(f"[DEBUG LOG] Returning box from result.boxes: {box}")
                     return (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
                 
-                # If no boxes, derive from the mask
                 if result.masks is not None and len(result.masks.xy) > 0:
                     mask = result.masks.xy[0]
                     if len(mask) > 0:
@@ -113,10 +125,8 @@ class SamManager:
                         y_min = int(np.min(mask[:, 1]))
                         x_max = int(np.max(mask[:, 0]))
                         y_max = int(np.max(mask[:, 1]))
-                        print(f"[DEBUG LOG] Derived box from mask: {(x_min, y_min, x_max, y_max)}")
                         return (x_min, y_min, x_max, y_max)
             
-            print("[DEBUG LOG] returning None.")
             return None
         except Exception as e:
             print(f"[DEBUG LOG] Error during SAM inference: {e}")
@@ -136,18 +146,15 @@ class SamManager:
             return None
 
         try:
-            print(f"[DEBUG LOG] Running ultralytics SAM inference with bboxes={box}")
-            results = self.model(image_array, bboxes=box, verbose=False)
+            target_imgsz = self._get_target_imgsz(image_array)
+            print(f"[DEBUG LOG] Running ultralytics SAM inference with bboxes={box}, imgsz={target_imgsz}")
+            results = self.model(image_array, bboxes=box, imgsz=target_imgsz, verbose=False)
             print(f"[DEBUG LOG] Inference completed. len(results)={len(results)}")
             
             if len(results) > 0:
                 result = results[0]
-                print(f"[DEBUG LOG] result.boxes={result.boxes is not None}, len(boxes)={len(result.boxes) if result.boxes is not None else 0}")
-                print(f"[DEBUG LOG] result.masks={result.masks is not None}, len(masks)={len(result.masks.xy) if result.masks is not None and hasattr(result.masks, 'xy') else 0}")
-                
                 if result.boxes is not None and len(result.boxes) > 0:
                     b = result.boxes.xyxy[0].cpu().float().numpy()
-                    print(f"[DEBUG LOG] Returning box from result.boxes: {b}")
                     return (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
                 
                 if result.masks is not None and len(result.masks.xy) > 0:
@@ -157,10 +164,8 @@ class SamManager:
                         y_min = int(np.min(mask[:, 1]))
                         x_max = int(np.max(mask[:, 0]))
                         y_max = int(np.max(mask[:, 1]))
-                        print(f"[DEBUG LOG] Derived box from mask: {(x_min, y_min, x_max, y_max)}")
                         return (x_min, y_min, x_max, y_max)
             
-            print("[DEBUG LOG] returning None.")
             return None
         except Exception as e:
             print(f"[DEBUG LOG] Error during SAM inference with box: {e}")
@@ -178,7 +183,8 @@ class SamManager:
             return None
 
         try:
-            results = self.model(image_array, bboxes=box, verbose=False)
+            target_imgsz = self._get_target_imgsz(image_array)
+            results = self.model(image_array, bboxes=box, imgsz=target_imgsz, verbose=False)
             
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
                 valid_polygons = [m for m in results[0].masks.xy if len(m) >= 3]
@@ -193,6 +199,7 @@ class SamManager:
         except Exception as e:
             print(f"Error during SAM inference with box: {e}")
             return None
+
     def predict_mask_from_prompt(self, image_array, points=None, labels=None, box=None, text_prompt=None):
         """
         Uses SAM to generate a mask from a combination of points, bounding box, and text prompt.
@@ -202,7 +209,8 @@ class SamManager:
             return None
 
         try:
-            kwargs = {'verbose': False, 'imgsz': 1024}
+            target_imgsz = self._get_target_imgsz(image_array)
+            kwargs = {'verbose': False, 'imgsz': target_imgsz}
             if points and labels:
                 if isinstance(points[0], (int, float)):
                     pts_fmt = [[[float(points[0]), float(points[1])]]]
@@ -268,7 +276,8 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=1024, save=False)
+                img_sz = 1008 if "sam3" in model_type.lower() else 1024
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=img_sz, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:
@@ -379,7 +388,8 @@ class SamManager:
                     os.chdir(old_cwd)
             
             if not getattr(self, 'video_predictor', None) or getattr(self, 'video_predictor_type', None) != model_type:
-                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=1024, save=False)
+                img_sz = 1008 if "sam3" in model_type.lower() else 1024
+                overrides = dict(conf=0.25, task="segment", mode="predict", model=model_path, verbose=False, imgsz=img_sz, save=False)
                 if "sam3" in model_type:
                     self.video_predictor = SAM3VideoPredictor(overrides=overrides)
                 else:

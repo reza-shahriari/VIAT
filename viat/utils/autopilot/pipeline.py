@@ -276,7 +276,7 @@ def _track_detector_provenance(track, records, keys):
     """
     values = {str(key): [] for key in keys}
     for frame in track.frames:
-        box, _score, det_idx, kind = track.boxes[frame]
+        box, _score, det_idx, kind = track.boxes[frame][:4]
         if kind not in ('d', 'e'):
             continue
         evidence = _box_detector_evidence(records.get(frame), det_idx, keys, box)
@@ -428,6 +428,8 @@ def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=Non
             continue
         h, w = frame.shape[:2]
         for t in active_tracks:
+            if not hasattr(t, 'segmentations'):
+                t.segmentations = {}
             box_tuple = t.boxes[f]
             box, score, det_idx, kind = box_tuple[:4]
             x1, y1, x2, y2 = [float(v) for v in box]
@@ -448,9 +450,10 @@ def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=Non
                 # Enforce sanity check so mask does not explode or collapse
                 if rw >= 2 and rh >= 2 and rw <= orig_w * 2.5 and rh <= orig_h * 2.5:
                     refined_box = np.array([rx1, ry1, rx2, ry2], dtype=np.float32)
-                    t.boxes[f] = (refined_box, score, det_idx, kind, poly)
+                    t.boxes[f] = (refined_box, score, det_idx, kind)
+                    t.segmentations[f] = poly
                     continue
-            t.boxes[f] = (box, score, det_idx, kind, None)
+            t.boxes[f] = (box, score, det_idx, kind)
         done += 1
         if done % 10 == 0 or done == total:
             progress('Refining with SAM', done, total)
@@ -641,7 +644,7 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
         for f in t.frames:
             box_tuple = t.boxes[f]
             box, score, det_idx, kind = box_tuple[:4]
-            poly = box_tuple[4] if len(box_tuple) > 4 else None
+            poly = getattr(t, 'segmentations', {}).get(f) or (box_tuple[4] if len(box_tuple) > 4 else None)
             evidence = (_box_detector_evidence(records.get(f), det_idx, keys, box)
                         if kind in ('d', 'e') else {})
             if poly:

@@ -153,7 +153,7 @@ class Repairer:
     def _mean_desc(self, t, frames):
         ds = []
         for f in frames:
-            box, _s, d, kind = t.boxes[f]
+            box, _s, d, kind = t.boxes[f][:4]
             rec = self.records.get(f)
             if kind in 'de' and rec is not None and d >= 0 and d < len(rec['desc']):
                 v = rec['desc'][d].astype(np.float32)

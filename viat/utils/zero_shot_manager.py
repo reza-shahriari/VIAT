@@ -600,12 +600,36 @@ class LocateAnythingDetector(ZeroShotDetector):
             return []
 
 class Sam3TextDetector(ZeroShotDetector):
-    def __init__(self):
+    def __init__(self, imgsz=None):
         self.predictor = None
         self.classes = []
         self.class_names = []
         self.class_prompts = []
         self.predict_counter = 0
+        self.custom_imgsz = imgsz
+
+    def _compute_imgsz(self, image_array):
+        """
+        Calculates an optimal square input size for SAM3.
+        SAM3 architecture requirements:
+          1. Must be square (H == W), as enforced by Ultralytics SAMPredictor setup_source.
+          2. Must be a multiple of stride 14 (due to ViT 14x14 patch embedding).
+          3. Native design resolution is 1008x1008 (72 * 14).
+        """
+        if self.custom_imgsz is not None:
+            return max(14, int(round(self.custom_imgsz / 14.0)) * 14)
+
+        h, w = image_array.shape[:2]
+        max_dim = max(h, w)
+
+        # Nearest multiple of 14 to the image's largest dimension
+        nearest = int(round(max_dim / 14.0)) * 14
+
+        # Bounds:
+        # Lower bound: 644 (46 * 14) ensures small crops have sufficient patch resolution without losing context.
+        # Upper bound: 1008 (72 * 14), which is SAM3's native training resolution.
+        # Going above 1008 on 1080p/4K causes quadratic VRAM explosion in ViT self-attention.
+        return max(644, min(1008, nearest))
 
     def load_model(self, model_type, checkpoints_dir):
         if not check_ultralytics():
@@ -615,7 +639,10 @@ class Sam3TextDetector(ZeroShotDetector):
             from ultralytics.models.sam import SAM3SemanticPredictor
             model_path = os.path.join(checkpoints_dir, model_type)
             
-            overrides = dict(conf=0.05, task="segment", mode="predict", model=model_type, half=True, verbose=False, save=False)
+            # Default imgsz to 1008 (SAM3's native resolution: 72 * 14) instead of YOLO's 640
+            initial_imgsz = self.custom_imgsz or 1008
+            initial_imgsz = max(14, int(round(initial_imgsz / 14.0)) * 14)
+            overrides = dict(conf=0.05, task="segment", mode="predict", model=model_type, half=True, verbose=False, save=False, imgsz=initial_imgsz)
             
             if not os.path.exists(model_path):
                 old_cwd = os.getcwd()
@@ -655,6 +682,10 @@ class Sam3TextDetector(ZeroShotDetector):
             return []
             
         try:
+            target_imgsz = self._compute_imgsz(image_array)
+            if hasattr(self.predictor, 'args') and getattr(self.predictor.args, 'imgsz', None) != target_imgsz:
+                self.predictor.args.imgsz = target_imgsz
+
             self.predictor.set_image(image_array)
             results = self.predictor(text=self.class_prompts)
             
@@ -710,7 +741,7 @@ class ZeroShotManager:
     def is_available(self):
         return check_ultralytics()
 
-    def load_model(self, model_type="yolov8s-world.pt", checkpoints_dir=None):
+    def load_model(self, model_type="yolov8s-world.pt", checkpoints_dir=None, imgsz=None):
         if self.current_model_type == model_type and self.detector is not None:
             return True, "Model already loaded"
         
@@ -724,7 +755,7 @@ class ZeroShotManager:
         elif "florence" in model_type.lower():
             self.detector = Florence2Detector()
         elif "sam3" in model_type.lower():
-            self.detector = Sam3TextDetector()
+            self.detector = Sam3TextDetector(imgsz=imgsz)
         elif "locateanything" in model_type.lower():
             self.detector = LocateAnythingDetector()
         else:
