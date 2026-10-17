@@ -61,7 +61,7 @@ class CandidateDetector:
 
     def load_one(self, key):
         """Load one model; returns an error string, or None when it is ready."""
-        backend = make_backend(key, self.log)
+        backend = make_backend(key, self.log, cfg=self.cfg)
         try:
             ok, msg = backend.load()
         except Exception as exc:

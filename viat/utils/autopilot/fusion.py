@@ -88,8 +88,16 @@ def fuse_frame(rec, keys, scale, cfg, n_classes):
                 best_per_model[mids[j]] = j
         members = list(best_per_model.values())
         taken[members] = True
-        w = scores[members][:, None]
-        ob.append((boxes[members] * w).sum(0) / max(float(w.sum()), 1e-6))
+        mode = getattr(cfg, 'fusion_box_mode', 'best')
+        if mode == 'best':
+            best_idx = max(members, key=lambda j: scores[j])
+            ob.append(boxes[best_idx])
+        elif mode == 'union':
+            mb = boxes[members]
+            ob.append(np.array([mb[:, 0].min(), mb[:, 1].min(), mb[:, 2].max(), mb[:, 3].max()], dtype=np.float32))
+        else:
+            w = scores[members][:, None]
+            ob.append((boxes[members] * w).sum(0) / max(float(w.sum()), 1e-6))
         oc.append(cls[members].max(0))
         ms = np.zeros(m, np.float32)
         for j in members:

@@ -181,8 +181,12 @@ class SamManager:
             results = self.model(image_array, bboxes=box, verbose=False)
             
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
-                polygon = results[0].masks.xy[0] # Take the first mask
-                if len(polygon) > 0:
+                valid_polygons = [m for m in results[0].masks.xy if len(m) >= 3]
+                if valid_polygons:
+                    largest_poly = max(valid_polygons, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
+                    return [(float(pt[0]), float(pt[1])) for pt in largest_poly]
+                elif len(results[0].masks.xy[0]) > 0:
+                    polygon = results[0].masks.xy[0]
                     return [(float(pt[0]), float(pt[1])) for pt in polygon]
             
             return None

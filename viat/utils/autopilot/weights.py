@@ -22,6 +22,12 @@ KNOWN_WEIGHTS = {
     'Qwen/Qwen2.5-VL-7B-Instruct': ('vision-language judge', '~16 GB'),
     'Qwen/Qwen3-VL-8B-Instruct': ('vision-language judge', '~17 GB'),
     'sam3.1_l.pt': ('SAM 3 text detector and zoom-in judge', '~3.4 GB'),
+    'sam3_l.pt': ('SAM 3 Large refiner', '~3.4 GB'),
+    'sam3_s.pt': ('SAM 3 Small refiner', '~0.5 GB'),
+    'sam2.1_l.pt': ('SAM 2.1 Large refiner', '~0.9 GB'),
+    'sam2.1_s.pt': ('SAM 2.1 Small refiner', '~0.2 GB'),
+    'sam2_l.pt': ('SAM 2 Large refiner', '~0.9 GB'),
+    'sam2_s.pt': ('SAM 2 Small refiner', '~0.2 GB'),
 }
 
 

@@ -26,20 +26,23 @@ class KalmanXYAH:
 
     def initiate(self, meas):
         h = meas[3]
+        w = max(float(meas[2]) * h, 1e-3)
         mean = np.r_[meas, np.zeros(4)]
-        std = [2 * self.std_pos * h, 2 * self.std_pos * h, 1e-2, 2 * self.std_pos * h,
-               10 * self.std_vel * h, 10 * self.std_vel * h, 1e-5, 10 * self.std_vel * h]
+        std = [2 * self.std_pos * w, 2 * self.std_pos * h, 1e-2, 2 * self.std_pos * h,
+               10 * self.std_vel * w, 10 * self.std_vel * h, 1e-5, 10 * self.std_vel * h]
         return mean, np.diag(np.square(std))
 
     def predict(self, mean, cov):
         h = mean[3]
-        std = [self.std_pos * h, self.std_pos * h, 1e-2, self.std_pos * h,
-               self.std_vel * h, self.std_vel * h, 1e-5, self.std_vel * h]
+        w = max(float(mean[2]) * h, 1e-3)
+        std = [self.std_pos * w, self.std_pos * h, 1e-2, self.std_pos * h,
+               self.std_vel * w, self.std_vel * h, 1e-5, self.std_vel * h]
         return self.F @ mean, self.F @ cov @ self.F.T + np.diag(np.square(std))
 
     def update(self, mean, cov, meas):
         h = mean[3]
-        r = np.diag(np.square([self.std_pos * h, self.std_pos * h, 1e-1, self.std_pos * h]))
+        w = max(float(mean[2]) * h, 1e-3)
+        r = np.diag(np.square([self.std_pos * w, self.std_pos * h, 1e-1, self.std_pos * h]))
         s = self.H @ cov @ self.H.T + r
         k = cov @ self.H.T @ np.linalg.inv(s)
         mean = mean + k @ (meas - self.H @ mean)

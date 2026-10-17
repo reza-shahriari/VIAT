@@ -92,19 +92,26 @@ class AutopilotController:
         return list(self.mw.canvas.class_colors.keys())
 
     def _collect_exemplars(self, cfg):
-        """Collect verified, non-Autopilot boxes from the requested frame range."""
+        """Collect verified or manual non-Autopilot boxes to use as visual exemplar seeds."""
         self.mw.update_frame_annotations()
         wanted = {name.lower() for name in cfg.class_names()}
         limit = max(1, int(cfg.exemplar_limit))
         counts = {}
         examples = []
-        for frame in sorted(self.mw.frame_annotations):
-            if frame < cfg.start_frame or frame > cfg.end_frame:
-                continue
+
+        all_frames = sorted(self.mw.frame_annotations)
+        in_range = [f for f in all_frames if cfg.start_frame <= f <= cfg.end_frame]
+        out_of_range = [f for f in all_frames if f < cfg.start_frame or f > cfg.end_frame]
+        search_frames = in_range + out_of_range
+
+        for frame in search_frames:
             for ann in self.mw.frame_annotations.get(frame, []):
                 name = str(getattr(ann, 'class_name', '') or '')
                 key = name.lower()
-                if key not in wanted or _is_autopilot(ann) or not getattr(ann, 'verified', False):
+                if key not in wanted or _is_autopilot(ann):
+                    continue
+                is_valid = getattr(ann, 'verified', False) or getattr(ann, 'source', '') == 'manual'
+                if not is_valid:
                     continue
                 if counts.get(key, 0) >= limit:
                     continue
@@ -116,7 +123,32 @@ class AutopilotController:
                                          int(rect.x() + rect.width()),
                                          int(rect.y() + rect.height())]})
                 counts[key] = counts.get(key, 0) + 1
+                if all(counts.get(k, 0) >= limit for k in wanted):
+                    break
+            if all(counts.get(k, 0) >= limit for k in wanted):
+                break
+
+        logger.info(f"[Autopilot] Collected {len(examples)} visual exemplar(s) across {len(counts)} class(es).")
         return examples
+
+    def _scan_seed_counts(self):
+        """Count verified/manual non-Autopilot boxes in the project per class."""
+        self.mw.update_frame_annotations()
+        counts = {}
+        for frame, anns in self.mw.frame_annotations.items():
+            for ann in anns:
+                if _is_autopilot(ann):
+                    continue
+                is_valid = getattr(ann, 'verified', False) or getattr(ann, 'source', '') == 'manual'
+                if not is_valid:
+                    continue
+                rect = ann.rect
+                if rect.width() < 3 or rect.height() < 3:
+                    continue
+                name = str(getattr(ann, 'class_name', '') or '').strip()
+                if name:
+                    counts[name] = counts.get(name, 0) + 1
+        return counts
 
     # -------------------------------------------------------------------- run
     def open_dialog(self):
@@ -136,8 +168,9 @@ class AutopilotController:
                 last = load_result(result_path(src)).get('config')
             except (OSError, ValueError):
                 last = None
+        seed_counts = self._scan_seed_counts()
         dlg = AutopilotDialog(self.mw, self.class_names(), self.mw.current_frame, src.count,
-                              self._checkpoints_dir(), last)
+                              self._checkpoints_dir(), last, seed_counts=seed_counts)
         if not dlg.exec_():
             return
         cfg = dlg.get_config()
@@ -245,7 +278,16 @@ class AutopilotController:
     def _make_box(self, row, cls, label_id, verified=False):
         f, x1, y1, x2, y2, score, kind = row[:7]
         metadata = row[7] if len(row) > 7 and isinstance(row[7], dict) else {}
-        W, H = self.result['source'].get('width') or 0, self.result['source'].get('height') or 0
+        cfg = (self.result or {}).get('config') or {}
+        slack = float(cfg.get('box_slack', 0.0) or 0.0)
+        if slack > 0:
+            bw = x2 - x1
+            bh = y2 - y1
+            x1 -= bw * slack
+            x2 += bw * slack
+            y1 -= bh * slack
+            y2 += bh * slack
+        W, H = (self.result.get('source') or {}).get('width') or 0, (self.result.get('source') or {}).get('height') or 0
         if W and H:
             x1, x2 = max(0.0, min(x1, W - 1)), max(0.0, min(x2, W))
             y1, y2 = max(0.0, min(y1, H - 1)), max(0.0, min(y2, H))
@@ -266,9 +308,11 @@ class AutopilotController:
                 attrs['autopilot_detector_votes'] = int(metadata['nmod'])
             except (TypeError, ValueError):
                 pass
+        segmentation = metadata.get('segmentation') or metadata.get('polygon')
         ann = BoundingBox(QRect(int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))), cls,
                           attributes=attrs, color=self.mw.canvas.class_colors.get(cls, QColor(0, 255, 0)),
-                          source=SOURCE_BY_KIND.get(kind, 'autopilot'), score=float(score))
+                          source=SOURCE_BY_KIND.get(kind, 'autopilot'), score=float(score),
+                          segmentation=segmentation)
         ann.verified = verified
         return ann
 
@@ -386,12 +430,31 @@ class AutopilotController:
             if ann is not None:
                 self._set_track_provenance(ann, trk)
                 ann.is_autopilot_preview = True
+                ann.preview_kind = 'rejected'
                 ann.color = QColor(255, 92, 72)
                 overlays.append(ann)
         canvas = getattr(self.mw, 'canvas', None)
         if canvas is not None:
             canvas.preview_annotations = overlays
             canvas.update()
+
+    def step_rejected_track(self, tid, direction):
+        """Step backward or forward through the frames where a rejected track was detected."""
+        trk = self.track_by_id(tid, include_deleted=True)
+        if not trk or trk.get('route') != 'rejected_by_judge':
+            return
+        rows = trk.get('boxes', [])
+        if not rows:
+            return
+        frames = sorted(set(int(r[0]) for r in rows))
+        cur = self.mw.current_frame
+        if cur not in frames:
+            target = frames[0] if direction > 0 else frames[-1]
+        else:
+            idx = frames.index(cur)
+            next_idx = min(len(frames) - 1, max(0, idx + direction))
+            target = frames[next_idx]
+        self.show_rejected_track(tid, target)
 
     def rerun_with_detectors(self, models):
         """Start a cached Autopilot rerun using only the selected detector models."""
@@ -655,11 +718,50 @@ class AutopilotController:
                 return m
         return None
 
-    def show_miss(self, mid):
+    def show_miss(self, mid, frame=None):
         m = self._miss(mid)
-        if m and self._matches_current(warn=False):
-            self._clear_preview()
-            self.go_to_frame(m['frame'])
+        if not m or not self._matches_current(warn=False):
+            return
+        self._clear_preview()
+        target = int(frame if frame is not None else m.get('frame', m['start']))
+        rows = list(m.get('boxes', []))
+        if rows and not any(int(row[0]) == target for row in rows):
+            target = int(min(rows, key=lambda row: abs(int(row[0]) - target))[0])
+        self.go_to_frame(target)
+        self._clear_preview()
+        overlays = []
+        for row in rows:
+            if int(row[0]) != target:
+                continue
+            r = [row[0], row[1], row[2], row[3], row[4], row[5], 'd']
+            ann = self._make_box(r, m['class'], f"miss-{m['id']}", verified=False)
+            if ann is not None:
+                ann.is_autopilot_preview = True
+                ann.preview_kind = 'miss'
+                ann.color = QColor(255, 170, 0)
+                overlays.append(ann)
+        canvas = getattr(self.mw, 'canvas', None)
+        if canvas is not None:
+            canvas.preview_annotations = overlays
+            canvas.update()
+
+    def step_miss(self, mid, direction):
+        """Step backward or forward through frames where a candidate miss was detected."""
+        m = self._miss(mid)
+        if not m:
+            return
+        rows = m.get('boxes', [])
+        if not rows:
+            return
+        frames = sorted(set(int(r[0]) for r in rows))
+        cur = self.mw.current_frame
+        if cur not in frames:
+            target = frames[0] if direction > 0 else frames[-1]
+        else:
+            idx = frames.index(cur)
+            next_idx = min(len(frames) - 1, max(0, idx + direction))
+            target = frames[next_idx]
+        self.show_miss(mid, target)
 
     def resolve_miss(self, mid, add):
         m = self._miss(mid)

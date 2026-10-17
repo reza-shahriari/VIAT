@@ -377,7 +377,9 @@ class VideoCanvas(QWidget):
                                     base_color = modified_color
                             # Determine pen style based on source
                             if getattr(annotation, 'is_autopilot_preview', False):
-                                pen = QPen(QColor(255, 92, 72), 3, Qt.DashLine)
+                                is_miss = getattr(annotation, 'preview_kind', '') == 'miss'
+                                preview_col = QColor(255, 170, 0) if is_miss else QColor(255, 92, 72)
+                                pen = QPen(preview_col, 3, Qt.DashLine)
                             elif hasattr(annotation, 'source'):
                                 if annotation.source == "manual":
                                     pen = QPen(base_color, 2, Qt.SolidLine)
@@ -394,6 +396,10 @@ class VideoCanvas(QWidget):
 
                         painter.setPen(pen)
                         painter.setBrush(Qt.NoBrush)
+                        if getattr(annotation, 'is_autopilot_preview', False):
+                            is_miss = getattr(annotation, 'preview_kind', '') == 'miss'
+                            fill_col = QColor(255, 170, 0, 45) if is_miss else QColor(255, 92, 72, 45)
+                            painter.fillRect(display_rect, fill_col)
                         painter.drawRect(display_rect)
 
                         # Draw segmentation polygon if enabled and available
@@ -463,7 +469,22 @@ class VideoCanvas(QWidget):
                         )
 
                         # Add a border to indicate verification status
-                        if hasattr(annotation, 'verified') and not annotation.verified:
+                        if getattr(annotation, 'is_autopilot_preview', False):
+                            is_miss = getattr(annotation, 'preview_kind', '') == 'miss'
+                            pill_col = QColor(220, 130, 20, 220) if is_miss else QColor(220, 50, 40, 220)
+                            painter.fillRect(text_rect, pill_col)
+                            tag = "POSSIBLE MISS" if is_miss else "REJECTED"
+                            preview_title = f"[{tag}] {annotation.class_name}"
+                            if show_detector_info:
+                                detector_names = ((getattr(annotation, 'attributes', None) or {})
+                                                  .get('autopilot_detectors') or [])
+                                if detector_names:
+                                    short = [str(name).replace('\\', '/').rsplit('/', 1)[-1]
+                                             for name in detector_names[:3]]
+                                    preview_title += ' · ' + ', '.join(short)
+                            painter.setPen(QPen(QColor(255, 255, 255)))
+                            painter.drawText(text_rect, int(Qt.AlignCenter), preview_title)
+                        elif hasattr(annotation, 'verified') and not annotation.verified:
                             # Draw a warning indicator for unverified annotations
                             painter.fillRect(
                                 text_rect,
@@ -499,18 +520,17 @@ class VideoCanvas(QWidget):
                             # Adjust text rect to make room for source indicator
                             text_rect.setLeft(text_rect.left() + 16)
 
-                        painter.setPen(QPen(QColor(0, 0, 0)))
-                        label_text = annotation.class_name
-                        if getattr(annotation, 'is_autopilot_preview', False):
-                            label_text = f"REJECTED: {label_text}"
-                        if show_detector_info:
-                            detector_names = ((getattr(annotation, 'attributes', None) or {})
-                                              .get('autopilot_detectors') or [])
-                            if detector_names:
-                                short = [str(name).replace('\\', '/').rsplit('/', 1)[-1]
-                                         for name in detector_names[:3]]
-                                label_text += ' · ' + ', '.join(short)
-                        painter.drawText(text_rect, int(Qt.AlignCenter), label_text)
+                        if not getattr(annotation, 'is_autopilot_preview', False):
+                            painter.setPen(QPen(QColor(0, 0, 0)))
+                            label_text = annotation.class_name
+                            if show_detector_info:
+                                detector_names = ((getattr(annotation, 'attributes', None) or {})
+                                                  .get('autopilot_detectors') or [])
+                                if detector_names:
+                                    short = [str(name).replace('\\', '/').rsplit('/', 1)[-1]
+                                             for name in detector_names[:3]]
+                                    label_text += ' · ' + ', '.join(short)
+                            painter.drawText(text_rect, int(Qt.AlignCenter), label_text)
 
                         # DEBUG: Show score if debug flag is enabled and annotation has a score
                         if self.show_debug_scores and hasattr(annotation, 'score') and annotation.score is not None:

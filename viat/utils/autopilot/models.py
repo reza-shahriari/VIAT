@@ -6,6 +6,7 @@ how scores from different models are put on one scale before fusion (YOLO-World
 reports a real tank at 0.25 where SAM 3 would say 0.8).
 """
 import cv2
+import numpy as np
 
 try:
     import torch
@@ -13,6 +14,7 @@ except ImportError:
     torch = None
 
 from ..zero_shot_manager import ZeroShotManager
+from .geometry import box_nms
 from .weights import resolve_hf, resolve_file, missing_message, CHECKPOINTS
 
 try:
@@ -29,9 +31,10 @@ class Backend:
     ref_score = 0.3
     constant = False  # reports a fixed score: may vote, never start a track
 
-    def __init__(self, key, log=print):
+    def __init__(self, key, log=print, cfg=None):
         self.key = key
         self.log = log
+        self.cfg = cfg
         self.prompts = []
 
     def load(self):
@@ -51,8 +54,8 @@ class Backend:
 class UltralyticsBackend(Backend):
     """YOLO-World / YOLOE / YOLO / SAM 3 text through the existing wrappers."""
 
-    def __init__(self, key, log=print):
-        super().__init__(key, log)
+    def __init__(self, key, log=print, cfg=None):
+        super().__init__(key, log, cfg)
         self.ref_score = 0.5 if 'sam3' in key.lower() else 0.3
         self.mgr = ZeroShotManager()
 
@@ -165,10 +168,9 @@ class Owlv2Backend(Backend):
         inputs = self.processor(text=queries, images=pil, return_tensors='pt').to(_device())
         with torch.no_grad():
             outputs = self.model(**inputs)
-        side = max(h, w)  # OWLv2 pads the image to a square before resizing
         post = getattr(self.processor, 'post_process_grounded_object_detection', None) or \
             self.processor.post_process_object_detection
-        res = post(outputs=outputs, threshold=0.02, target_sizes=torch.tensor([[side, side]]))[0]
+        res = post(outputs=outputs, threshold=0.02, target_sizes=torch.tensor([[h, w]]))[0]
         out = []
         for box, score, label in zip(res['boxes'].cpu().numpy(), res['scores'].cpu().numpy(),
                                      res['labels'].cpu().numpy()):
@@ -185,50 +187,82 @@ class Owlv2Backend(Backend):
             return []
         h, w = image.shape[:2]
         pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        if getattr(self, 'exemplars', None):
-            out = []
-            post = getattr(self.processor, 'post_process_image_guided_detection', None)
-            if post is not None and hasattr(self.model, 'image_guided_detection'):
-                for class_index, queries in self.exemplars.items():
-                    if not queries or not 0 <= class_index < len(self.prompts):
-                        continue
-                    # One representative query per class is intentional: it keeps
-                    # the per-frame cost bounded while still allowing the user to
-                    # label several seed frames and choose the best crop later.
-                    query = Image.fromarray(cv2.cvtColor(queries[0], cv2.COLOR_BGR2RGB))
+        prompt_mode = getattr(self.cfg, 'prompt_mode', 'hybrid') if self.cfg else 'hybrid'
+        if prompt_mode == 'text_only' or not getattr(self, 'exemplars', None):
+            return self._text_predict(image)
+
+        out = []
+        post = getattr(self.processor, 'post_process_image_guided_detection', None)
+        threshold = max(0.04, float(getattr(self.cfg, 'visual_query_threshold', 0.10))) if self.cfg else 0.10
+        exemplar_limit = max(1, int(getattr(self.cfg, 'exemplar_limit', 3))) if self.cfg else 3
+
+        if post is not None and hasattr(self.model, 'image_guided_detection'):
+            for class_index, queries in self.exemplars.items():
+                if not queries or not 0 <= class_index < len(self.prompts):
+                    continue
+                class_boxes, class_scores = [], []
+                for query_img in queries[:exemplar_limit]:
+                    query = Image.fromarray(cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB))
                     try:
                         inputs = self.processor(images=pil, query_images=query, return_tensors='pt').to(_device())
                         with torch.no_grad():
                             outputs = self.model.image_guided_detection(**inputs)
-                        res = post(outputs=outputs, threshold=0.02, nms_threshold=0.3,
+                        res = post(outputs=outputs, threshold=threshold, nms_threshold=0.3,
                                    target_sizes=torch.tensor([[h, w]], device=_device()))[0]
+                        boxes = res.get('boxes')
+                        scores = res.get('scores')
+                        if boxes is not None and scores is not None and len(boxes):
+                            class_boxes.append(boxes.cpu().numpy())
+                            class_scores.append(scores.cpu().numpy())
                     except Exception as exc:
-                        self.log(f"[Autopilot] OWLv2 visual query failed; using text prompts: {exc}")
-                        return self._text_predict(image)
-                    boxes = res.get('boxes')
-                    scores = res.get('scores')
-                    if boxes is None or scores is None:
-                        continue
-                    for box, score in zip(boxes.cpu().numpy(), scores.cpu().numpy()):
-                        x1, y1, x2, y2 = [float(v) for v in box]
+                        self.log(f"[Autopilot] OWLv2 visual query failed for {self.prompts[class_index]}: {exc}")
+
+                if class_boxes:
+                    all_b = np.concatenate(class_boxes)
+                    all_s = np.concatenate(class_scores)
+                    keep = box_nms(all_b, all_s, iou_thresh=0.4)
+                    for idx in keep:
+                        x1, y1, x2, y2 = [float(v) for v in all_b[idx]]
                         x1, x2 = max(0.0, x1), min(float(w), x2)
                         y1, y2 = max(0.0, y1), min(float(h), y2)
                         if x2 > x1 and y2 > y1:
-                            out.append(([x1, y1, x2, y2], float(score), self.prompts[class_index]))
-                remaining = [i for i in range(len(self.prompts)) if i not in self.exemplars]
-                return out + self._text_predict(image, remaining)
-        return self._text_predict(image)
+                            out.append(([x1, y1, x2, y2], float(all_s[idx]), self.prompts[class_index]))
+
+        if prompt_mode == 'hybrid':
+            # Run text prediction across all classes and merge with visual detections
+            text_preds = self._text_predict(image)
+            if not out:
+                return text_preds
+            if not text_preds:
+                return out
+            combined = []
+            for prompt in self.prompts:
+                v_dets = [d for d in out if d[2] == prompt]
+                t_dets = [d for d in text_preds if d[2] == prompt]
+                all_dets = v_dets + t_dets
+                if not all_dets:
+                    continue
+                b_arr = np.array([d[0] for d in all_dets], dtype=np.float32)
+                s_arr = np.array([d[1] for d in all_dets], dtype=np.float32)
+                keep = box_nms(b_arr, s_arr, iou_thresh=0.45)
+                for k in keep:
+                    combined.append(all_dets[k])
+            return combined
+        else:
+            # visual_only: text predict only for classes without exemplars
+            remaining = [i for i in range(len(self.prompts)) if i not in self.exemplars]
+            return out + (self._text_predict(image, remaining) if remaining else [])
 
 
-def make_backend(key, log=print):
+def make_backend(key, log=print, cfg=None):
     k = key.lower()
     if 'grounding-dino' in k or 'groundingdino' in k:
-        return GroundingDinoBackend(key, log)
+        return GroundingDinoBackend(key, log, cfg)
     if 'owlv2' in k or 'owlvit' in k:
-        return Owlv2Backend(key, log)
+        return Owlv2Backend(key, log, cfg)
     if 'florence' in k or 'locateanything' in k:
-        return ConstantScoreBackend(key, log)
-    return UltralyticsBackend(key, log)
+        return ConstantScoreBackend(key, log, cfg)
+    return UltralyticsBackend(key, log, cfg)
 
 
 def match_prompt(label, prompt_class):

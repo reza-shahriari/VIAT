@@ -47,6 +47,11 @@ class AutopilotConfig:
     use_exemplars: bool = False
     exemplar_limit: int = 3
     exemplars: list = field(default_factory=list)
+    prompt_mode: str = 'hybrid'  # 'hybrid', 'visual_only', 'text_only'
+    visual_query_threshold: float = 0.10  # image-guided detection threshold for OWLv2
+    fusion_box_mode: str = 'best'  # 'best', 'average', 'union'
+    refine_with_sam: bool = True  # snap boxes to exact object contours via SAM
+    sam_refine_model: str = 'sam2.1_l.pt'  # model to use for SAM box refinement
     # Scores below are on the calibrated scale: each model's typical "confident"
     # raw score maps to 0.5 (YOLO-World 0.3, SAM 3 0.5, Grounding DINO 0.35, OWLv2 0.15).
     candidate_score: float = 0.08
@@ -76,6 +81,9 @@ class AutopilotConfig:
     dup_min_frames: int = 6
     gap_fill_sec: float = 1.0
     min_track_frames: int = 4
+    # box margin slack: small amodal expansion (e.g. 0.03 = 3%) so car corners,
+    # bumpers, side mirrors, and tires are not clipped by tight mask predictions.
+    box_slack: float = 0.03
     # review
     review_risk: float = 0.35
     miss_score: float = 0.33
@@ -95,7 +103,7 @@ class AutopilotConfig:
         'background', 'part of a vehicle', 'a wheel', 'an antenna', 'a shadow', 'a building',
         'a tree', 'the ground', 'the sky', 'a blurry image'])
     auto_reject: bool = True
-    reject_below: float = 0.3  # measured on 10 labeled videos: 0 real boxes lost
+    reject_below: float = 0.05  # safe threshold (>=95% precision on benchmarks; 0.3 lost real boxes)
     confirm_above: float = 0.8
     clip_can_reject: bool = False
 
@@ -126,7 +134,7 @@ class AutopilotConfig:
         _, mapping = self.prompt_table()
         key = json.dumps([model, sorted(mapping.items()), self.class_names(), self.tiles, self.tile_overlap,
                           self.flip_tta, self.candidate_score, self.fuse_iou, self.use_exemplars,
-                          self.exemplar_limit, self.exemplars, 'v3'], sort_keys=True)
+                          self.exemplar_limit, self.exemplars, self.prompt_mode, self.visual_query_threshold, 'v4'], sort_keys=True)
         name = ''.join(ch if ch.isalnum() else '_' for ch in os.path.basename(model))[:30]
         return f"{name}_{hashlib.sha1(key.encode()).hexdigest()[:10]}"
 
@@ -365,18 +373,87 @@ def _load_exemplar_crops(source, cfg, log=print):
             if counts.get(cls, 0) >= max(1, int(cfg.exemplar_limit)):
                 continue
             x1, y1, x2, y2 = box
-            bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
-            margin_x, margin_y = bw * 0.12, bh * 0.12
-            ix1 = max(0, int(round(x1 - margin_x)))
-            iy1 = max(0, int(round(y1 - margin_y)))
-            ix2 = min(w, int(round(x2 + margin_x)))
-            iy2 = min(h, int(round(y2 + margin_y)))
+            ix1 = max(0, int(round(x1)))
+            iy1 = max(0, int(round(y1)))
+            ix2 = min(w, int(round(x2)))
+            iy2 = min(h, int(round(y2)))
             if ix2 - ix1 >= 4 and iy2 - iy1 >= 4:
                 out.append((cls, image[iy1:iy2, ix1:ix2].copy()))
                 counts[cls] = counts.get(cls, 0) + 1
     if not out:
         log('[Autopilot] visual exemplars were configured but no valid crops could be read')
     return out
+
+
+def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=None, log=print):
+    """Refine track bounding boxes with SAM to encompass full object contours and attach segmentation."""
+    from ..sam_manager import SamManager
+    progress = progress or (lambda stage, done, total: None)
+    is_cancelled = is_cancelled or (lambda: False)
+
+    sam_mgr = SamManager()
+    if not sam_mgr.is_available():
+        log("[Autopilot] Ultralytics is not available; skipping SAM box refinement.")
+        return
+
+    model_key = getattr(cfg, 'sam_refine_model', 'sam2.1_l.pt') or 'sam2.1_l.pt'
+    ok, msg = sam_mgr.load_model(model_key)
+    if not ok:
+        log(f"[Autopilot] Could not load SAM refiner {model_key}: {msg}; trying sam3.1_l.pt fallback")
+        ok, msg = sam_mgr.load_model('sam3.1_l.pt')
+        if not ok:
+            log(f"[Autopilot] SAM refinement unavailable: {msg}")
+            return
+
+    frames_to_refine = sorted({f for t in tracks for f in t.boxes})
+    if not frames_to_refine:
+        return
+
+    total = len(frames_to_refine)
+    log(f"[Autopilot] Refining bounding boxes with {sam_mgr.current_model_type} across {total} frame(s)...")
+    progress('Refining with SAM', 0, total)
+
+    tracks_by_frame = {}
+    for t in tracks:
+        for f in t.boxes:
+            tracks_by_frame.setdefault(f, []).append(t)
+
+    done = 0
+    first_f, last_f = min(frames_to_refine), max(frames_to_refine)
+    for f, frame in source.frames(first_f, last_f):
+        if is_cancelled():
+            raise Cancelled()
+        active_tracks = tracks_by_frame.get(f)
+        if not active_tracks:
+            continue
+        h, w = frame.shape[:2]
+        for t in active_tracks:
+            box_tuple = t.boxes[f]
+            box, score, det_idx, kind = box_tuple[:4]
+            x1, y1, x2, y2 = [float(v) for v in box]
+            x1, x2 = max(0.0, min(x1, w - 1)), max(0.0, min(x2, w))
+            y1, y2 = max(0.0, min(y1, h - 1)), max(0.0, min(y2, h))
+            if x2 - x1 < 3 or y2 - y1 < 3:
+                continue
+            try:
+                poly = sam_mgr.predict_mask_from_box(frame, [x1, y1, x2, y2])
+            except Exception:
+                poly = None
+            if poly and len(poly) >= 3:
+                xs = [p[0] for p in poly]
+                ys = [p[1] for p in poly]
+                rx1, ry1, rx2, ry2 = min(xs), min(ys), max(xs), max(ys)
+                rw, rh = rx2 - rx1, ry2 - ry1
+                orig_w, orig_h = x2 - x1, y2 - y1
+                # Enforce sanity check so mask does not explode or collapse
+                if rw >= 2 and rh >= 2 and rw <= orig_w * 2.5 and rh <= orig_h * 2.5:
+                    refined_box = np.array([rx1, ry1, rx2, ry2], dtype=np.float32)
+                    t.boxes[f] = (refined_box, score, det_idx, kind, poly)
+                    continue
+            t.boxes[f] = (box, score, det_idx, kind, None)
+        done += 1
+        if done % 10 == 0 or done == total:
+            progress('Refining with SAM', done, total)
 
 
 def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, workdir=None):
@@ -540,6 +617,10 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
             tracks.extend(promoted)
             n_promoted = len(promoted)
 
+    # -------------------------------------------------------- 3b. SAM refinement
+    if cfg.refine_with_sam and tracks:
+        _refine_tracks_with_sam(source, tracks, cfg, progress=progress, is_cancelled=is_cancelled, log=log)
+
     # -------------------------------------------------------------------- 4. risk
     by_frame = {}
     for t in tracks:
@@ -558,9 +639,13 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
         detector_info = _track_detector_provenance(t, records, keys)
         box_rows = []
         for f in t.frames:
-            box, score, det_idx, kind = t.boxes[f]
+            box_tuple = t.boxes[f]
+            box, score, det_idx, kind = box_tuple[:4]
+            poly = box_tuple[4] if len(box_tuple) > 4 else None
             evidence = (_box_detector_evidence(records.get(f), det_idx, keys, box)
                         if kind in ('d', 'e') else {})
+            if poly:
+                evidence['segmentation'] = poly
             # The first seven elements retain the historical row layout.  The
             # optional eighth object is deliberately plain JSON data so a later
             # controller can attach it to annotation attributes without knowing

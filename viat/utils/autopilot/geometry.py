@@ -156,3 +156,22 @@ def cluster_fuse(boxes, scores, cls_vecs, model_ids, iou_thr, n_models, constant
         out_m.append(len(models))
     return (np.asarray(out_b, np.float32), np.asarray(out_s, np.float32),
             np.asarray(out_c, np.float32), np.asarray(out_m, np.int8))
+
+
+def box_nms(boxes, scores, iou_thresh=0.4):
+    """Greedy Non-Maximum Suppression on boxes and scores. Returns list of kept indices."""
+    b = as_boxes(boxes)
+    s = np.asarray(scores, dtype=np.float32)
+    if len(b) == 0:
+        return []
+    order = np.argsort(-s)
+    keep = []
+    while len(order) > 0:
+        i = order[0]
+        keep.append(int(i))
+        if len(order) == 1:
+            break
+        ious = iou_matrix(b[i:i + 1], b[order[1:]])[0]
+        order = order[1:][ious < iou_thresh]
+    return keep
+
