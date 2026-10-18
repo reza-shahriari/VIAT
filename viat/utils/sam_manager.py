@@ -173,6 +173,74 @@ class SamManager:
             traceback.print_exc()
             return None
 
+    def _select_best_polygon(self, valid_polygons, box=None):
+        """
+        Selects the most suitable polygon from SAM's predictions.
+        If a reference box [x1, y1, x2, y2] is provided, prioritizes polygons that have
+        high IoU and match the prompt box, preventing background/floor runaway.
+        Falls back to largest polygon if no box is given.
+        """
+        if not valid_polygons:
+            return None
+        if not box:
+            return max(valid_polygons, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
+
+        bx1, by1, bx2, by2 = [float(v) for v in box]
+        bw, bh = max(1.0, bx2 - bx1), max(1.0, by2 - by1)
+        b_area = bw * bh
+        bcx, bcy = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+
+        best_poly = None
+        best_score = -1.0
+
+        for poly in valid_polygons:
+            pts = np.array(poly, dtype=np.float32)
+            px1, py1 = float(pts[:, 0].min()), float(pts[:, 1].min())
+            px2, py2 = float(pts[:, 0].max()), float(pts[:, 1].max())
+            pw, ph = max(1.0, px2 - px1), max(1.0, py2 - py1)
+            p_area = pw * ph
+
+            # Compute IoU between prompt box and polygon bounding box
+            ix1, iy1 = max(bx1, px1), max(by1, py1)
+            ix2, iy2 = min(bx2, px2), min(by2, py2)
+            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+            inter = iw * ih
+            union = b_area + p_area - inter
+            iou = inter / max(union, 1e-6)
+
+            # Check if polygon is excessively huge compared to prompt box (e.g. background/ground)
+            if pw > bw * 1.4 or ph > bh * 1.4 or p_area > b_area * 1.8:
+                continue
+
+            # Check center distance
+            pcx, pcy = (px1 + px2) / 2.0, (py1 + py2) / 2.0
+            cdist = ((bcx - pcx) ** 2 + (bcy - pcy) ** 2) ** 0.5
+            norm_dist = cdist / max(bw, bh)
+            if norm_dist > 0.5:
+                continue
+
+            # Score = IoU with center alignment preference
+            score = iou - (0.2 * norm_dist)
+            if score > best_score:
+                best_score = score
+                best_poly = poly
+
+        if best_poly is not None and best_score >= 0.2:
+            return best_poly
+
+        # Fallback: if no polygon strictly passed, check if any polygon has reasonable bounds
+        fallback_candidates = []
+        for poly in valid_polygons:
+            pts = np.array(poly, dtype=np.float32)
+            px1, py1 = float(pts[:, 0].min()), float(pts[:, 1].min())
+            px2, py2 = float(pts[:, 0].max()), float(pts[:, 1].max())
+            if (px2 - px1) <= bw * 1.25 and (py2 - py1) <= bh * 1.25:
+                fallback_candidates.append(poly)
+        if fallback_candidates:
+            return max(fallback_candidates, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
+
+        return None
+
     def predict_mask_from_box(self, image_array, box):
         """
         Given an image and a bounding box [x_min, y_min, x_max, y_max], 
@@ -184,13 +252,19 @@ class SamManager:
 
         try:
             target_imgsz = self._get_target_imgsz(image_array)
-            results = self.model(image_array, bboxes=box, imgsz=target_imgsz, verbose=False)
+            # Ensure bboxes is passed as a 2D list: [[x1, y1, x2, y2]]
+            if isinstance(box[0], (int, float)):
+                box_fmt = [[float(b) for b in box]]
+            else:
+                box_fmt = box
+            results = self.model(image_array, bboxes=box_fmt, imgsz=target_imgsz, verbose=False)
             
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
                 valid_polygons = [m for m in results[0].masks.xy if len(m) >= 3]
                 if valid_polygons:
-                    largest_poly = max(valid_polygons, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
-                    return [(float(pt[0]), float(pt[1])) for pt in largest_poly]
+                    best_poly = self._select_best_polygon(valid_polygons, box)
+                    if best_poly is not None:
+                        return [(float(pt[0]), float(pt[1])) for pt in best_poly]
                 elif len(results[0].masks.xy[0]) > 0:
                     polygon = results[0].masks.xy[0]
                     return [(float(pt[0]), float(pt[1])) for pt in polygon]
@@ -236,8 +310,9 @@ class SamManager:
             if len(results) > 0 and results[0].masks is not None and len(results[0].masks.xy) > 0:
                 valid_polygons = [m for m in results[0].masks.xy if len(m) >= 3]
                 if valid_polygons:
-                    largest_poly = max(valid_polygons, key=lambda p: cv2.contourArea(np.array(p, dtype=np.int32)))
-                    return [(float(pt[0]), float(pt[1])) for pt in largest_poly]
+                    best_poly = self._select_best_polygon(valid_polygons, box)
+                    if best_poly is not None:
+                        return [(float(pt[0]), float(pt[1])) for pt in best_poly]
                 elif len(results[0].masks.xy[0]) > 0:
                     polygon = results[0].masks.xy[0]
                     return [(float(pt[0]), float(pt[1])) for pt in polygon]

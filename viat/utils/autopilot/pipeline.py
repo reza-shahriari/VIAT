@@ -74,12 +74,13 @@ class AutopilotConfig:
     ext_max_sec: float = 2.0
     ext_iou: float = 0.4
     ext_bridge: int = 2
-    link_gap_sec: float = 2.0
+    link_gap_sec: float = 0.5
     link_dist: float = 1.5
     link_app: float = 0.5
     dup_iou: float = 0.5
     dup_min_frames: int = 6
-    gap_fill_sec: float = 1.0
+    gap_fill_sec: float = 0.4
+    enable_gap_fill: bool = True
     min_track_frames: int = 4
     # box margin slack: small amodal expansion (e.g. 0.03 = 3%) so car corners,
     # bumpers, side mirrors, and tires are not clipped by tight mask predictions.
@@ -173,6 +174,14 @@ class FrameSource:
             cap = cv2.VideoCapture(self.video_path)
             try:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+                # OpenCV keyframe snapping fix: if cap.set landed on an earlier I-frame,
+                # step forward until we reach the exact requested start frame.
+                pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                while pos < start:
+                    ok, _ = cap.read()
+                    if not ok:
+                        break
+                    pos += 1
                 for f in range(start, end + 1):
                     ok, frame = cap.read()
                     if not ok:
@@ -405,18 +414,20 @@ def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=Non
             log(f"[Autopilot] SAM refinement unavailable: {msg}")
             return
 
-    frames_to_refine = sorted({f for t in tracks for f in t.boxes})
+    # Only refine actual detections, NEVER refine synthetic interpolated gap frames
+    frames_to_refine = sorted({f for t in tracks for f, b in t.boxes.items() if b[3] in ('d', 'e')})
     if not frames_to_refine:
         return
 
     total = len(frames_to_refine)
-    log(f"[Autopilot] Refining bounding boxes with {sam_mgr.current_model_type} across {total} frame(s)...")
+    log(f"[Autopilot] Refining bounding boxes with {sam_mgr.current_model_type} across {total} detection frame(s)...")
     progress('Refining with SAM', 0, total)
 
     tracks_by_frame = {}
     for t in tracks:
-        for f in t.boxes:
-            tracks_by_frame.setdefault(f, []).append(t)
+        for f, b in t.boxes.items():
+            if b[3] in ('d', 'e'):
+                tracks_by_frame.setdefault(f, []).append(t)
 
     done = 0
     first_f, last_f = min(frames_to_refine), max(frames_to_refine)
@@ -432,6 +443,8 @@ def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=Non
                 t.segmentations = {}
             box_tuple = t.boxes[f]
             box, score, det_idx, kind = box_tuple[:4]
+            if kind not in ('d', 'e'):
+                continue
             x1, y1, x2, y2 = [float(v) for v in box]
             x1, x2 = max(0.0, min(x1, w - 1)), max(0.0, min(x2, w))
             y1, y2 = max(0.0, min(y1, h - 1)), max(0.0, min(y2, h))
@@ -447,8 +460,31 @@ def _refine_tracks_with_sam(source, tracks, cfg, progress=None, is_cancelled=Non
                 rx1, ry1, rx2, ry2 = min(xs), min(ys), max(xs), max(ys)
                 rw, rh = rx2 - rx1, ry2 - ry1
                 orig_w, orig_h = x2 - x1, y2 - y1
-                # Enforce sanity check so mask does not explode or collapse
-                if rw >= 2 and rh >= 2 and rw <= orig_w * 2.5 and rh <= orig_h * 2.5:
+
+                # Calculate IoU between original box and SAM refined box
+                inter_x1, inter_y1 = max(x1, rx1), max(y1, ry1)
+                inter_x2, inter_y2 = min(x2, rx2), min(y2, ry2)
+                inter_w = max(0.0, inter_x2 - inter_x1)
+                inter_h = max(0.0, inter_y2 - inter_y1)
+                inter_area = inter_w * inter_h
+                orig_area = orig_w * orig_h
+                refined_area = rw * rh
+                union_area = orig_area + refined_area - inter_area
+                iou = inter_area / max(union_area, 1e-6)
+
+                # Center distance check: ensure center hasn't shifted wildly
+                cx_orig, cy_orig = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                cx_ref, cy_ref = (rx1 + rx2) / 2.0, (ry1 + ry2) / 2.0
+                center_dist = ((cx_orig - cx_ref) ** 2 + (cy_orig - cy_ref) ** 2) ** 0.5
+                max_center_shift = 0.35 * ((orig_w ** 2 + orig_h ** 2) ** 0.5)
+
+                # Strict sanity check:
+                # 1. IoU >= 0.35 (refinement must be consistent with detector box)
+                # 2. Dimensions cannot explode beyond 1.25x or collapse below 2px
+                # 3. Center shift cannot be wild
+                if (iou >= 0.35 and rw >= 2 and rh >= 2 and
+                    rw <= orig_w * 1.25 and rh <= orig_h * 1.25 and
+                    center_dist <= max_center_shift):
                     refined_box = np.array([rx1, ry1, rx2, ry2], dtype=np.float32)
                     t.boxes[f] = (refined_box, score, det_idx, kind)
                     t.segmentations[f] = poly
@@ -623,6 +659,9 @@ def run_autopilot(source, cfg, progress=None, is_cancelled=None, log=print, work
     # -------------------------------------------------------- 3b. SAM refinement
     if cfg.refine_with_sam and tracks:
         _refine_tracks_with_sam(source, tracks, cfg, progress=progress, is_cancelled=is_cancelled, log=log)
+        # Re-interpolate gap frames so they smoothly bridge newly refined detection anchors
+        if getattr(cfg, 'enable_gap_fill', True):
+            repairer.fill_gaps(tracks)
 
     # -------------------------------------------------------------------- 4. risk
     by_frame = {}

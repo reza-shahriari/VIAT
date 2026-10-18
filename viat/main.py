@@ -796,20 +796,20 @@ class VideoAnnotationTool(QMainWindow):
             act.triggered.connect(lambda: self.view_labeler_analytics())
             
             
-        # Keep the top-level menu order readable: Dataset belongs immediately
-        # before Help rather than being appended after Help by this late
-        # feature-menu injection.
+        # Keep Dataset next to File.  This method runs after the regular menu
+        # bar has been created, so insert it before Edit instead of appending it
+        # at the far right.
         dataset_menu = QMenu('&Dataset', self)
-        help_action = next(
+        edit_action = next(
             (
                 action
                 for action in menubar.actions()
-                if action.text().replace('&', '') == 'Help'
+                if action.text().replace('&', '') == 'Edit'
             ),
             None,
         )
-        if help_action is not None:
-            menubar.insertMenu(help_action, dataset_menu)
+        if edit_action is not None:
+            menubar.insertMenu(edit_action, dataset_menu)
         else:
             menubar.addMenu(dataset_menu)
         img_menu = dataset_menu.addMenu('Image Dataset Operations')

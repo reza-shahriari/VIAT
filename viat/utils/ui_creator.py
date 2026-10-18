@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (
     QSpinBox,
     QCheckBox,
     QMainWindow,
-    QTabWidget
+    QTabWidget,
+    QMenu,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
@@ -1647,7 +1648,20 @@ class UICreator:
             getattr(self.main_window, "toolbar", None), "review_menu", None
         )
         if interpolation_menu is None:
-            interpolation_menu = self.main_window.menuBar().addMenu("&Interpolation")
+            menubar = self.main_window.menuBar()
+            interpolation_menu = QMenu("&Interpolation", self.main_window)
+            help_action = next(
+                (
+                    action
+                    for action in menubar.actions()
+                    if action.text().replace("&", "") == "Help"
+                ),
+                None,
+            )
+            if help_action is not None:
+                menubar.insertMenu(help_action, interpolation_menu)
+            else:
+                menubar.addMenu(interpolation_menu)
         else:
             interpolation_menu.addSeparator()
         
@@ -1715,4 +1729,3 @@ class UICreator:
         # Initially hide the toolbar until interpolation mode is activated
         interpolation_toolbar.setVisible(False)
         self.main_window.interpolation_toolbar = interpolation_toolbar
-

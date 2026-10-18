@@ -264,19 +264,23 @@ class Repairer:
 
     # ------------------------------------------------------------- 4. gap filling
     def fill_gaps(self, tracks):
+        if not getattr(self.cfg, 'enable_gap_fill', True):
+            return tracks
         max_gap = max(1, int(round(self.cfg.gap_fill_sec * self.fps)))
         for t in tracks:
-            frames = t.frames
+            # Only interpolate between real detection/extension anchors, not previous interpolations
+            frames = sorted([f for f in t.boxes if t.boxes[f][3] in ('d', 'e')])
             for f0, f1 in zip(frames[:-1], frames[1:]):
                 gap = f1 - f0
                 if gap <= 1 or gap - 1 > max_gap:
                     continue
-                b0 = self.path.to_ref(f0, t.boxes[f0][0])
-                b1 = self.path.to_ref(f1, t.boxes[f1][0])
+                b0 = np.asarray(t.boxes[f0][0], dtype=np.float32)
+                b1 = np.asarray(t.boxes[f1][0], dtype=np.float32)
                 score = min(t.boxes[f0][1], t.boxes[f1][1])
                 for f in range(f0 + 1, f1):
-                    a = (f - f0) / gap
-                    t.boxes[f] = (self.path.from_ref(f, (1 - a) * b0 + a * b1), score, -1, 'i')
+                    a = float(f - f0) / float(gap)
+                    interp_box = (1.0 - a) * b0 + a * b1
+                    t.boxes[f] = (interp_box, score, -1, 'i')
         return tracks
 
     # --------------------------------------------------------------------- run
