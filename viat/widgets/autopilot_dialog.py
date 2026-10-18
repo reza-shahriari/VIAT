@@ -16,6 +16,8 @@ from ..utils.autopilot.weights import is_available, missing_message, KNOWN_WEIGH
 EXTRA_MODELS = [
     ('OWLv2 Base', 'google/owlv2-base-patch16-ensemble'),
     ('OWLv2 Large', 'google/owlv2-large-patch14-ensemble'),
+    ('Rex-Omni (Transformers)', 'IDEA-Research/Rex-Omni'),
+    ('Rex-Omni AWQ (vLLM)', 'IDEA-Research/Rex-Omni-AWQ'),
 ]
 JUDGE_INFO = [
     ('clip', 'CLIP crop check (cheap; class confusion, parts, shadows)'),
@@ -42,8 +44,8 @@ ADVANCED = [
     ('min_hits', 'Confirm after (detections)', 1, 20, 1, 0, 'A tentative track becomes real after this many matched detections.'),
     ('max_lost_sec', 'Keep lost track (s)', 0.1, 10.0, 0.1, 1, 'How long a lost object may stay unseen before its track ends.'),
     ('ext_max_sec', 'Extend tracks up to (s)', 0.0, 10.0, 0.5, 1, 'Walk each track backward/forward along weak detections.'),
-    ('gap_fill_sec', 'Fill gaps up to (s)', 0.0, 10.0, 0.5, 1, 'Interpolate (camera-compensated) gaps up to this length.'),
-    ('link_gap_sec', 'Join fragments across (s)', 0.0, 10.0, 0.5, 1, 'Join two tracks of the same object separated by up to this gap.'),
+    ('gap_fill_sec', 'Fill gaps up to (s)', 0.0, 5.0, 0.1, 2, 'Interpolate missing frames between confirmed detections up to this duration.'),
+    ('link_gap_sec', 'Join fragments across (s)', 0.0, 5.0, 0.1, 2, 'Join two tracks of the same object separated by up to this gap.'),
     ('review_risk', 'Review if risk >=', 0.05, 0.95, 0.05, 2, 'Tracks at or above this risk go to the review list.'),
     ('miss_score', 'Possible-miss score', 0.05, 0.9, 0.05, 2, 'Untracked candidates this confident that persist are listed as possible misses.'),
     ('audit_size', 'Audit sample (frames)', 5, 1000, 5, 0, 'Random frames to check. 0 errors in 59 frames proves <=5%, in 299 proves <=1%.'),
@@ -245,6 +247,12 @@ class AutopilotDialog(QDialog):
             item.setData(Qt.UserRole, key)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if key in chosen and available else Qt.Unchecked)
+            if key.startswith('IDEA-Research/Rex-Omni'):
+                item.setToolTip(
+                    'Rex-Omni returns boxes without calibrated confidence scores. '
+                    'Use it with another scored detector; Autopilot treats it as a '
+                    'vote/judge and does not let it start tracks by itself.'
+                )
             if not available:  # never download: show what is needed instead
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                 item.setToolTip(missing_message(key))
@@ -330,11 +338,17 @@ class AutopilotDialog(QDialog):
         form.addRow('Quality:', self.preset)
         lay.addLayout(form)
 
-        # ---------------------------------------------------------------- output
+        # ---------------------------------------------------------------- output & gaps
+        self.enable_gap_fill = QCheckBox('Fill detection gaps (smooth interpolation between confirmed detections)')
+        self.enable_gap_fill.setChecked(getattr(last, 'enable_gap_fill', True))
+        self.enable_gap_fill.setToolTip(
+            'Interpolates missing frames between confirmed detections using linear motion.\n'
+            'Uncheck if you want strictly real model detections without interpolated boxes.')
         self.replace_prev = QCheckBox('Replace earlier Autopilot boxes in this range (manual labels are kept)')
         self.replace_prev.setChecked(True)
         self.skip_existing = QCheckBox('Skip objects that are already labeled (overlap >= 60%)')
         self.skip_existing.setChecked(True)
+        lay.addWidget(self.enable_gap_fill)
         lay.addWidget(self.replace_prev)
         lay.addWidget(self.skip_existing)
 
@@ -511,6 +525,7 @@ class AutopilotDialog(QDialog):
                               refine_with_sam=self.refine_with_sam.isChecked(),
                               sam_refine_model=self.sam_refine_model.currentData(),
                               fusion_box_mode=self.fusion_box_mode.currentData(),
+                              enable_gap_fill=self.enable_gap_fill.isChecked(),
                               cut_detection=self.cut_detection.isChecked(),
                               video_calibration=self.video_calibration.isChecked(),
                               judges=[k for k, cb in self.judge_checks.items() if cb.isChecked()],

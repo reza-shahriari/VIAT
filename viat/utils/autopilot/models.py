@@ -15,6 +15,7 @@ except ImportError:
 
 from ..zero_shot_manager import ZeroShotManager
 from .geometry import box_nms
+from .rex_omni_backend import RexOmniBackend
 from .weights import resolve_hf, resolve_file, missing_message, CHECKPOINTS
 
 try:
@@ -256,6 +257,8 @@ class Owlv2Backend(Backend):
 
 def make_backend(key, log=print, cfg=None):
     k = key.lower()
+    if 'rex-omni' in k or 'rex_omni' in k:
+        return RexOmniBackend(key, log, cfg)
     if 'grounding-dino' in k or 'groundingdino' in k:
         return GroundingDinoBackend(key, log, cfg)
     if 'owlv2' in k or 'owlvit' in k:

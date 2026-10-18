@@ -21,6 +21,8 @@ KNOWN_WEIGHTS = {
     'openai/clip-vit-large-patch14': ('CLIP-L judge (more accurate)', '~1.7 GB'),
     'Qwen/Qwen2.5-VL-7B-Instruct': ('vision-language judge', '~16 GB'),
     'Qwen/Qwen3-VL-8B-Instruct': ('vision-language judge', '~17 GB'),
+    'IDEA-Research/Rex-Omni': ('Rex-Omni 3B detector (Transformers)', '~7 GB'),
+    'IDEA-Research/Rex-Omni-AWQ': ('Rex-Omni 3B detector (AWQ/vLLM)', '~4 GB'),
     'sam3.1_l.pt': ('SAM 3 text detector and zoom-in judge', '~3.4 GB'),
     'sam3_l.pt': ('SAM 3 Large refiner', '~3.4 GB'),
     'sam3_s.pt': ('SAM 3 Small refiner', '~0.5 GB'),
